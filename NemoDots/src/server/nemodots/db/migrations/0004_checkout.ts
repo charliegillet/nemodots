@@ -25,6 +25,16 @@
 // The BEFORE INSERT OR UPDATE trigger on config_entries and the BEFORE INSERT
 // trigger on config_versions null caused_by_action_id unless the writing role
 // is nemodots_app (I14): the marker is server-authored only.
+//
+// The database also enforces what advanceConfig promises, so that no writer
+// role can bypass it with raw DML (a receipt at an old version must stop being
+// current, and the C7 history walk must have no gaps):
+//   - BEFORE INSERT/UPDATE guard on config_entries: a key never changes, the
+//     version never goes down, a value change advances it by exactly one, and
+//     an insert starts above every version already recorded for the key
+//   - DEFERRED constraint trigger: at commit every version advance has a
+//     matching config_versions row (same key, version and value) and every
+//     delete has its tombstone (value NULL at version + 1)
 import type { Migration } from '../migrate.js';
 
 const migration: Migration = {
@@ -140,6 +150,75 @@ $$`);
 CREATE TRIGGER config_versions_immutable
   BEFORE UPDATE OR DELETE ON checkout.config_versions
   FOR EACH ROW EXECUTE FUNCTION checkout.config_versions_append_only()`);
+
+    await client.query(`
+CREATE FUNCTION checkout.config_entries_guard() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+  recorded bigint;
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    SELECT COALESCE(max(version), 0) INTO recorded
+      FROM checkout.config_versions WHERE key = NEW.key;
+    IF NEW.version <= recorded THEN
+      RAISE EXCEPTION 'config key % must be inserted above its recorded version % (got %)',
+        NEW.key, recorded, NEW.version
+        USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF NEW.key IS DISTINCT FROM OLD.key THEN
+    RAISE EXCEPTION 'config key cannot be renamed'
+      USING ERRCODE = 'integrity_constraint_violation';
+  END IF;
+  IF NEW.version < OLD.version
+     OR NEW.version > OLD.version + 1
+     OR (NEW.version = OLD.version AND NEW.value IS DISTINCT FROM OLD.value) THEN
+    RAISE EXCEPTION 'config version of % may only advance by one together with its value (% -> %)',
+      OLD.key, OLD.version, NEW.version
+      USING ERRCODE = 'integrity_constraint_violation';
+  END IF;
+  RETURN NEW;
+END
+$$`);
+    await client.query(`
+CREATE TRIGGER config_entries_guard
+  BEFORE INSERT OR UPDATE ON checkout.config_entries
+  FOR EACH ROW EXECUTE FUNCTION checkout.config_entries_guard()`);
+    await client.query(`
+CREATE FUNCTION checkout.config_entries_history_required() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    IF NOT EXISTS (
+      SELECT 1 FROM checkout.config_versions v
+       WHERE v.key = OLD.key AND v.version = OLD.version + 1
+         AND v.value IS NULL AND v.after_digest IS NULL
+    ) THEN
+      RAISE EXCEPTION 'deleting config key % needs its tombstone in checkout.config_versions', OLD.key
+        USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    RETURN NULL;
+  END IF;
+  IF TG_OP = 'UPDATE' AND NEW.version = OLD.version THEN
+    RETURN NULL; -- metadata only (the guard has already refused value changes)
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM checkout.config_versions v
+     WHERE v.key = NEW.key AND v.version = NEW.version
+       AND v.value IS NOT DISTINCT FROM NEW.value
+  ) THEN
+    RAISE EXCEPTION 'config key % version % has no matching row in checkout.config_versions', NEW.key, NEW.version
+      USING ERRCODE = 'integrity_constraint_violation';
+  END IF;
+  RETURN NULL;
+END
+$$`);
+    await client.query(`
+CREATE CONSTRAINT TRIGGER config_entries_history_required
+  AFTER INSERT OR UPDATE OR DELETE ON checkout.config_entries
+  DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW EXECUTE FUNCTION checkout.config_entries_history_required()`);
 
     await client.query(`
 CREATE TABLE control.scenario_runs (

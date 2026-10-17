@@ -259,9 +259,9 @@ describe('/health capacity self-test does not compete with customer traffic', ()
         statuses.push(inventory.status, placed.status);
         expect((await health).body.status).toBe('ok');
       }
-      expect(statuses.filter((status) => status !== 200 && status !== 201)).toEqual(
-        [],
-      );
+      expect(
+        statuses.filter((status) => status !== 200 && status !== 201),
+      ).toEqual([]);
       const metrics = (await s.request('/metrics')).body;
       expect(metrics.errors.windowClasses).toEqual([]);
       expect(metrics.errors.byClass).toEqual({});

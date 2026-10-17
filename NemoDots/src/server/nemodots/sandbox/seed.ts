@@ -17,6 +17,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
+import { migrate } from '../db/migrate.js';
 import { withTransaction } from '../db/tx.js';
 import { PROBE_SKU, PROBE_SKU_STOCK } from './constants.js';
 import { loadConfig, roleUrl } from './runtime-env.js';
@@ -340,6 +341,18 @@ async function main(argv: string[]) {
     return 2;
   }
   const config = loadConfig();
+  // `nemodots:stack start` does not migrate, so a freshly initialised instance
+  // has no checkout schema yet. The seed brings the schema up to date first
+  // (idempotent: a migrated database is left alone) instead of failing with
+  // 'relation "checkout.products" does not exist'.
+  const migrated = await migrate({
+    connectionString: roleUrl(config, 'admin'),
+    log: (line) => console.log(`seed: migrate: ${line}`),
+  });
+  if (migrated.unknown.length)
+    throw new Error(
+      `database has migrations this build does not know: ${migrated.unknown.join(', ')}`,
+    );
   const pool = new pg.Pool({
     connectionString: roleUrl(config, 'admin'),
     max: 2,

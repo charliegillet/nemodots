@@ -383,9 +383,9 @@ describe('readers: controlled config sources', () => {
         }
       ).collectionVersion;
       expect(collectionNow).toBeGreaterThan(absent.revisionHint as number);
-      expect((absent.raw as { collectionRevision: number }).collectionRevision).toBe(
-        collectionNow,
-      );
+      expect(
+        (absent.raw as { collectionRevision: number }).collectionRevision,
+      ).toBe(collectionNow);
       await insert(true);
       const again = await read(s, `checkout.config/${key}`);
       expect(again.revisionHint).toBe(bump.versionAfter + 2);
@@ -408,13 +408,16 @@ describe('readers: controlled config sources', () => {
         now: s.clock.now,
         probeSecret: s.probeSecret,
       });
-      const value = (await tagged.read('checkout.inventory/SKU-0001' as SourceKey, scope))
-        .normalizedValue as { consistent: boolean };
+      const value = (
+        await tagged.read('checkout.inventory/SKU-0001' as SourceKey, scope)
+      ).normalizedValue as { consistent: boolean };
       expect(value.consistent).toBe(true);
       expect((await s.request('/metrics')).body.requests.total).toBe(0);
       // without the secret the read is ordinary tracked traffic
       await read(s, 'checkout.inventory/SKU-0001');
-      expect((await s.request('/metrics')).body.requests.total).toBeGreaterThan(0);
+      expect((await s.request('/metrics')).body.requests.total).toBeGreaterThan(
+        0,
+      );
     });
   });
 

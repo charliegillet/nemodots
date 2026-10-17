@@ -24,6 +24,8 @@ import {
 import {
   claimStart,
   count,
+  insertLedgerReceipt,
+  ledgerProbeReceipt,
   plannedMission,
   probeReceipt,
   taskRow,
@@ -197,7 +199,7 @@ it('succeeded requires a supported probe receipt with verdict pass for this miss
     await expect(
       h.coordinator.control.completeAcceptance(
         planned.missionId,
-        probeReceipt(planned.missionId, 'pass'),
+        (await ledgerProbeReceipt(h, planned.missionId, 'pass')).id,
       ),
     ).rejects.toBeInstanceOf(MissionStateError);
     await finishAll(h, planned.taskIds);
@@ -231,19 +233,28 @@ it('succeeded requires a supported probe receipt with verdict pass for this miss
         }),
       ],
     ];
-    for (const [label, receipt] of bad)
+    for (const [label, receipt] of bad) {
+      await insertLedgerReceipt(h.admin, receipt);
       await expect(
-        h.coordinator.control.completeAcceptance(planned.missionId, receipt),
+        h.coordinator.control.completeAcceptance(planned.missionId, receipt.id),
         label,
       ).rejects.toBeInstanceOf(AcceptanceRejectedError);
+    }
+    // An id the ledger never saw (a forged receipt) is refused too.
+    await expect(
+      h.coordinator.control.completeAcceptance(
+        planned.missionId,
+        probeReceipt(planned.missionId, 'pass').id,
+      ),
+    ).rejects.toBeInstanceOf(AcceptanceRejectedError);
     expect((await h.coordinator.control.get(planned.missionId)).status).toBe(
       'awaiting_acceptance',
     );
 
-    const pass = probeReceipt(planned.missionId, 'pass');
+    const pass = await ledgerProbeReceipt(h, planned.missionId, 'pass');
     const done = await h.coordinator.control.completeAcceptance(
       planned.missionId,
-      pass,
+      pass.id,
     );
     expect(done.status).toBe('succeeded');
     expect(done.acceptanceReceiptId).toBe(pass.id);
@@ -274,7 +285,7 @@ it('a failing acceptance probe returns the mission to running with a replan; wit
     await finishAll(h, planned.taskIds);
     const mission = await h.coordinator.control.completeAcceptance(
       planned.missionId,
-      probeReceipt(planned.missionId, 'fail'),
+      (await ledgerProbeReceipt(h, planned.missionId, 'fail')).id,
     );
     expect(mission.status).toBe('running');
     const planner = (
@@ -292,7 +303,7 @@ it('a failing acceptance probe returns the mission to running with a replan; wit
       await finishAll(h, planned.taskIds);
       const mission = await h.coordinator.control.completeAcceptance(
         planned.missionId,
-        probeReceipt(planned.missionId, 'fail'),
+        (await ledgerProbeReceipt(h, planned.missionId, 'fail')).id,
       );
       expect(mission.status).toBe('failed');
       expect(mission.failureReason).toMatch(/acceptance probe failed/);

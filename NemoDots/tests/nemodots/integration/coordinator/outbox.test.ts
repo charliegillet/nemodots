@@ -48,11 +48,12 @@ it('duplicate delivery of one message applies its database effect exactly once',
           await client.query('UPDATE public.coord_effects SET n = n + 1');
         });
       };
-    // claimMs is shorter than the first handler's runtime: the lease lapses
+    // worker-1 stalls mid-handler and stops renewing its claim: the lease lapses
     // and a second worker legitimately receives the same message (at-least-once).
     const first = createOutbox(h.coordinator.deps, {
       workerId: 'worker-1',
       claimMs: 80,
+      renewClaim: false,
       handlers: { 'test.effect': handlerFor('worker-1', true) as never },
     });
     const second = createOutbox(h.coordinator.deps, {

@@ -78,13 +78,15 @@ CREATE TABLE coordinator.missions (
   admission_min_age_ms integer NOT NULL DEFAULT 0
     CHECK (admission_min_age_ms BETWEEN 0 AND 60000),
   provider jsonb NOT NULL,
-  acceptance_receipt_id uuid,
+  acceptance_receipt_id uuid REFERENCES ledger.observation_receipts (id),
   failure_reason text,
   cancellation jsonb,
   created_at timestamptz NOT NULL DEFAULT now(),
   started_at timestamptz,
   finished_at timestamptz,
-  CHECK (cancellation IS NULL OR status = 'cancelled')
+  CHECK (cancellation IS NULL OR status = 'cancelled'),
+  -- Mission success rests on a probe receipt that exists in the ledger.
+  CHECK (status <> 'succeeded' OR acceptance_receipt_id IS NOT NULL)
 )`);
     await q(
       'CREATE INDEX missions_status_idx ON coordinator.missions (status, created_at)',
@@ -130,6 +132,15 @@ CREATE TABLE coordinator.tasks (
     await q(
       'CREATE INDEX tasks_mission_status_idx ON coordinator.tasks (mission_id, status)',
     );
+    // At most one open postcondition task per mission (recovery serialises its
+    // check-then-insert under the task-graph lock; this is the backstop).
+    // `invalidated` and `repairing` are deliberately outside the index: the
+    // ledger closure may move a succeeded postcondition task to `invalidated`
+    // in its own transaction and that UPDATE must never be refused.
+    await q(`
+CREATE UNIQUE INDEX tasks_one_open_postcondition_idx ON coordinator.tasks (mission_id)
+ WHERE role = 'postcondition'
+   AND status IN ('pending', 'runnable', 'leased', 'running', 'waiting')`);
     await q(
       'CREATE INDEX tasks_parent_idx ON coordinator.tasks (parent_id) WHERE parent_id IS NOT NULL',
     );

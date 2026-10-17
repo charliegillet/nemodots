@@ -20,7 +20,7 @@ import {
   eventKinds,
   invalidationFor,
   plannedMission,
-  probeReceipt,
+  ledgerProbeReceipt,
   recoveryKinds,
   taskRow,
   vectorOf,
@@ -285,9 +285,9 @@ it('succeeded is refused while an invalidation is open and reachable once the re
         attemptIds: [],
       });
       await h.coordinator.onInvalidation(event);
-      const pass = probeReceipt(planned.missionId, 'pass');
+      const pass = await ledgerProbeReceipt(h, planned.missionId, 'pass');
       await expect(
-        h.coordinator.control.completeAcceptance(planned.missionId, pass),
+        h.coordinator.control.completeAcceptance(planned.missionId, pass.id),
       ).rejects.toSatisfy(
         (error: unknown) =>
           error instanceof OpenInvalidationsError &&
@@ -317,7 +317,7 @@ it('succeeded is refused while an invalidation is open and reachable once the re
 
       const done = await h.coordinator.control.completeAcceptance(
         planned.missionId,
-        pass,
+        pass.id,
       );
       expect(done.status).toBe('succeeded');
       expect(done.acceptanceReceiptId).toBe(pass.id);

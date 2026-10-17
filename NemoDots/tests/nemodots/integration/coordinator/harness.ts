@@ -33,6 +33,7 @@ import {
   invalidationEventId,
 } from '../../../../src/server/nemodots/contracts/index.js';
 import type {
+  EventSinkPort,
   ActionId,
   ActionStatus,
   AttemptContext,
@@ -271,6 +272,8 @@ export async function withHarness<T>(
     const probe: ProbePort = {
       async run() {
         if (!probeState.receipt) throw new Error('no probe receipt configured');
+        // The real probe registers its receipt in the ledger before returning.
+        await insertLedgerReceipt(admin, probeState.receipt);
         return probeState.receipt;
       },
     };
@@ -546,6 +549,63 @@ export function probeReceipt(
 }
 
 /**
+ * Registers a receipt object in the ledger tables (what the ledger's receipt
+ * store does in production), so the coordinator's read-only SQL finds it. A
+ * receipt that is not inserted exists nowhere, exactly like a forged one.
+ */
+export async function insertLedgerReceipt(
+  admin: pg.Pool,
+  receipt: ObservationReceipt,
+): Promise<void> {
+  const scope = receipt.source.scope;
+  const source = await admin.query<{ id: string }>(
+    `INSERT INTO ledger.sources (id, owner_id, environment, resource, key, source_type, authority)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (owner_id, environment, resource, key) DO UPDATE SET key = EXCLUDED.key
+     RETURNING id`,
+    [
+      randomUUID(),
+      scope.ownerId,
+      scope.environment,
+      scope.resource,
+      receipt.source.key,
+      receipt.source.sourceType,
+      receipt.source.authority,
+    ],
+  );
+  await admin.query(
+    `INSERT INTO ledger.observation_receipts
+       (id, source_id, source_revision, mission_id, content_digest,
+        normalized_value, status, trust, provenance_kind)
+     VALUES ($1, $2,
+       (SELECT COALESCE(max(source_revision) + 1, 0)
+          FROM ledger.observation_receipts WHERE source_id = $2),
+       $3, $4, $5::jsonb, $6, $7, 'probe')`,
+    [
+      receipt.id,
+      source.rows[0].id,
+      scope.missionId,
+      receipt.contentDigest,
+      JSON.stringify(receipt.normalizedValue),
+      receipt.status,
+      receipt.trust,
+    ],
+  );
+}
+
+/** Builds a probe receipt AND registers it in the ledger. */
+export async function ledgerProbeReceipt(
+  h: Pick<Harness, 'admin'>,
+  missionId: MissionId,
+  verdict: 'pass' | 'fail',
+  overrides: Partial<ObservationReceipt> = {},
+): Promise<ObservationReceipt> {
+  const built = probeReceipt(missionId, verdict, overrides);
+  await insertLedgerReceipt(h.admin, built);
+  return built;
+}
+
+/**
  * A hand-enumerated InvalidationEvent for one mission: exactly the affected and
  * preserved sets the test names (the ledger's closure computes these in
  * production; recovery trusts them).
@@ -596,4 +656,87 @@ export function invalidationFor(input: {
     resolvedAt: null,
     createdAt: new Date().toISOString(),
   });
+}
+
+/**
+ * A coordinator over the same deps whose event sink parks every append of an
+ * event of `kind` until `parties` such appends arrived (or `timeoutMs`). Events
+ * are appended as the LAST statements of a transaction, so this holds `parties`
+ * transactions just before COMMIT, i.e. after all their other statements ran
+ * against snapshots that cannot see each other.
+ */
+export function barrierCoordinator(
+  h: Harness,
+  kind: string,
+  parties: number,
+  timeoutMs = 600,
+): Coordinator {
+  const real = h.coordinator.deps.events;
+  let arrived = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const sink: EventSinkPort = {
+    async append(client, event) {
+      if (event.kind === kind) {
+        arrived += 1;
+        if (arrived >= parties) release();
+        await Promise.race([gate, sleep(timeoutMs)]);
+      }
+      return real.append(client, event);
+    },
+  };
+  return createCoordinator({ ...h.coordinator.deps, events: sink });
+}
+
+/** One line per settled promise: `fulfilled` or `Name:code:message`. */
+export const describeSettled = (result: PromiseSettledResult<unknown>) =>
+  result.status === 'rejected'
+    ? `${(result.reason as Error).name}:${(result.reason as { code?: string }).code ?? ''}:${(result.reason as Error).message.slice(0, 90)}`
+    : 'fulfilled';
+
+/**
+ * Registers an InvalidationEvent in the ledger's table (what the closure
+ * transaction commits BEFORE the watcher calls RecoveryPort.onInvalidation),
+ * together with the receipts it names. The coordinator has no copy until
+ * onInvalidation runs.
+ */
+export async function insertLedgerInvalidation(
+  admin: pg.Pool,
+  event: InvalidationEvent,
+): Promise<void> {
+  const missionId = event.missionIds[0];
+  const base = probeReceipt(missionId, 'pass');
+  const named = (id: ReceiptId): ObservationReceipt => ({
+    ...base,
+    id,
+    source: { ...base.source, key: event.sourceKey },
+  });
+  await insertLedgerReceipt(admin, named(event.oldReceiptId));
+  if (event.newReceiptId)
+    await insertLedgerReceipt(admin, named(event.newReceiptId));
+  const source = await admin.query<{ id: string }>(
+    `SELECT s.id FROM ledger.observation_receipts r
+       JOIN ledger.sources s ON s.id = r.source_id WHERE r.id = $1`,
+    [event.oldReceiptId],
+  );
+  await admin.query(
+    `INSERT INTO ledger.invalidation_events
+       (id, source_id, source_key, old_receipt_id, new_receipt_id, reason,
+        self_write, graph_version, mission_ids, affected, per_mission, closure)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12::jsonb)`,
+    [
+      event.id,
+      source.rows[0].id,
+      event.sourceKey,
+      event.oldReceiptId,
+      event.newReceiptId,
+      event.reason,
+      event.selfWrite,
+      event.graphVersion,
+      JSON.stringify(event.missionIds),
+      JSON.stringify(event.affected),
+      JSON.stringify(event.perMission),
+      JSON.stringify(event.closure),
+    ],
+  );
 }

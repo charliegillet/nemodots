@@ -14,14 +14,19 @@ import type { CoordinatorDeps } from './types.js';
 // outbox table is the truth).
 //
 // Delivery is at-least-once: a worker claims a message (claimed_until lease),
-// runs the handler OUTSIDE any transaction and then marks it processed. A
-// crash or lease expiry redelivers it. Handlers must therefore be idempotent;
+// runs the handler OUTSIDE any transaction and then marks it processed. The
+// claim is renewed while the handler runs (a long handler such as the
+// acceptance probe never loses its message to a second worker); a crash lets
+// the lease expire and redelivers it. Handlers must therefore be idempotent;
 // handlers whose effect is a database write get exactly-once through
 // `helpers.runOnce(fn)`, which commits the effect and an outbox_applied row
 // together, so a redelivery skips it.
 //
 // Wakeups: an INSERT trigger issues NOTIFY nemodots_outbox; `start()` LISTENs
-// and also polls, so a lost notification only delays processing.
+// and also polls, so a lost notification only delays processing. In the
+// background loop handlers run concurrently (up to batchSize in flight) and
+// maintenance (reaper, recovery sweep) runs beside them, so one slow handler
+// blocks neither other messages nor the reaper.
 
 export const OUTBOX_CHANNEL = 'nemodots_outbox';
 
@@ -84,8 +89,16 @@ export async function enqueueOutbox(
 export interface OutboxOptions {
   workerId: string;
   handlers: Record<string, OutboxHandler>;
-  /** How long a claimed message is invisible to other workers (default 30 s). */
+  /**
+   * How long a claimed message is invisible to other workers (default 30 s).
+   * Renewed every third of this while the handler runs.
+   */
   claimMs?: number;
+  /**
+   * Renew the claim while a handler runs (default true). Turn it off only to
+   * simulate a worker that stalled or crashed mid-handler.
+   */
+  renewClaim?: boolean;
   /** Deliveries before a message is parked as failed (default 8). */
   maxAttempts?: number;
   pollMs?: number;
@@ -123,14 +136,17 @@ export function createOutbox(
   const claimMs = options.claimMs ?? 30_000;
   const maxAttempts = options.maxAttempts ?? 8;
   const pollMs = options.pollMs ?? 1_000;
+  const batchSize = options.batchSize ?? 10;
   let listener: pg.Client | null = null;
   let timer: NodeJS.Timeout | null = null;
-  let running = false;
   let stopped = true;
   let wake: (() => void) | null = null;
   /** A notification arrived since the current cycle began (it may have raced the drain). */
   let dirty = false;
   let loop: Promise<void> | null = null;
+  let maintaining = false;
+  /** Handlers (and maintenance) running in the background loop. */
+  const inflight = new Set<Promise<void>>();
 
   const report = (error: unknown, message?: OutboxMessage) => {
     if (options.onError) options.onError(error, message);
@@ -224,15 +240,32 @@ export function createOutbox(
           return { applied: true as const, value: await fn(client) };
         }),
     };
+    // Keep the claim alive for as long as the handler runs.
+    const renew = setInterval(
+      () => {
+        if (options.renewClaim === false) return;
+        deps.pool
+          .query(
+            `UPDATE coordinator.outbox
+                SET claimed_until = clock_timestamp() + $3 * interval '1 millisecond'
+              WHERE id = $1 AND claimed_by = $2 AND processed_at IS NULL`,
+            [message.id, options.workerId, claimMs],
+          )
+          .catch((error: unknown) => report(error, message));
+      },
+      Math.max(20, Math.floor(claimMs / 3)),
+    );
     try {
       await settle(message, await handler(message, helpers));
     } catch (error) {
       report(error, message);
       await fail(message, error);
+    } finally {
+      clearInterval(renew);
     }
   }
 
-  async function processBatch(limit = options.batchSize ?? 10) {
+  async function processBatch(limit = batchSize) {
     const messages = await claim(limit);
     for (const message of messages) await run(message);
     return messages.length;
@@ -248,16 +281,39 @@ export function createOutbox(
     return total;
   }
 
+  function track(work: Promise<void>, wakeWhenDone: boolean) {
+    const done: Promise<void> = work
+      .catch((error: unknown) => report(error))
+      .finally(() => {
+        inflight.delete(done);
+        // A freed slot may let the next ready message start right away.
+        if (wakeWhenDone) {
+          dirty = true;
+          wake?.();
+        }
+      });
+    inflight.add(done);
+  }
+
+  /** One loop cycle: start handlers for ready messages and the maintenance step, without awaiting them. */
   async function tick() {
-    if (running || stopped) return;
-    running = true;
-    try {
-      await drain();
-      if (options.maintenance) await options.maintenance();
-    } catch (error) {
-      report(error);
-    } finally {
-      running = false;
+    if (stopped) return;
+    const capacity = batchSize - inflight.size;
+    if (capacity > 0) {
+      const messages = await claim(capacity);
+      for (const message of messages) track(run(message), true);
+      // More may be ready: go around again without sleeping.
+      if (messages.length === capacity) dirty = true;
+    }
+    if (options.maintenance && !maintaining) {
+      maintaining = true;
+      const maintenance = options.maintenance;
+      track(
+        maintenance().finally(() => {
+          maintaining = false;
+        }),
+        false,
+      );
     }
   }
 
@@ -283,7 +339,11 @@ export function createOutbox(
       loop = (async () => {
         while (!stopped) {
           dirty = false;
-          await tick();
+          try {
+            await tick();
+          } catch (error) {
+            report(error);
+          }
           // A wakeup that raced the tick must not wait for the next poll.
           if (dirty || stopped) continue;
           await new Promise<void>((resolve) => {
@@ -304,6 +364,7 @@ export function createOutbox(
       if (timer) clearTimeout(timer);
       await loop;
       loop = null;
+      await Promise.allSettled([...inflight]);
       if (listener) {
         const client = listener;
         listener = null;

@@ -364,3 +364,127 @@ describe('delays, prerequisites and membership steps', () => {
     });
   });
 });
+
+describe('run teardown does not depend on the success path', () => {
+  const listeners = async (s: Sandbox) =>
+    Number(
+      (
+        await s.pools.admin.query(
+          `SELECT count(*) AS n FROM pg_stat_activity
+            WHERE application_name = 'nemodots-injector-listen'
+              AND datname = current_database()`,
+        )
+      ).rows[0].n,
+    );
+
+  /** An injector pool whose bookkeeping UPDATE of fault_schedules fails `times` times. */
+  const flakyBookkeeping = (s: Sandbox, times: number) => {
+    let remaining = times;
+    const pool = s.pools.injector;
+    const wrapper = Object.create(pool) as typeof pool;
+    wrapper.query = ((text: unknown, ...rest: unknown[]) => {
+      if (
+        remaining > 0 &&
+        typeof text === 'string' &&
+        /UPDATE control\.fault_schedules/.test(text)
+      ) {
+        remaining -= 1;
+        return Promise.reject(new Error('injected bookkeeping failure'));
+      }
+      return (pool.query as (...args: unknown[]) => unknown)(text, ...rest);
+    }) as typeof pool.query;
+    return wrapper;
+  };
+
+  it('a failing bookkeeping write ends the LISTEN connection, cancels armed steps and marks the run failed', async () => {
+    await withSandbox(async (s) => {
+      const injector = new Injector({
+        pool: flakyBookkeeping(s, 1),
+        listenUrl: s.db.urls.injector,
+      });
+      const run = await injector.start(
+        manifest([
+          {
+            kind: 'set_config',
+            key: 'ui.banner_text',
+            value: 'first',
+            trigger: { type: 'delay', delayMs: 100 },
+          },
+          {
+            kind: 'dependent_change_after_proposal',
+            values: { 'db.pool_max': 2 },
+            timeoutMs: 120_000,
+          },
+        ]),
+        1,
+      );
+      expect(await listeners(s)).toBe(1);
+      const summary = await Promise.race([
+        run.done,
+        new Promise<null>((r) => setTimeout(() => r(null), 5_000)),
+      ]);
+      expect(
+        summary,
+        'done must settle without waiting for the 120 s timer',
+      ).not.toBeNull();
+      expect(summary!.status).toBe('failed');
+      expect(summary!.bookkeepingErrors).toEqual([
+        'injected bookkeeping failure',
+      ]);
+      expect(summary!.steps[1]).toMatchObject({
+        status: 'skipped',
+        error: 'cancelled',
+      });
+      // the dedicated LISTEN connection is gone ...
+      const deadline = Date.now() + 3_000;
+      while ((await listeners(s)) > 0 && Date.now() < deadline)
+        await new Promise((r) => setTimeout(r, 20));
+      expect(await listeners(s)).toBe(0);
+      // ... the run is not left 'running' ...
+      const row = await s.pools.verifier.query(
+        'SELECT status, finished_at FROM control.scenario_runs WHERE id = $1',
+        [run.runId],
+      );
+      expect(row.rows[0].status).toBe('failed');
+      expect(row.rows[0].finished_at).not.toBeNull();
+      // ... and a proposal arriving afterwards applies nothing
+      await notifyProposed(s.pools.app, 'db.pool_max');
+      await new Promise((r) => setTimeout(r, 300));
+      expect(await versionOf(s, 'db.pool_max')).toBe(1);
+    });
+  });
+
+  it('start() fails closed when LISTEN cannot be established: the run is recorded failed, nothing stays pending', async () => {
+    await withSandbox(async (s) => {
+      const injector = new Injector({
+        pool: s.pools.injector,
+        listenUrl: 'postgres://nemodots_injector:x@127.0.0.1:1/none',
+      });
+      await expect(
+        injector.start(
+          manifest([
+            {
+              kind: 'dependent_change_after_proposal',
+              values: { 'db.pool_max': 2 },
+              timeoutMs: 60_000,
+            },
+          ]),
+          1,
+        ),
+      ).rejects.toThrow();
+      const runs = await s.pools.verifier.query(
+        'SELECT status, finished_at FROM control.scenario_runs',
+      );
+      expect(runs.rows).toHaveLength(1);
+      expect(runs.rows[0].status).toBe('failed');
+      expect(runs.rows[0].finished_at).not.toBeNull();
+      const steps = await s.pools.verifier.query(
+        'SELECT status, error FROM control.fault_schedules',
+      );
+      expect(steps.rows).toEqual([
+        { status: 'failed', error: 'listener_unavailable' },
+      ]);
+      expect(await versionOf(s, 'db.pool_max')).toBe(1);
+    });
+  });
+});

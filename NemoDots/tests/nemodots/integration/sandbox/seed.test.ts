@@ -1,9 +1,14 @@
 // The deterministic seed: shape, idempotence and the baseline config.
+import { spawn } from 'node:child_process';
+import pg from 'pg';
 import { expect, it } from 'vitest';
+import { withTestDatabase } from '../../helpers/test-db.js';
+import { withTestRedis } from '../../helpers/test-redis.js';
 import {
   HEALTHY_BASELINE,
   seedCheckout,
 } from '../../../../src/server/nemodots/sandbox/seed.js';
+import { advanceConfigTx } from '../../../../src/server/nemodots/sandbox/version-authority.js';
 import { withSandbox } from './harness.js';
 
 const snapshot = async (pool: import('pg').Pool) => {
@@ -95,9 +100,12 @@ it('is idempotent: a second run changes nothing, including config versions and h
 
 it('does not rewind a changed config unless asked; --reset-config restores through the version authority', async () => {
   await withSandbox(async ({ pools }) => {
-    await pools.injector.query(
-      "UPDATE checkout.config_entries SET value = '1'::jsonb, version = version + 1 WHERE key = 'db.pool_max'",
-    );
+    await advanceConfigTx(pools.injector, {
+      key: 'db.pool_max',
+      value: 1,
+      expectedVersion: 1,
+      causedBy: { actor: 'injector' },
+    });
     const kept = await seedCheckout(pools.admin);
     expect(kept.configRestored).toEqual([]);
     const restored = await seedCheckout(pools.admin, { restoreConfig: true });
@@ -128,4 +136,62 @@ it('keeps stock and replica separate: the replica snapshot is never refreshed by
     await seedCheckout(pools.admin);
     expect(await gap()).toBe(seeded + 5);
   });
+});
+
+it('the seed command migrates a freshly initialised database first (stack start does not), then seeds and is repeatable', async () => {
+  await withTestDatabase(
+    async (db) =>
+      withTestRedis(async (redis) => {
+        const seedCli = () =>
+          new Promise<{ code: number | null; out: string; err: string }>(
+            (resolve) => {
+              const child = spawn(
+                process.execPath,
+                ['--import', 'tsx', 'src/server/nemodots/sandbox/seed.ts'],
+                {
+                  cwd: process.cwd(),
+                  env: {
+                    PATH: process.env.PATH ?? '',
+                    LC_ALL: 'C',
+                    NEMODOTS_PG_URL_ADMIN: db.urls.admin,
+                    NEMODOTS_PG_URL_APP: db.urls.app,
+                    NEMODOTS_PG_URL_INJECTOR: db.urls.injector,
+                    NEMODOTS_PG_URL_VERIFIER: db.urls.verifier,
+                    NEMODOTS_PG_URL_CHECKOUT: db.urls.checkout,
+                    NEMODOTS_PROBE_SECRET: 'seed-test-secret',
+                    NEMODOTS_REDIS_URL: redis.url,
+                  },
+                  stdio: ['ignore', 'pipe', 'pipe'],
+                },
+              );
+              let out = '';
+              let err = '';
+              child.stdout.on('data', (chunk) => (out += chunk));
+              child.stderr.on('data', (chunk) => (err += chunk));
+              child.on('close', (code) => resolve({ code, out, err }));
+            },
+          );
+        const admin = new pg.Pool({ connectionString: db.urls.admin, max: 1 });
+        try {
+          const empty = await admin.query(
+            "SELECT to_regclass('checkout.products') AS t",
+          );
+          expect(empty.rows[0].t).toBeNull();
+          const first = await seedCli();
+          expect(first.err).toBe('');
+          expect(first.code).toBe(0);
+          expect(first.out).toContain('applied 0004_checkout');
+          expect(first.out).toMatch(
+            /24 listed products, 25 inventory rows, 200 orders/,
+          );
+          const second = await seedCli();
+          expect(second.code).toBe(0);
+          expect(second.out).toContain('config inserted 0');
+          expect(second.out).not.toContain('applied');
+        } finally {
+          await admin.end();
+        }
+      }),
+    { migrate: false },
+  );
 });

@@ -53,6 +53,12 @@ export interface RunSummary {
   seed: number;
   status: 'completed' | 'failed' | 'cancelled';
   steps: StepOutcome[];
+  /**
+   * Messages of bookkeeping writes (control.* updates) that failed. A run with
+   * any is reported 'failed' and was torn down: the LISTEN connection is
+   * closed and the steps still waiting are cancelled.
+   */
+  bookkeepingErrors?: string[];
 }
 
 export interface ScenarioRun {
@@ -111,6 +117,9 @@ interface Gate {
   promise: Promise<void>;
   open(): void;
 }
+const errorMessage = (error: unknown) =>
+  error instanceof Error ? error.message : String(error);
+
 const gate = (): Gate => {
   let open!: () => void;
   const promise = new Promise<void>((resolve) => {
@@ -129,31 +138,38 @@ export class Injector {
   async start(manifest: ScenarioManifest, seed: number): Promise<ScenarioRun> {
     const steps = resolveScenario(manifest, seed);
     const runId = randomUUID();
-    await this.deps.pool.query(
-      `INSERT INTO control.scenario_runs (id, scenario_id, seed, manifest_digest, status)
-       VALUES ($1, $2, $3, $4, 'running')`,
-      [runId, manifest.id, seed, manifestDigest(manifest)],
-    );
-    for (const step of steps)
-      await this.deps.pool.query(
-        `INSERT INTO control.fault_schedules
-           (run_id, step_index, kind, config_key, resolved_value, trigger, delay_ms, status)
-         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, 'pending')`,
-        [
-          runId,
-          step.index,
-          step.kind,
-          step.key ?? null,
-          JSON.stringify(step.values ?? step.value),
-          step.trigger,
-          step.delayMs,
-        ],
+    // The run and its schedule are one unit: either both rows exist or neither.
+    await withTransaction(this.deps.pool, async (client) => {
+      await client.query(
+        `INSERT INTO control.scenario_runs (id, scenario_id, seed, manifest_digest, status)
+         VALUES ($1, $2, $3, $4, 'running')`,
+        [runId, manifest.id, seed, manifestDigest(manifest)],
       );
+      for (const step of steps)
+        await client.query(
+          `INSERT INTO control.fault_schedules
+             (run_id, step_index, kind, config_key, resolved_value, trigger, delay_ms, status)
+           VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, 'pending')`,
+          [
+            runId,
+            step.index,
+            step.kind,
+            step.key ?? null,
+            JSON.stringify(step.values ?? step.value),
+            step.trigger,
+            step.delayMs,
+          ],
+        );
+    });
 
     const outcomes = new Map<number, StepOutcome>();
     const settledGates = steps.map(() => gate());
     const timers = new Set<ReturnType<typeof setTimeout>>();
     let cancelled = false;
+    // a bookkeeping failure aborts the run: remaining steps are cancelled
+    let aborted = false;
+    const bookkeepingErrors: string[] = [];
+    const halted = () => cancelled || aborted;
     const cancelGate = gate();
 
     // LISTEN is established before anything is applied or returned, so a
@@ -188,7 +204,7 @@ export class Injector {
       });
       let handled = false;
       const dropped = () => {
-        if (handled || finishing || cancelled) return;
+        if (handled || finishing || halted()) return;
         handled = true;
         if (listener === client) listener = null;
         void recoverListener();
@@ -208,6 +224,12 @@ export class Injector {
         await client.end().catch(() => {});
         throw error;
       }
+      if (finishing || halted()) {
+        // the run ended while this (re)connect was in flight: do not keep it
+        handled = true;
+        await client.end().catch(() => {});
+        return;
+      }
       listener = client;
     };
 
@@ -217,9 +239,9 @@ export class Injector {
       recovering = true;
       try {
         for (let attempt = 1; attempt <= reconnectAttempts; attempt += 1) {
-          if (finishing || cancelled) return;
+          if (finishing || halted()) return;
           await sleep(reconnectBaseMs * 2 ** (attempt - 1));
-          if (finishing || cancelled) return;
+          if (finishing || halted()) return;
           try {
             await connectListener();
             reconnects += 1;
@@ -234,11 +256,38 @@ export class Injector {
         recovering = false;
       }
     };
-    if (armed) await connectListener();
+    if (armed) {
+      try {
+        await connectListener();
+      } catch (error) {
+        // Fail closed: the run was recorded above, so record that it never started.
+        const message = `listener_unavailable`;
+        await this.deps.pool
+          .query(
+            `UPDATE control.fault_schedules SET status = 'failed', error = $2
+              WHERE run_id = $1 AND status = 'pending'`,
+            [runId, message],
+          )
+          .catch(() => {});
+        await this.deps.pool
+          .query(
+            `UPDATE control.scenario_runs
+                SET status = 'failed', finished_at = now(), detail = $2::jsonb
+              WHERE id = $1`,
+            [
+              runId,
+              JSON.stringify({
+                listener: { error: message, reason: errorMessage(error) },
+              }),
+            ],
+          )
+          .catch(() => {});
+        throw error;
+      }
+    }
 
-    const settle = async (outcome: StepOutcome) => {
-      outcomes.set(outcome.index, outcome);
-      await this.deps.pool.query(
+    const persistStep = (outcome: StepOutcome) =>
+      this.deps.pool.query(
         `UPDATE control.fault_schedules
             SET status = $3, applied_at = CASE WHEN $3 = 'applied' THEN now() END,
                 version_before = $4, version_after = $5, error = $6
@@ -252,7 +301,14 @@ export class Injector {
           outcome.error ?? null,
         ],
       );
-      settledGates[outcome.index].open();
+    const settle = async (outcome: StepOutcome) => {
+      outcomes.set(outcome.index, outcome);
+      try {
+        await persistStep(outcome);
+      } finally {
+        // dependents must never hang on a step whose bookkeeping failed
+        settledGates[outcome.index].open();
+      }
     };
 
     const sleep = (ms: number) =>
@@ -300,6 +356,7 @@ export class Injector {
     let applyChain: Promise<void> = Promise.resolve();
     const apply = (step: ResolvedStep, key: string, value: unknown) => {
       const run = applyChain.then(async () => {
+        let outcome: StepOutcome;
         try {
           const result = await withTransaction(this.deps.pool, (client) =>
             advanceConfigUnconditionally(client, {
@@ -313,9 +370,9 @@ export class Injector {
               causedBy: { actor: 'injector' },
             }),
           );
-          await settle(applied(step, key, result));
+          outcome = applied(step, key, result);
         } catch (error) {
-          await settle({
+          outcome = {
             index: step.index,
             status: 'failed',
             key,
@@ -324,11 +381,12 @@ export class Injector {
             settledAt: this.now(),
             error: isStaleVersion(error)
               ? 'stale_version'
-              : error instanceof Error
-                ? error.message
-                : String(error),
-          });
+              : errorMessage(error),
+          };
         }
+        // A bookkeeping failure here propagates (the step is NOT re-recorded as
+        // failed: the configuration write above did commit).
+        await settle(outcome);
       });
       applyChain = run.catch(() => {});
       return run;
@@ -372,15 +430,15 @@ export class Injector {
       const prerequisitesApplied = step.after.every(
         (i) => outcomes.get(i)?.status === 'applied',
       );
-      if (cancelled) return skip(step, 'cancelled');
+      if (halted()) return skip(step, 'cancelled');
       if (!prerequisitesApplied) return skip(step, 'prerequisite_not_applied');
       if (step.trigger === 'delay' && step.delayMs) {
         await sleep(step.delayMs);
-        if (cancelled) return skip(step, 'cancelled');
+        if (halted()) return skip(step, 'cancelled');
       }
       if (step.trigger === 'on_action_proposed') {
         const proposal = await waitForProposal(step);
-        if (cancelled) return skip(step, 'cancelled');
+        if (halted()) return skip(step, 'cancelled');
         if (proposal.kind === 'lost') return fail(step, 'listener_lost');
         if (proposal.kind === 'none') return skip(step, 'no_matching_proposal');
         return apply(step, proposal.key, step.values![proposal.key]);
@@ -388,31 +446,87 @@ export class Injector {
       return apply(step, step.key!, step.value);
     };
 
-    const finished = Promise.all(steps.map((step) => runStep(step)));
+    // Every step is awaited to the end (allSettled): a bookkeeping failure in
+    // one step aborts the run (the others are cancelled and skip) but can never
+    // leave a step's timer, proposal waiter or the LISTEN connection behind.
+    const abort = (error: unknown) => {
+      bookkeepingErrors.push(errorMessage(error));
+      aborted = true;
+      cancelGate.open();
+      for (const timer of timers) clearTimeout(timer);
+    };
+    const finished = Promise.allSettled(
+      steps.map((step) =>
+        runStep(step).catch((error: unknown) => {
+          abort(error);
+        }),
+      ),
+    );
     const done = finished.then(async (): Promise<RunSummary> => {
-      const list = steps.map((s) => outcomes.get(s.index)!);
-      const failed = list.some((o) => o.status === 'failed');
-      const status = cancelled ? 'cancelled' : failed ? 'failed' : 'completed';
+      // Teardown always runs, whatever happened above.
       finishing = true;
+      cancelGate.open();
+      for (const timer of timers) clearTimeout(timer);
+      timers.clear();
+      waiters.length = 0;
+      lostWaiters.clear();
       await (listener as pg.Client | null)?.end().catch(() => {});
-      await this.deps.pool.query(
-        `UPDATE control.scenario_runs
-            SET status = $2, finished_at = now(), detail = $3::jsonb
-          WHERE id = $1`,
-        [
-          runId,
-          status,
-          JSON.stringify({
-            steps: list.map((o) => ({
-              index: o.index,
-              status: o.status,
-              error: o.error ?? null,
-            })),
-            listener: armed ? { reconnects, lost: listenerLost } : undefined,
-          }),
-        ],
+      listener = null;
+      const list = steps.map(
+        (s): StepOutcome =>
+          outcomes.get(s.index) ?? {
+            index: s.index,
+            status: 'failed',
+            key: s.key,
+            versionBefore: null,
+            versionAfter: null,
+            settledAt: this.now(),
+            error: 'bookkeeping_failed',
+          },
       );
-      return { runId, scenarioId: manifest.id, seed, status, steps: list };
+      const failed = list.some((o) => o.status === 'failed');
+      const status =
+        bookkeepingErrors.length > 0
+          ? 'failed'
+          : cancelled
+            ? 'cancelled'
+            : failed
+              ? 'failed'
+              : 'completed';
+      try {
+        await this.deps.pool.query(
+          `UPDATE control.scenario_runs
+              SET status = $2, finished_at = now(), detail = $3::jsonb
+            WHERE id = $1`,
+          [
+            runId,
+            status,
+            JSON.stringify({
+              steps: list.map((o) => ({
+                index: o.index,
+                status: o.status,
+                error: o.error ?? null,
+              })),
+              listener: armed ? { reconnects, lost: listenerLost } : undefined,
+              bookkeepingErrors: bookkeepingErrors.length
+                ? bookkeepingErrors
+                : undefined,
+            }),
+          ],
+        );
+      } catch (error) {
+        bookkeepingErrors.push(errorMessage(error));
+      }
+      return {
+        runId,
+        scenarioId: manifest.id,
+        seed,
+        status: bookkeepingErrors.length > 0 ? 'failed' : status,
+        steps: list,
+        ...(bookkeepingErrors.length
+          ? { bookkeepingErrors: [...bookkeepingErrors] }
+          : {}),
+      };
     });
     // A rejected `done` must not become an unhandled rejection when nobody awaits it.
     done.catch(() => {});

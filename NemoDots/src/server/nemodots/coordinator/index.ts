@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type {
   ActionId,
   EventSinkPort,
@@ -18,7 +19,7 @@ import {
   startAttempt,
   type ClaimOptions,
 } from './leases.js';
-import { pauseMission } from './missions.js';
+import { pauseMission, reconcileMissions } from './missions.js';
 import { createOutbox, type Outbox, type OutboxOptions } from './outbox.js';
 import {
   abortAttempt,
@@ -122,6 +123,8 @@ export interface CoordinatorOptions {
 
 export interface Coordinator {
   deps: CoordinatorDeps;
+  /** Identity of this process in outbox claims and as the dispatcher passed to admit(). */
+  workerId: string;
   control: MissionControl;
   recovery: Recovery & RecoveryPort;
   outbox: Outbox;
@@ -211,7 +214,10 @@ export function createCoordinator(
     events: input.events ?? createEventSink(),
     clock: input.clock ?? (() => new Date()),
   };
-  const workerId = options.workerId ?? 'coordinator';
+  // Unique per process by default: outbox claims name their owner, and two
+  // coordinator processes must not mistake each other's claims for their own.
+  const workerId =
+    options.workerId ?? `coordinator-${process.pid}-${randomUUID().slice(0, 8)}`;
   const recovery = createRecovery(deps, {
     ...options.recovery,
     pauseOnClosureCap:
@@ -224,6 +230,7 @@ export function createCoordinator(
   const runMaintenance = async () => {
     await reapExpired(deps);
     await recovery.sweep();
+    await reconcileMissions(deps);
   };
   const outbox = createOutbox(deps, {
     workerId,
@@ -236,6 +243,7 @@ export function createCoordinator(
 
   const self: Coordinator = {
     deps,
+    workerId,
     control,
     recovery,
     outbox,
