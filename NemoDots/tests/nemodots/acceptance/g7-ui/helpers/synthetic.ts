@@ -18,7 +18,9 @@ import {
 export const sha = (text: string) =>
   createHash('sha256').update(text).digest('hex');
 const iso = (offsetSeconds: number) =>
-  new Date(Date.UTC(2026, 9, 17, 12, 0, 0) + offsetSeconds * 1000).toISOString();
+  new Date(
+    Date.UTC(2026, 9, 17, 12, 0, 0) + offsetSeconds * 1000,
+  ).toISOString();
 
 export interface ScenarioOptions {
   status?: MissionStatus;
@@ -590,9 +592,7 @@ export function buildScenario(options: ScenarioOptions = {}): Scenario {
     selfWrite: 'none',
     graphVersion: 5,
     affected,
-    perMission: [
-      { missionId, affected, preserved: { taskIds: [ids.t3] } },
-    ],
+    perMission: [{ missionId, affected, preserved: { taskIds: [ids.t3] } }],
     closure: { depth: 2, nodes: 5, capped: false },
     resolvedAt: iso(150),
     createdAt: iso(62),
@@ -618,7 +618,12 @@ export function buildScenario(options: ScenarioOptions = {}): Scenario {
             },
           ],
           byRole: [
-            { role: 'worker', calls: 14, promptTokens: 12840, completionTokens: 3150 },
+            {
+              role: 'worker',
+              calls: 14,
+              promptTokens: 12840,
+              completionTokens: 3150,
+            },
           ],
           retries: 2,
           errors: 1,
@@ -643,7 +648,12 @@ export function buildScenario(options: ScenarioOptions = {}): Scenario {
             },
           ],
           byRole: [
-            { role: 'worker', calls: 14, promptTokens: 12840, completionTokens: 3150 },
+            {
+              role: 'worker',
+              calls: 14,
+              promptTokens: 12840,
+              completionTokens: 3150,
+            },
           ],
           retries: 2,
           errors: 1,
@@ -716,7 +726,9 @@ export function buildScenario(options: ScenarioOptions = {}): Scenario {
   const events: MissionEvent[] = [
     make('mission.created', { mission }, 0),
     make('mission.status', { from: 'created', to: 'running', reason: null }, 5),
-    ...tasks.map((t) => make('task.created', { task: taskPick(t) }, t.depth + 10)),
+    ...tasks.map((t) =>
+      make('task.created', { task: taskPick(t) }, t.depth + 10),
+    ),
     make(
       'receipt.registered',
       {
@@ -811,7 +823,11 @@ export function buildScenario(options: ScenarioOptions = {}): Scenario {
       'action.verified',
       {
         actionId: ids.act1,
-        postcondition: { kind: 'history', receiptId: ids.r3, configVersion: 42 },
+        postcondition: {
+          kind: 'history',
+          receiptId: ids.r3,
+          configVersion: 42,
+        },
       },
       85,
     ),

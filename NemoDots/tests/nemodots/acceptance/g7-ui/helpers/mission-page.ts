@@ -172,9 +172,9 @@ export function receiptFacts(snapshot: MissionSnapshot) {
 export async function rowCells(row: Locator): Promise<Record<string, string>> {
   return row.evaluate((el) => {
     const table = el.closest('table');
-    const heads = Array.from(
-      table?.querySelectorAll('thead th') ?? [],
-    ).map((th) => (th.textContent ?? '').trim().toLowerCase());
+    const heads = Array.from(table?.querySelectorAll('thead th') ?? []).map(
+      (th) => (th.textContent ?? '').trim().toLowerCase(),
+    );
     const cells = Array.from(el.children).map((c) =>
       (c.textContent ?? '').replace(/\s+/g, ' ').trim(),
     );

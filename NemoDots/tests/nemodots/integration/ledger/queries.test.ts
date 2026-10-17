@@ -129,7 +129,9 @@ describe('evidence view', () => {
       expect(ObservationReceiptSchema.safeParse(item.receipt).success).toBe(
         true,
       );
-    const byKey = new Map(head.map((item) => [item.receipt.source.key, item]));
+    const byKey = new Map<string, (typeof head)[number]>(
+      head.map((item) => [item.receipt.source.key as string, item]),
+    );
     expect(byKey.get('checkout.health')!.receipt.id).toBe(health2.receipt.id);
     expect(byKey.get('checkout.health')!.consumers).toEqual(
       [

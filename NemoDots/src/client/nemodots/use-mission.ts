@@ -54,11 +54,13 @@ export function useMission(missionId: string): UseMissionResult {
   const [stream, setStream] = useState<StreamStatus>('connecting');
   const [streamDetail, setStreamDetail] = useState<string | null>(null);
   const streamRef = useRef<StreamStatus>('connecting');
+  const loadedRef = useRef(false);
   const loadRef = useRef<(() => Promise<void>) | null>(null);
 
   useEffect(() => {
     dispatch({ type: 'reset', missionId });
     setLoaded(false);
+    loadedRef.current = false;
     setError(null);
     setMissing(false);
     streamRef.current = 'connecting';
@@ -74,6 +76,7 @@ export function useMission(missionId: string): UseMissionResult {
         const snapshot = await getMissionSnapshot(missionId, controller.signal);
         if (!active) return null;
         dispatch({ type: 'snapshot', snapshot });
+        loadedRef.current = true;
         setLoaded(true);
         setError(null);
         setMissing(false);
@@ -112,10 +115,12 @@ export function useMission(missionId: string): UseMissionResult {
     };
     void start();
 
-    // Fallback while the stream is not open: a refresh must always be able to
-    // rebuild the page from storage alone.
+    // Fallback while the stream is not open, and until a snapshot has merged
+    // at all (a transient first failure must not leave the page unreadable
+    // behind an open stream): a refresh must always be able to rebuild the
+    // page from storage alone.
     const timer = setInterval(() => {
-      if (streamRef.current !== 'open') void load();
+      if (!loadedRef.current || streamRef.current !== 'open') void load();
     }, SNAPSHOT_POLL_MS);
 
     return () => {

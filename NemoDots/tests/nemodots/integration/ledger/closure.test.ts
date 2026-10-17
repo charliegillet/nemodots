@@ -20,11 +20,10 @@ import {
   transitionReceipt,
   getInvalidationEvent,
   markInvalidationResolved,
-  type ReceiptId,
 } from '../../../../src/server/nemodots/ledger/index.js';
+import type { ReceiptId } from '../../../../src/server/nemodots/contracts/index.js';
 import {
   attempt,
-  buildGraph,
   ev,
   inh,
   intent,

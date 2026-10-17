@@ -28,10 +28,16 @@ import {
   type LedgerWriterPort,
   type OrphanedAttemptInfo,
 } from '../../../../src/server/nemodots/coordinator/index.js';
+import {
+  InvalidationEventSchema,
+  invalidationEventId,
+} from '../../../../src/server/nemodots/contracts/index.js';
 import type {
   ActionId,
   ActionStatus,
   AttemptContext,
+  InvalidationEvent,
+  InvalidationReason,
   CreateMissionRequest,
   DependencyVector,
   MissionId,
@@ -537,4 +543,57 @@ export function probeReceipt(
     expiresAt: null,
     ...overrides,
   } as ObservationReceipt;
+}
+
+/**
+ * A hand-enumerated InvalidationEvent for one mission: exactly the affected and
+ * preserved sets the test names (the ledger's closure computes these in
+ * production; recovery trusts them).
+ */
+export function invalidationFor(input: {
+  missionId: MissionId;
+  sourceKey?: string;
+  oldReceiptId?: ReceiptId;
+  attemptIds?: string[];
+  taskIds?: string[];
+  outputIds?: string[];
+  actionIds?: string[];
+  preserved?: string[];
+  selfWrite?: 'none' | 'verified' | 'mismatch';
+  reason?: InvalidationReason;
+  capped?: boolean;
+}): InvalidationEvent {
+  const sourceKey = (input.sourceKey ??
+    'checkout.config/cache.namespace') as SourceKey;
+  const oldReceiptId = input.oldReceiptId ?? receipt();
+  const newReceiptId = receipt();
+  const reason = input.reason ?? 'newer_observation';
+  const affected = {
+    modelCallIds: [],
+    attemptIds: input.attemptIds ?? [],
+    outputIds: input.outputIds ?? [],
+    actionIds: input.actionIds ?? [],
+    taskIds: input.taskIds ?? [],
+  };
+  return InvalidationEventSchema.parse({
+    id: invalidationEventId(sourceKey, oldReceiptId, newReceiptId, reason),
+    missionIds: [input.missionId],
+    sourceKey,
+    oldReceiptId,
+    newReceiptId,
+    reason,
+    selfWrite: input.selfWrite ?? 'none',
+    graphVersion: 1,
+    affected,
+    perMission: [
+      {
+        missionId: input.missionId,
+        affected,
+        preserved: { taskIds: input.preserved ?? [] },
+      },
+    ],
+    closure: { depth: 1, nodes: 3, capped: input.capped ?? false },
+    resolvedAt: null,
+    createdAt: new Date().toISOString(),
+  });
 }

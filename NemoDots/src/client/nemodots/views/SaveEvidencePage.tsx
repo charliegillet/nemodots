@@ -34,7 +34,7 @@ export function buildEvidencePageMarkdown(
     '',
     `Goal: ${goal.replace(/\s+/g, ' ').trim()}`,
     '',
-    `Mission page: [#/missions/${missionId}](#/missions/${missionId})`,
+    `Mission page: [/#/missions/${missionId}](/#/missions/${missionId})`,
     '',
     'This page is a projection of ledger receipts at the time it was saved. The ledger stays the source of truth.',
     '',

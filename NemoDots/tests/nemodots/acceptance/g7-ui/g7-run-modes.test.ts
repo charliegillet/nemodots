@@ -1,21 +1,21 @@
 // Gate 7: run-mode labels, setup / blocked state, fixture and live labelling,
-// separate Intelligence badge, loading / error / empty states, secret hygiene.
-// Cases: G7.2, G7.11, G7.13 (failed mission), G7.17.
-import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { resolve } from 'node:path';
+// separate Intelligence badge, loading / error / empty states, system health.
+// Cases: G7.2, G7.7 (system health), G7.8, G7.11, G7.13 (failed mission).
+// The secret scan (G7.17) lives in g7-mission-flow.test.ts because it must run
+// after a mission that made model calls and recorded receipts.
 import type { Browser } from 'playwright';
 import { expect } from 'playwright/test';
 import { afterAll, beforeAll, describe, it } from 'vitest';
 import { NemoApi, CONSTRAINTS, GOAL, isTerminal } from './helpers/api.js';
-import {
-  APP_ROOT,
-  liveCredentials,
-  readLocalSecrets,
-  until,
-} from './helpers/env.js';
-import { MissionPage } from './helpers/mission-page.js';
+import { liveCredentials, until } from './helpers/env.js';
+import { MissionPage, labelled } from './helpers/mission-page.js';
 import { Acc7Stack } from './helpers/stack.js';
-import { consoleErrors, launchChrome, newPage } from './helpers/ui.js';
+import {
+  consoleErrors,
+  launchChrome,
+  newPage,
+  statusText,
+} from './helpers/ui.js';
 
 let browser: Browser;
 beforeAll(async () => {
@@ -228,18 +228,94 @@ describe('fixture mode', () => {
     }
   });
 
-  it('[G7.8] reload of a finished mission reconstructs the same view from the snapshot', async () => {
+  it('[G7.8] reload of a finished mission reconstructs the same structured view (status, task rows, receipt rows)', async () => {
     const [mission] = await api.listMissions();
     expect(mission).toBeDefined();
-    const { context, page } = await newPage(browser);
+    const { context, page, captured } = await newPage(browser);
     try {
       const mp = new MissionPage(page);
       await page.goto(`/#/missions/${mission!.id}`);
       await mp.expectStatus(mission!.status);
-      const before = await mp.text();
+      const snapshot = await api.snapshot(mission!.id);
+      const structure = async () => ({
+        mission: await mp.missionStatus.getAttribute('data-status'),
+        taskItems: await mp.taskTree.getByRole('listitem').count(),
+        taskStatuses: await mp.taskTree
+          .locator('[data-status]')
+          .evaluateAll((els) =>
+            els.map((e) => (e as HTMLElement).dataset.status ?? ''),
+          ),
+        receiptRows: await mp.ledger.getByRole('row').count(),
+        actionItems: await mp.actions.getByRole('listitem').count(),
+      });
+      const before = await structure();
+      expect(before.mission).toBe(snapshot.mission.status);
+      expect(before.taskItems).toBe(snapshot.tasks.length);
       await page.reload();
       await mp.expectStatus(mission!.status);
-      expect(await mp.text()).toBe(before);
+      await until(
+        'structured view equals the pre-reload view',
+        async () =>
+          JSON.stringify(await structure()) === JSON.stringify(before),
+      );
+      expect(captured.pageErrors).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  });
+
+  it('[G7.7] system health panel equals the server HealthStatus: Postgres, Redis, checkout and provider as text', async () => {
+    const health = await api.health();
+    expect(health.postgres).toBe('ok');
+    expect(health.redis).toBe('ok');
+    expect(health.checkout.reachable).toBe(true);
+    const { context, page } = await newPage(browser);
+    try {
+      const mp = new MissionPage(page);
+      await page.goto('/#/missions/');
+      await expect(mp.health).toBeVisible();
+      const text = (await mp.health.innerText()).replace(/\s+/g, ' ');
+      expect(text).toMatch(labelled(/postgres/, statusText(health.postgres)));
+      expect(text).toMatch(labelled(/redis/, statusText(health.redis)));
+      expect(text).toMatch(
+        labelled(/checkout(?: app)?/, statusText(health.checkout.status!)),
+      );
+      expect(text).toMatch(
+        labelled(
+          /provider reachable/,
+          health.provider.reachable
+            ? /yes|reachable|ok/i
+            : /no|unreachable|down/i,
+        ),
+      );
+    } finally {
+      await context.close();
+    }
+  });
+
+  it('[G7.7] a stopped checkout app reads unreachable as text in the System health panel and the server health agrees', async () => {
+    await stack.stopChild('checkout');
+    const health = await until(
+      'server health reports the checkout app unreachable',
+      async () => {
+        const h = await api.health();
+        return h.checkout.reachable ? null : h;
+      },
+      { timeoutMs: 30_000, intervalMs: 500 },
+    );
+    expect(health.checkout.reachable).toBe(false);
+    const { context, page } = await newPage(browser);
+    try {
+      const mp = new MissionPage(page);
+      await page.goto('/#/missions/');
+      await expect(mp.health).toBeVisible();
+      const text = (await mp.health.innerText()).replace(/\s+/g, ' ');
+      expect(text).toMatch(labelled(/checkout(?: app)?/, /unreachable|down/i));
+      expect(text, 'a down checkout is never shown as ok').not.toMatch(
+        labelled(/checkout(?: app)?/, /\bok\b/i),
+      );
+      // Postgres and Redis are still up and still read as such.
+      expect(text).toMatch(labelled(/postgres/, statusText('ok')));
     } finally {
       await context.close();
     }
@@ -280,54 +356,6 @@ describe('live mode label', () => {
       await expect(mp.create).toBeEnabled();
     } finally {
       await context.close();
-    }
-  });
-
-  it('[G7.17] no secret value appears in the DOM, network responses, console or built assets', async () => {
-    const creds = liveCredentials();
-    if (!creds.ok) throw new Error('BLOCKED');
-    const secrets = Object.values(
-      readLocalSecrets([
-        'OPENAI_API_KEY',
-        'CRUSOE_API_KEY',
-        'CPK_INTELLIGENCE_API_KEY',
-      ]),
-    );
-    secrets.push(creds.env.OPENAI_API_KEY);
-    const needles = [...new Set(secrets)].filter((v) => v.length >= 8);
-    const { context, page, captured } = await newPage(browser);
-    try {
-      const mp = new MissionPage(page);
-      await page.goto('/#/missions/');
-      await expect(mp.modeBadge).toBeVisible();
-      const html = await page.content();
-      const haystacks = [
-        html,
-        ...captured.responseBodies,
-        ...captured.console.map((m) => m.text),
-      ];
-      for (const needle of needles)
-        for (const hay of haystacks) expect(hay.includes(needle)).toBe(false);
-      // Control-plane and prompt data never serialised to the client.
-      for (const body of captured.responseBodies)
-        expect(body).not.toMatch(
-          /"control"\s*:|fault_schedules|NEMODOTS_PROBE_SECRET|postgres:\/\//,
-        );
-    } finally {
-      await context.close();
-    }
-    const walk = (dir: string): string[] =>
-      readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
-        e.isDirectory() ? walk(resolve(dir, e.name)) : [resolve(dir, e.name)],
-      );
-    for (const file of walk(resolve(APP_ROOT, 'dist/client'))) {
-      if (statSync(file).size > 20_000_000) continue;
-      const content = readFileSync(file, 'utf8');
-      for (const needle of needles)
-        expect(
-          content.includes(needle),
-          `built asset ${file} contains a secret value`,
-        ).toBe(false);
     }
   });
 });

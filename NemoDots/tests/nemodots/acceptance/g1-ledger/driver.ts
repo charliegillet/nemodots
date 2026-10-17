@@ -274,12 +274,21 @@ export class World {
   // ------------------------------------------------------------- operations
 
   async advance(op: Extract<LedgerOp, { op: 'advance_config' }>) {
-    const advanceConfig = await entry<
-      (client: pg.PoolClient, input: Record<string, unknown>) => Promise<unknown>
-    >('sandbox/version-authority.ts', ['advanceConfig']);
     const via = op.actor === 'injector' ? this.injector : this.app;
     const client = await via.connect();
     try {
+      await this.advanceOn(client, op);
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Same as advance, on a connection the caller owns (so the caller knows its backend pid). */
+  async advanceOn(client: pg.PoolClient, op: Extract<LedgerOp, { op: 'advance_config' }>) {
+    const advanceConfig = await entry<
+      (client: pg.PoolClient, input: Record<string, unknown>) => Promise<unknown>
+    >('sandbox/version-authority.ts', ['advanceConfig']);
+    {
       const current = (await this.configVersion(op.key)) ?? 0;
       await client.query('BEGIN');
       try {
@@ -296,8 +305,6 @@ export class World {
         await client.query('ROLLBACK').catch(() => {});
         throw error;
       }
-    } finally {
-      client.release();
     }
   }
 
@@ -378,7 +385,7 @@ export class World {
     return input;
   }
 
-  async register(op: Extract<LedgerOp, { op: 'register' }>): Promise<OpResult> {
+  async register(op: Extract<LedgerOp, { op: 'register' }>, options?: Record<string, unknown>): Promise<OpResult> {
     // BIND: registerObservation(client in an open transaction, { source, normalizedValue, provenance, claimed? }).
     const registerObservation = await entry<(client: pg.PoolClient, input: Record<string, unknown>, options?: Record<string, unknown>) => Promise<unknown>>(
       'ledger/receipts.ts',
@@ -392,7 +399,7 @@ export class World {
     const result: OpResult = { ok: true, baseRevision: controlled ? this.baseOf(op.sourceKey) : 0 };
     try {
       const input = await this.registerInput(op);
-      await this.inTx((client) => registerObservation(client, input));
+      await this.inTx((client) => registerObservation(client, input, options));
     } catch (error) {
       result.ok = false;
       result.error = errorCode(error);

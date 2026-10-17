@@ -79,8 +79,15 @@ export interface System {
   verifier: pg.Client;
   redis: ReturnType<typeof createClient>;
   logs(): string;
+  /** The most recently started worker process. */
   worker: WorkerHandle | null;
+  /** Every worker process started so far (including dead ones). */
+  workers: WorkerHandle[];
   startWorker(): Promise<WorkerHandle>;
+  /** SIGKILL every live worker (resuming stopped ones first), then start exactly one fresh worker. */
+  resetWorkers(): Promise<WorkerHandle>;
+  /** Connection string of one of the NemoDots roles for this system's database. */
+  dbUrl(role: 'admin' | 'app' | 'checkout' | 'injector' | 'verifier'): string;
   /** SIGKILL every child process of the app, then start it again. */
   restartApp(): Promise<void>;
   stop(): Promise<void>;
@@ -89,6 +96,11 @@ export interface System {
 export interface WorkerHandle {
   pid: number;
   kill(signal?: NodeJS.Signals): Promise<void>;
+  /** SIGSTOP: the process keeps its sockets and leases but runs nothing (a zombie writer). */
+  pause(): void;
+  /** SIGCONT. */
+  resume(): void;
+  alive(): boolean;
   exited: Promise<number | null>;
 }
 
@@ -207,6 +219,11 @@ export async function startSystem(options: SystemOptions): Promise<System> {
     NEMODOTS_CHECKOUT_PORT: String(G4.checkoutPort),
     NEMODOTS_CHECKOUT_URL: `http://127.0.0.1:${G4.checkoutPort}`,
     NEMODOTS_PROBE_SECRET: probeSecret,
+    // Gate 8 mutation catalogue: the runner sets G4_MUTATION to rebuild the
+    // behaviour under test with one invariant broken. Inert when unset.
+    ...(process.env.G4_MUTATION
+      ? { NEMODOTS_MUTATION: process.env.G4_MUTATION }
+      : {}),
   };
   const appEnv: Record<string, string> = {
     ...common,
@@ -276,6 +293,7 @@ export async function startSystem(options: SystemOptions): Promise<System> {
 
   let app: ChildProcess | null = null;
   let workerHandle: WorkerHandle | null = null;
+  const workerList: WorkerHandle[] = [];
   const startApp = async () => {
     app = spawnTs('src/server/index.ts', appEnv, 'app');
     await waitFor(
@@ -312,6 +330,16 @@ export async function startSystem(options: SystemOptions): Promise<System> {
     get worker() {
       return workerHandle;
     },
+    workers: workerList,
+    dbUrl,
+    async resetWorkers() {
+      for (const handle of workerList) {
+        if (!handle.alive()) continue;
+        handle.resume();
+        await handle.kill('SIGKILL');
+      }
+      return system.startWorker();
+    },
     async startWorker() {
       const child = spawnTs(
         'src/server/nemodots/worker-main.ts',
@@ -325,7 +353,11 @@ export async function startSystem(options: SystemOptions): Promise<System> {
         pid: child.pid!,
         exited,
         kill: (signal = 'SIGKILL') => killChild(child, signal),
+        pause: () => void child.kill('SIGSTOP'),
+        resume: () => void child.kill('SIGCONT'),
+        alive: () => child.exitCode === null && child.signalCode === null,
       };
+      workerList.push(workerHandle);
       return workerHandle;
     },
     async restartApp() {
@@ -333,8 +365,11 @@ export async function startSystem(options: SystemOptions): Promise<System> {
       await startApp();
     },
     async stop() {
-      for (const child of [...children].reverse())
+      for (const child of [...children].reverse()) {
+        // a SIGSTOPped child would ignore SIGTERM until continued
+        if (child.exitCode === null) child.kill('SIGCONT');
         await killChild(child).catch(() => undefined);
+      }
       try {
         await verifier?.end();
       } catch {
@@ -436,4 +471,105 @@ export async function committedActionRows(system: System) {
     version: string | number;
     caused_by_action_id: string;
   }[];
+}
+
+/**
+ * Out-of-band change of a controlled source, independent of the app process
+ * and its routes: connects as the injector role (NEMODOTS_PG_URL_INJECTOR for
+ * this system's database) and advances the version authority directly, the
+ * way the sandbox injector does (ARCHITECTURE 9.3). Nothing here registers a
+ * receipt, so any receipt that appears afterwards was found by the watcher.
+ */
+export async function injectConfig(
+  system: System,
+  key: string,
+  value: string | number | boolean,
+) {
+  const client = new pg.Client({
+    connectionString: system.dbUrl('injector'),
+    application_name: 'nemodots-acc4-injector',
+  });
+  await client.connect();
+  try {
+    const mod = (await import(
+      /* @vite-ignore */ resolve(
+        APP_ROOT,
+        'src/server/nemodots/sandbox/version-authority.ts',
+      )
+    )) as {
+      advanceConfigUnconditionally?: (
+        client: pg.Client,
+        input: {
+          key: string;
+          value: string | number | boolean;
+          causedBy: { actor: string };
+        },
+      ) => Promise<{ versionBefore: number; versionAfter: number }>;
+    };
+    if (!mod.advanceConfigUnconditionally)
+      throw new Error(
+        'ENTRY POINT MISSING: src/server/nemodots/sandbox/version-authority.ts#advanceConfigUnconditionally',
+      );
+    await client.query('BEGIN');
+    try {
+      const result = await mod.advanceConfigUnconditionally(client, {
+        key,
+        value,
+        causedBy: { actor: 'injector' },
+      });
+      await client.query('COMMIT');
+      return { version: Number(result.versionAfter), value };
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    }
+  } finally {
+    await client.end().catch(() => undefined);
+  }
+}
+
+/** Pending (neither processed nor failed) outbox rows whose payload mentions the id. */
+export async function pendingOutbox(system: System, needle: string) {
+  const { rows } = await system.verifier.query(
+    `SELECT count(*)::int AS n FROM coordinator.outbox
+      WHERE processed_at IS NULL AND failed_at IS NULL AND payload::text LIKE $1`,
+    [`%${needle}%`],
+  );
+  return Number(rows[0].n);
+}
+
+/**
+ * Model-call and context-snapshot rows that mention an attempt, read with the
+ * verifier role and matched by value so the check does not depend on the
+ * builders' column names. Returns the JSON text of each row.
+ */
+export async function contextRowsForAttempt(
+  system: System,
+  attemptId: string,
+): Promise<{ modelCalls: string[]; contexts: string[] }> {
+  const calls = await system.verifier.query(
+    `SELECT to_jsonb(t) AS j FROM ledger.model_call_records t
+      WHERE to_jsonb(t)::text LIKE $1`,
+    [`%${attemptId}%`],
+  );
+  const modelCalls = calls.rows.map((r) => JSON.stringify(r.j));
+  const ids = new Set<string>();
+  for (const row of calls.rows)
+    for (const value of Object.values(row.j as Record<string, unknown>))
+      if (
+        typeof value === 'string' &&
+        /^[0-9a-f-]{36}$/.test(value) &&
+        value !== attemptId
+      )
+        ids.add(value);
+  const contexts: string[] = [];
+  if (ids.size) {
+    const rows = await system.verifier.query(
+      `SELECT to_jsonb(t) AS j FROM ledger.context_snapshots t
+        WHERE to_jsonb(t)->>'id' = ANY($1::text[])`,
+      [[...ids]],
+    );
+    for (const row of rows.rows) contexts.push(JSON.stringify(row.j));
+  }
+  return { modelCalls, contexts };
 }

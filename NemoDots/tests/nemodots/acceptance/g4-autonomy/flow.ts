@@ -8,6 +8,7 @@ import {
   startProvider,
 } from './provider.js';
 import {
+  injectConfig,
   readConfig,
   startSystem,
   type System,
@@ -119,7 +120,18 @@ export function alternateValue(
   }
 }
 
-/** Owner-style manual edit through the documented route, using the live version from the verifier role. */
+/** A cache.schema_version (domain 1..9) that differs from every value in `exclude`. */
+export function distinctSchemaVersion(exclude: readonly unknown[]): number {
+  const taken = new Set(exclude.map((v) => Number(v)));
+  for (let n = 1; n <= 9; n += 1) if (!taken.has(n)) return n;
+  throw new Error('no free cache.schema_version');
+}
+
+/**
+ * Out-of-band change through the injector role (see injectConfig): the app's
+ * own routes are not involved, so a receipt that follows was discovered by the
+ * watcher. `before` is the live value/version from the verifier role.
+ */
 export async function changeSource(
   system: System,
   key: string,
@@ -127,8 +139,46 @@ export async function changeSource(
 ) {
   const before = await readConfig(system, key);
   const next = value ?? alternateValue(key, before.value);
-  const result = await system.api.editSource(key, next, before.version);
+  const result = await injectConfig(system, key, next);
   return { before, next, result };
+}
+
+/** Waits for a receipt.registered of `sourceKey` with revision >= minRevision after an event id. */
+export async function waitRegistered(
+  tail: EventTail,
+  sourceKey: string,
+  minRevision: number,
+  afterEventId: number,
+  timeoutMs: number,
+  label = `receipt.registered for ${sourceKey} >= r${minRevision}`,
+) {
+  await tail.until(
+    (events) =>
+      events.some(
+        (e) =>
+          e.id > afterEventId &&
+          e.payload.kind === 'receipt.registered' &&
+          e.payload.sourceKey === sourceKey &&
+          e.payload.sourceRevision >= minRevision,
+      ),
+    timeoutMs,
+    label,
+  );
+  return tail.of('receipt.registered').find(
+    (e) =>
+      e.id > afterEventId &&
+      e.payload.sourceKey === sourceKey &&
+      e.payload.sourceRevision >= minRevision,
+  )!;
+}
+
+/**
+ * A NOT_MET precondition: the scenario did not reach the state the assertion
+ * needs, so the case cannot be judged. Fails the test with an explicit marker
+ * instead of misattributing the outcome to the product.
+ */
+export function notMet(reason: string): never {
+  throw new Error(`NOT_MET: ${reason}`);
 }
 
 export function snapshotSummary(snapshot: MissionSnapshot) {

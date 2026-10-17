@@ -386,6 +386,53 @@ describe('mission view', () => {
     );
   });
 
+  it('recovers when the first snapshot fails transiently while the stream opens', async () => {
+    let attempts = 0;
+    routedApi(
+      api,
+      baseRoutes({
+        [`GET ${MISSION_PATH}`]: () => {
+          attempts += 1;
+          if (attempts === 1) throw new FakeApiError('Bad gateway', 502);
+          return snapshot();
+        },
+      }),
+    );
+    await render(M);
+    expect(textOf(root)).toContain('Loading mission');
+    await settle(100);
+    expect(textOf(root)).toContain('Live updates: Open');
+    await settle(3100);
+    const text = textOf(root);
+    expect(attempts).toBeGreaterThan(1);
+    expect(text).toContain('Restore checkout');
+    expect(text).toContain('Investigate checkout errors');
+    expect(text).not.toContain('Bad gateway');
+    expect(text).not.toContain('Loading mission');
+    // Once merged and open, polling stops.
+    const settled = attempts;
+    await settle(9000);
+    expect(attempts).toBe(settled);
+  });
+
+  it('badges a live mission Live even while the server is in fixture mode', async () => {
+    routedApi(
+      api,
+      baseRoutes({
+        'GET /nemodots/health': healthDto({ mode: 'fixture' }),
+      }),
+    );
+    await render(M);
+    const head = byLabel(root.root, 'Mission summary')[0];
+    const classes = head
+      .findAll((n) => String(n.props.className ?? '').includes('nd-mode-'))
+      .map((n) => String(n.props.className))
+      .join(' ');
+    expect(classes).toContain('nd-mode-live');
+    expect(classes).not.toContain('nd-mode-fixture');
+    expect(textOf(root)).toContain('server is now in fixture mode');
+  });
+
   it('reports an unknown mission without opening a stream', async () => {
     routedApi(api, {
       ...baseRoutes(),
@@ -456,7 +503,7 @@ describe('mission view', () => {
     expect(body.content).toContain(
       `projection of ledger fact ${receipt().id} rev ${receipt().sourceRevision}`,
     );
-    expect(body.content).toContain(`#/missions/${M}`);
+    expect(body.content).toContain(`(/#/missions/${M})`);
     const link = root.root.findAll(
       (n) => n.type === 'a' && n.props.href === '#/spaces/s1/pages/p1',
     )[0];

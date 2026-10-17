@@ -45,33 +45,31 @@ export async function buildSnapshot(
         )
       ).rows[0];
       if (!missionRow) throw new MissionNotFoundError(missionId);
-      const [tasks, attempts, outputs, findings, recoveries, invalidations] =
-        await Promise.all([
-          client.query<TaskRow>(
-            `SELECT * FROM coordinator.tasks WHERE mission_id = $1 ORDER BY ordinal`,
-            [missionId],
-          ),
-          client.query<AttemptRow>(
-            `SELECT * FROM coordinator.task_attempts WHERE mission_id = $1 ORDER BY started_at, n`,
-            [missionId],
-          ),
-          client.query<OutputRow>(
-            `SELECT * FROM coordinator.task_outputs WHERE mission_id = $1 ORDER BY published_at`,
-            [missionId],
-          ),
-          client.query<FindingRow>(
-            `SELECT * FROM coordinator.findings WHERE mission_id = $1 ORDER BY created_at`,
-            [missionId],
-          ),
-          client.query<RecoveryRow>(
-            `SELECT * FROM coordinator.recovery_events WHERE mission_id = $1 ORDER BY created_at, id`,
-            [missionId],
-          ),
-          client.query<InvalidationRow>(
-            `SELECT * FROM coordinator.invalidations WHERE mission_id = $1 ORDER BY created_at, event_id`,
-            [missionId],
-          ),
-        ]);
+      // Sequential on purpose: one client runs one query at a time.
+      const tasks = await client.query<TaskRow>(
+        `SELECT * FROM coordinator.tasks WHERE mission_id = $1 ORDER BY ordinal`,
+        [missionId],
+      );
+      const attempts = await client.query<AttemptRow>(
+        `SELECT * FROM coordinator.task_attempts WHERE mission_id = $1 ORDER BY started_at, n`,
+        [missionId],
+      );
+      const outputs = await client.query<OutputRow>(
+        `SELECT * FROM coordinator.task_outputs WHERE mission_id = $1 ORDER BY published_at`,
+        [missionId],
+      );
+      const findings = await client.query<FindingRow>(
+        `SELECT * FROM coordinator.findings WHERE mission_id = $1 ORDER BY created_at`,
+        [missionId],
+      );
+      const recoveries = await client.query<RecoveryRow>(
+        `SELECT * FROM coordinator.recovery_events WHERE mission_id = $1 ORDER BY created_at, id`,
+        [missionId],
+      );
+      const invalidations = await client.query<InvalidationRow>(
+        `SELECT * FROM coordinator.invalidations WHERE mission_id = $1 ORDER BY created_at, event_id`,
+        [missionId],
+      );
       const foreign = await deps.snapshotReader.read(client, missionId);
       return {
         mission: toMission(missionRow),

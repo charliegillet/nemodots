@@ -190,14 +190,10 @@ it('LISTEN nemodots_outbox wakes the loop faster than the poll interval', async 
         payload: {},
       }))!;
       client.release();
-      console.log('DEBUG enqueued', id);
       expect(await handled.promise).toBe(id);
-      console.log('DEBUG handled');
       expect(Date.now() - started).toBeLessThan(5_000);
     } finally {
-      console.log('DEBUG stopping');
       await outbox.stop();
-      console.log('DEBUG stopped');
     }
   });
 });

@@ -4,7 +4,7 @@
 // serialize publications and commits against writers (C9).
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { ReceiptId } from '../../../../src/server/nemodots/contracts/index.js';
 import { CheckedVectorSchema } from '../../../../src/server/nemodots/contracts/index.js';
 import {
@@ -440,8 +440,26 @@ describe('the validator port', () => {
 });
 
 describe('locks (C9)', () => {
-  async function openTx(pool: pg.Pool) {
+  // A failed assertion must not leave a transaction holding row locks for the
+  // next test: whatever is still open is rolled back and released afterwards.
+  const open = new Set<pg.PoolClient>();
+  const connect = async (pool: pg.Pool) => {
     const client = await pool.connect();
+    open.add(client);
+    return client;
+  };
+  const done = (client: pg.PoolClient) => {
+    if (open.delete(client)) client.release();
+  };
+  afterEach(async () => {
+    for (const client of open) {
+      await client.query('ROLLBACK').catch(() => {});
+      client.release();
+    }
+    open.clear();
+  });
+  async function openTx(pool: pg.Pool) {
+    const client = await connect(pool);
     await client.query('BEGIN');
     return { client, pid: await backendPid(client) };
   }
@@ -455,7 +473,7 @@ describe('locks (C9)', () => {
     const writer = await openTx(app);
     await updateConfig(writer.client, 'db.pool_max', 8); // row lock held, uncommitted
 
-    const checker = await app.connect();
+    const checker = await connect(app);
     const checkerPid = await backendPid(checker);
     let settled = false;
     const outcome = (async () => {
@@ -492,14 +510,14 @@ describe('locks (C9)', () => {
       opts,
     );
     await writer.client.query('COMMIT');
-    writer.client.release();
+    done(writer.client);
 
     const result = await withTimeout(
       outcomeResult,
       5_000,
       'assertCurrent after the writer commits',
     );
-    checker.release();
+    done(checker);
     expect(result).toBeInstanceOf(SupportError);
     expect((result as SupportError).reason).toBe('stale_version');
   });
@@ -518,7 +536,7 @@ describe('locks (C9)', () => {
       FX,
     );
 
-    const writer = await app.connect();
+    const writer = await connect(app);
     const writerPid = await backendPid(writer);
     let advanced = false;
     const write = (async () => {
@@ -535,9 +553,9 @@ describe('locks (C9)', () => {
     expect(await waitsOnLock(admin, writerPid)).toBe(true);
     expect(advanced).toBe(false);
     await publication.client.query('COMMIT'); // the publication lands first
-    publication.client.release();
+    done(publication.client);
     await withTimeout(write, 5_000, 'writer after the publication commits');
-    writer.release();
+    done(writer);
     expect(advanced).toBe(true);
     // and the receipt the publication relied on is now stale
     expect((await rejection(check([r1.receipt.id], 'share'))).reason).toBe(
@@ -557,7 +575,7 @@ describe('locks (C9)', () => {
       FX,
     );
 
-    const registrar = await app.connect();
+    const registrar = await connect(app);
     const registrarPid = await backendPid(registrar);
     const registered = (async () => {
       await registrar.query('BEGIN');
@@ -575,13 +593,13 @@ describe('locks (C9)', () => {
     })();
     expect(await waitsOnLock(admin, registrarPid)).toBe(true);
     await publication.client.query('COMMIT');
-    publication.client.release();
+    done(publication.client);
     const result = await withTimeout(
       registered,
       5_000,
       'registration after the publication commits',
     );
-    registrar.release();
+    done(registrar);
     expect(result.receipt.sourceRevision).toBe(2);
 
     // the same two statements in the opposite order: registration first, publication rejected
@@ -595,7 +613,7 @@ describe('locks (C9)', () => {
       ),
     ).rejects.toBeInstanceOf(SupportError);
     await retry.client.query('ROLLBACK');
-    retry.client.release();
+    done(retry.client);
   });
 
   it('two checkers hold shared locks together (no serialization between publications)', async () => {

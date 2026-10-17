@@ -204,7 +204,9 @@ export async function newPage(
       events.push({
         url: r.url(),
         lastEventId: headers.then((h) => h['last-event-id'] ?? null),
-        authorization: headers.then((h) => /^Bearer\s+\S+/.test(h.authorization ?? '')),
+        authorization: headers.then((h) =>
+          /^Bearer\s+\S+/.test(h.authorization ?? ''),
+        ),
       });
   });
   page.on('response', (r) => {
@@ -272,7 +274,10 @@ export async function streamState(page: Page) {
 
 /** Severs the live event stream; returns how many streams were open. */
 export async function dropStream(page: Page): Promise<number> {
-  return page.evaluate(() =>
-    (window as unknown as { __ndDropStream?: () => number }).__ndDropStream?.() ?? 0,
+  return page.evaluate(
+    () =>
+      (
+        window as unknown as { __ndDropStream?: () => number }
+      ).__ndDropStream?.() ?? 0,
   );
 }

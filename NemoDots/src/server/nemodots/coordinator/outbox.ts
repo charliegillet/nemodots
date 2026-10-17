@@ -285,7 +285,7 @@ export function createOutbox(
           dirty = false;
           await tick();
           // A wakeup that raced the tick must not wait for the next poll.
-          if (dirty) continue;
+          if (dirty || stopped) continue;
           await new Promise<void>((resolve) => {
             const t = setTimeout(resolve, pollMs);
             wake = () => {

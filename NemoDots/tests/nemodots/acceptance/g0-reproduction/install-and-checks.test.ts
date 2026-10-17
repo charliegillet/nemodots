@@ -8,7 +8,16 @@
 // .git and every real .env) to .local/acceptance/g0/install-copy and
 // installed there with a scrubbed environment (no Crusoe/Intelligence keys).
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -22,7 +31,12 @@ import {
   SCRATCH,
   type RunResult,
 } from './helpers/common.js';
-import { collectNeedles, scan, summarize } from './helpers/secrets.js';
+import {
+  collectNeedles,
+  scan,
+  summarize,
+  type Needle,
+} from './helpers/secrets.js';
 
 const COPY = path.join(SCRATCH, 'install-copy');
 const results = new Map<string, RunResult>();
@@ -30,6 +44,51 @@ let redact: (t: string) => string = (t) => t;
 let lockBefore = '';
 let pkgBefore = '';
 let rolesFiles: string[] = [];
+
+// Canary secrets present at build time (see the build case and G0.6).
+const CANARY_PLAIN = [
+  'OPENAI_API_KEY',
+  'CPK_INTELLIGENCE_API_KEY',
+  'INTELLIGENCE_API_KEY',
+  'CRUSOE_API_KEY',
+  'NEMODOTS_PROBE_SECRET',
+];
+const CANARY_URLS = ['ADMIN', 'APP', 'CHECKOUT', 'INJECTOR', 'VERIFIER'].map(
+  (role) => `NEMODOTS_PG_URL_${role}`,
+);
+interface Canaries {
+  env: Record<string, string>;
+  needles: Needle[];
+}
+let canaries: Canaries | undefined;
+
+/** Fresh random canary values for every secret name plus VITE_-prefixed twins. */
+function makeCanaries(): Canaries {
+  const env: Record<string, string> = {};
+  const needles: Needle[] = [];
+  const add = (name: string, secret: string, value = secret) => {
+    env[name] = value;
+    needles.push({ name, value: secret });
+  };
+  const fresh = (name: string) =>
+    `cnry-${name.toLowerCase()}-${randomBytes(12).toString('hex')}`;
+  for (const name of CANARY_PLAIN) {
+    add(name, fresh(name));
+    add(`VITE_${name}`, fresh(`vite-${name}`));
+  }
+  for (const name of CANARY_URLS) {
+    for (const prefix of ['', 'VITE_']) {
+      const password = fresh(`${prefix}${name}`);
+      const role = name.replace('NEMODOTS_PG_URL_', 'nemodots_').toLowerCase();
+      add(
+        `${prefix}${name}`,
+        password,
+        `postgres://${role}:${password}@127.0.0.1:55432/nemodots`,
+      );
+    }
+  }
+  return { env, needles };
+}
 
 function sh(command: string, args: string[]) {
   const r = spawnSync(command, args, { encoding: 'utf8' });
@@ -41,12 +100,13 @@ async function step(
   command: string,
   args: string[],
   timeoutMs: number,
+  extraEnv: Record<string, string> = {},
 ) {
   const cached = results.get(name);
   if (cached) return cached;
   const result = await run(command, args, {
     cwd: COPY,
-    env: cleanEnv({ CI: '1', FORCE_COLOR: '0', NO_COLOR: '1' }),
+    env: cleanEnv({ CI: '1', FORCE_COLOR: '0', NO_COLOR: '1', ...extraEnv }),
     logName: `g0-${name}.log`,
     timeoutMs,
     redact,
@@ -202,9 +262,129 @@ describe('G0.3 upstream verification commands on the clean install', () => {
   it('[G0.3] npm run lint exits 0', () => gate('lint', 'lint', 600_000));
   it('[G0.3] npm test exits 0 without the stack or any credential', () =>
     gate('test', 'test', 900_000));
-  it('[G0.3] npm run build exits 0', () => gate('build', 'build', 900_000));
-  it('[G0.3] npm run check-format exits 0 (covers every changed file)', () =>
+  it('[G0.3] npm run build exits 0 with canary secrets in the build environment and a .env file', async () => {
+    const ci = results.get('npm-ci');
+    expect(ci?.code, 'npm ci did not succeed; cannot run build').toBe(0);
+    canaries = makeCanaries();
+    redact = makeRedactor([
+      ...collectNeedles(rolesFiles).map((n) => n.value),
+      ...canaries.needles.map((n) => n.value),
+    ]);
+    // A .env inside the scratch copy (never the user's real one) plus the same
+    // names exported to the build process: both ways Vite and a vite.config
+    // `define` could pick them up.
+    const envFile = path.join(COPY, '.env');
+    writeFileSync(
+      envFile,
+      Object.entries(canaries.env)
+        .map(([k, v]) => `${k}=${v}`)
+        .join('\n') + '\n',
+      { mode: 0o600 },
+    );
+    try {
+      const r = await step('build', 'npm', ['run', 'build'], 900_000, canaries.env);
+      expect(r.code, failureText('npm run build', r)).toBe(0);
+    } finally {
+      rmSync(envFile, { force: true });
+    }
+  });
+  it('[G0.3] npm run check-format exits 0', () =>
     gate('check-format', 'check-format', 300_000));
+
+  it('[G0.3] every NemoDots-owned source file is inside the lint and check-format globs of package.json', () => {
+    const pkg = JSON.parse(
+      readFileSync(path.join(COPY, 'package.json'), 'utf8'),
+    ) as { scripts: Record<string, string> };
+    const tokens = (script: string) =>
+      script
+        .split(/\s+/)
+        .slice(1)
+        .filter((t) => !t.startsWith('--'))
+        .map((t) => t.replace(/^"|"$/g, ''));
+    const lintTokens = tokens(pkg.scripts.lint);
+    const formatTokens = tokens(pkg.scripts['check-format']);
+    const globRe = (glob: string) =>
+      new RegExp(
+        '^' +
+          glob
+            .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+            .replace(/\*/g, '[^/]*') +
+          '$',
+      );
+    const covered = (file: string, toks: string[]) =>
+      toks.some((t) =>
+        t.includes('*') ? globRe(t).test(file) : file === t || file.startsWith(`${t}/`),
+      );
+    const owned: string[] = [];
+    const walkDir = (dir: string) => {
+      const abs = path.join(APP_ROOT, dir);
+      if (!existsSync(abs)) return;
+      for (const name of readdirSync(abs)) {
+        const rel = `${dir}/${name}`;
+        if (statSync(path.join(APP_ROOT, rel)).isDirectory()) walkDir(rel);
+        else owned.push(rel);
+      }
+    };
+    for (const dir of [
+      'scripts/nemodots',
+      'evals',
+      'src/server/nemodots',
+      'tests/nemodots',
+    ])
+      walkDir(dir);
+    const lintable = (f: string) => /\.(ts|tsx|js|mjs|cjs)$/.test(f);
+    const formattable = (f: string) =>
+      /\.(ts|tsx|js|mjs|cjs|json|md|css|ya?ml)$/.test(f);
+    const outsideLint = owned.filter((f) => lintable(f) && !covered(f, lintTokens));
+    const outsideFormat = owned.filter(
+      (f) => formattable(f) && !covered(f, formatTokens),
+    );
+    const byDir = (files: string[]) => {
+      const counts = new Map<string, number>();
+      for (const f of files) {
+        const d = f.split('/').slice(0, -1).join('/');
+        counts.set(d, (counts.get(d) ?? 0) + 1);
+      }
+      return [...counts].map(([d, n]) => `${d} (${n})`).join(', ');
+    };
+    appendManifest({
+      gate: 0,
+      step: 'format-lint-coverage',
+      ownedFiles: owned.length,
+      outsideLint: outsideLint.length,
+      outsideFormat: outsideFormat.length,
+    });
+    expect(
+      outsideLint,
+      `NemoDots-owned files outside the lint globs: ${byDir(outsideLint)}`,
+    ).toEqual([]);
+    expect(
+      outsideFormat,
+      `NemoDots-owned files outside the check-format globs: ${byDir(outsideFormat)}`,
+    ).toEqual([]);
+  });
+
+  it('[G0.3] prettier --check passes directly on scripts/nemodots and evals', async () => {
+    expect(results.get('npm-ci')?.code, 'npm ci did not succeed').toBe(0);
+    const r = await step(
+      'prettier-owned',
+      'npx',
+      ['prettier', '--check', 'scripts/nemodots', 'evals'],
+      300_000,
+    );
+    expect(r.code, failureText('prettier --check scripts/nemodots evals', r)).toBe(0);
+  });
+
+  it('[G0.3] eslint passes directly on scripts/nemodots and evals', async () => {
+    expect(results.get('npm-ci')?.code, 'npm ci did not succeed').toBe(0);
+    const r = await step(
+      'eslint-owned',
+      'npx',
+      ['eslint', 'scripts/nemodots', 'evals'],
+      300_000,
+    );
+    expect(r.code, failureText('eslint scripts/nemodots evals', r)).toBe(0);
+  });
 
   it('[G0.3] typecheck, lint and format failures are not in production or builder-owned files', () => {
     // Attribution only: acceptance suites written concurrently by the

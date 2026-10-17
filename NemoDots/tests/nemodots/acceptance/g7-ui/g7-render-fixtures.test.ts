@@ -15,16 +15,15 @@ import {
   MissionSnapshotSchema,
   type MissionSnapshot,
 } from '../../../../src/server/nemodots/contracts/index.js';
+import { checkReceiptDrilldown, checkReceiptRow } from './helpers/checks.js';
 import { MissionPage, labelled, rowCells } from './helpers/mission-page.js';
 import { Acc7Stack } from './helpers/stack.js';
 import {
   type Scenario,
   type ScenarioOptions,
   FAILURE_REASON,
-  JUSTIFICATION,
   TITLES,
   buildScenario,
-  frames,
   serveScenario,
   shortId,
 } from './helpers/synthetic.js';
@@ -96,7 +95,6 @@ describe('task tree and dependencies (G7.4)', () => {
       await expect(
         mp.taskTree.getByRole('list', { name: `Subtasks of ${TITLES.cache}` }),
       ).toHaveCount(0);
-      expect(JUSTIFICATION.length).toBeGreaterThan(0);
     } finally {
       await context.close();
     }
@@ -136,20 +134,7 @@ describe('evidence ledger and claims (G7.3)', () => {
   it('[G7.3] (fulfilled snapshot) each receipt row shows exact source key, revision, status and trust in its own cells', async () => {
     const { context, mp, scenario } = await openScenario();
     try {
-      for (const r of scenario.snapshot.receipts) {
-        const row = mp.ledger
-          .getByRole('row')
-          .filter({ hasText: r.source.key })
-          .filter({ hasText: shortId(r.id) });
-        await expect(row, `receipt ${shortId(r.id)}`).toHaveCount(1);
-        const cells = await rowCells(row);
-        expect(cells.revision, `revision cell of ${shortId(r.id)}`).toBe(
-          String(r.sourceRevision),
-        );
-        expect(cells.status).toMatch(statusText(r.status));
-        expect(cells.trust.toLowerCase()).toContain(humanize(r.trust));
-        expect(cells.source).toContain(r.source.key);
-      }
+      for (const r of scenario.snapshot.receipts) await checkReceiptRow(mp, r);
     } finally {
       await context.close();
     }
@@ -162,43 +147,7 @@ describe('evidence ledger and claims (G7.3)', () => {
       const older = scenario.snapshot.receipts.find(
         (x) => x.id === r.supersedes,
       )!;
-      const name = new RegExp(
-        `${escapeRe(shortId(r.id))}|${escapeRe(r.id)}`,
-        'i',
-      );
-      const detail = page
-        .getByRole('dialog', { name })
-        .or(page.getByRole('complementary', { name }));
-      await expect(detail, 'no drilldown before Enter').toHaveCount(0);
-      const row = mp.ledger
-        .getByRole('row')
-        .filter({ hasText: r.source.key })
-        .filter({ hasText: shortId(r.id) });
-      const trigger = row.getByRole('button').first();
-      await mp.tabTo(trigger);
-      await page.keyboard.press('Enter');
-      await expect(detail, 'drilldown after Enter').toBeVisible();
-      await expect(detail).toContainText(shortId(r.id));
-      await expect(detail).toContainText(r.contentDigest.slice(0, 12));
-      await expect(detail).toContainText(
-        new RegExp(escapeRe(humanize(r.trust)), 'i'),
-      );
-      await expect(detail).toContainText(
-        new RegExp(escapeRe(humanize(r.provenance.kind)), 'i'),
-      );
-      await expect(detail).toContainText(statusText(r.status));
-      await expect(detail).toContainText(
-        labelled(/revision/, String(r.sourceRevision)),
-      );
-      await expect(
-        detail
-          .getByRole('link', { name: new RegExp(shortId(older.id)) })
-          .or(
-            detail.getByRole('button', { name: new RegExp(shortId(older.id)) }),
-          )
-          .first(),
-        'supersedes link to the older receipt',
-      ).toBeVisible();
+      await checkReceiptDrilldown(page, mp, r, older);
     } finally {
       await context.close();
     }
@@ -378,17 +327,17 @@ describe('recovery timeline (G7.6)', () => {
       const invalidationItems = texts
         .map((t, i) => ({ t, i }))
         .filter(
-          ({ t }) =>
-            t.includes(invalidation.sourceKey) && /invalidat/i.test(t),
+          ({ t }) => t.includes(invalidation.sourceKey) && /invalidat/i.test(t),
         );
       expect(
         invalidationItems.length,
         'an item for the invalidated source',
       ).toBeGreaterThan(0);
       const entry = invalidationItems[0]!;
-      expect(entry.i, 'the invalidation precedes its recovery steps').toBeLessThan(
-        positions[0]!,
-      );
+      expect(
+        entry.i,
+        'the invalidation precedes its recovery steps',
+      ).toBeLessThan(positions[0]!);
       const invalidatedTitles = scenario.snapshot.tasks
         .filter((t) => invalidation.affected.taskIds.includes(t.id))
         .map((t) => t.title);
@@ -400,7 +349,9 @@ describe('recovery timeline (G7.6)', () => {
       expect(invalidatedTitles.length).toBeGreaterThan(0);
       expect(preservedTitles.length).toBeGreaterThan(0);
       for (const title of invalidatedTitles)
-        expect(entry.t, `invalidated task "${title}" is named`).toContain(title);
+        expect(entry.t, `invalidated task "${title}" is named`).toContain(
+          title,
+        );
       for (const title of preservedTitles)
         expect(entry.t, `preserved task "${title}" is named`).toContain(title);
       // The repair attempt appears and is after the invalidation.
@@ -537,7 +488,11 @@ describe('reconnect and dedup with injected events (G7.8)', () => {
         receiptCells: await mp.ledger
           .getByRole('row')
           .evaluateAll((rows) =>
-            rows.map((r) => (r.textContent ?? '').match(/receipt\s+([0-9a-f]{8})/)?.[1] ?? ''),
+            rows.map(
+              (r) =>
+                (r.textContent ?? '').match(/receipt\s+([0-9a-f]{8})/)?.[1] ??
+                '',
+            ),
           ),
         actionItems: await mp.actions.getByRole('listitem').count(),
         recoveryItems: await mp.recovery.getByRole('listitem').count(),
@@ -561,10 +516,7 @@ describe('status text (G7.10)', () => {
     const { context, mp } = await openScenario();
     try {
       await expect(mp.taskTree).toBeVisible();
-      await mp.actions
-        .getByRole('button')
-        .first()
-        .click();
+      await mp.actions.getByRole('button').first().click();
       const pills = mp.main.locator('[data-status]');
       const n = await pills.count();
       expect(n).toBeGreaterThan(8);
@@ -574,7 +526,9 @@ describe('status text (G7.10)', () => {
         const status = (await pill.getAttribute('data-status')) ?? '';
         statuses.add(status);
         const text = ((await pill.innerText()) || '').trim().toLowerCase();
-        expect(text.length, `pill ${status} has visible text`).toBeGreaterThan(0);
+        expect(text.length, `pill ${status} has visible text`).toBeGreaterThan(
+          0,
+        );
         const word = humanize(status).split(' ')[0]!.slice(0, 4).toLowerCase();
         const overridden = status === 'down' && /unreach|down/.test(text);
         expect(
@@ -582,9 +536,10 @@ describe('status text (G7.10)', () => {
           `pill text "${text}" for status ${status}`,
         ).toBe(true);
       }
-      expect(statuses.size, 'a variety of statuses was rendered').toBeGreaterThan(
-        4,
-      );
+      expect(
+        statuses.size,
+        'a variety of statuses was rendered',
+      ).toBeGreaterThan(4);
     } finally {
       await context.close();
     }
@@ -685,7 +640,9 @@ describe('terminal states (G7.13)', () => {
       expect(effects.length).toBeGreaterThan(0);
       for (const id of effects)
         await expect(mp.main).toContainText(shortId(id));
-      await expect(mp.main).toContainText(/cannot be undone|irreversible|not undone|remain/i);
+      await expect(mp.main).toContainText(
+        /cannot be undone|irreversible|not undone|remain/i,
+      );
       for (const button of [mp.start, mp.pause, mp.resume, mp.cancel])
         await expect(button).toBeDisabled();
     } finally {
@@ -746,5 +703,3 @@ describe('telemetry (G7.15)', () => {
     }
   });
 });
-
-void frames;

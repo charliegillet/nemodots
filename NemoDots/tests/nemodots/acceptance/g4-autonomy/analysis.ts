@@ -2,6 +2,7 @@
 // Independent derivations over a mission snapshot and its event stream. They
 // use only recorded data (readsets, inherited vectors, output vectors, event
 // order) and a traversal written here, never production graph code.
+import { createHash } from 'node:crypto';
 import type { MissionEvent } from '../../../../src/server/nemodots/contracts/index.js';
 
 export interface AttemptLike {
@@ -40,6 +41,7 @@ export interface ReceiptLike {
   supersedes: string | null;
   supersededBy: string | null;
   sourceRevision: number;
+  contentDigest?: string;
   source: { key: string };
 }
 export interface SnapshotLike {
@@ -204,16 +206,65 @@ export function findLeaks(
   return [...hits];
 }
 
-/** Texts of non-system messages in recorded provider requests (tool results, user turns). */
-export function nonSystemTexts(body: Record<string, any>): string[] {
+/**
+ * sha256 of system/developer message texts a reviewer has read and accepted as
+ * static, diagnosis-free instructions. Empty by default: any leak-vocabulary
+ * hit in a system message fails until someone justifies it here.
+ */
+export const ALLOWED_SYSTEM_DIGESTS: ReadonlySet<string> = new Set<string>();
+
+export interface MessageText {
+  role: string;
+  text: string;
+}
+
+const textOf = (content: unknown): string =>
+  typeof content === 'string'
+    ? content
+    : Array.isArray(content)
+      ? content.map((p: any) => p?.text ?? '').join('\n')
+      : '';
+
+/** Every message of a recorded request, whatever its role (system and developer included). */
+export function allMessageTexts(body: Record<string, any>): MessageText[] {
   const messages: any[] = Array.isArray(body.messages) ? body.messages : [];
-  return messages
-    .filter((m) => m?.role !== 'system' && m?.role !== 'developer')
-    .map((m) =>
-      typeof m.content === 'string'
-        ? m.content
-        : Array.isArray(m.content)
-          ? m.content.map((p: any) => p?.text ?? '').join('\n')
-          : '',
-    );
+  return messages.map((m) => ({
+    role: String(m?.role ?? 'unknown'),
+    text:
+      textOf(m?.content) +
+      (Array.isArray(m?.tool_calls) ? JSON.stringify(m.tool_calls) : ''),
+  }));
+}
+
+export const sha256 = (text: string) =>
+  createHash('sha256').update(text).digest('hex');
+
+/**
+ * Leak scan over every role. A system/developer message is skipped only when
+ * its digest was explicitly allowlisted. Returns role-tagged hits.
+ */
+export function scanRequestsForLeaks(
+  bodies: readonly Record<string, any>[],
+  extra: readonly string[] = [],
+  allowed: ReadonlySet<string> = ALLOWED_SYSTEM_DIGESTS,
+) {
+  const hits = new Set<string>();
+  for (const body of bodies)
+    for (const { role, text } of allMessageTexts(body)) {
+      if ((role === 'system' || role === 'developer') && allowed.has(sha256(text)))
+        continue;
+      for (const hit of findLeaks([text], extra)) hits.add(`${role}:${hit}`);
+    }
+  return [...hits];
+}
+
+/** Roles of the messages (any role) that mention any needle. */
+export function rolesMentioning(
+  body: Record<string, any>,
+  needles: readonly string[],
+) {
+  const roles = new Set<string>();
+  for (const { role, text } of allMessageTexts(body))
+    if (needles.some((n) => n && text.includes(n))) roles.add(role);
+  return [...roles];
 }

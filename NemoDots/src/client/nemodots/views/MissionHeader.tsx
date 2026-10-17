@@ -79,28 +79,45 @@ export function lifecycleDisabledReason(
 }
 
 /**
- * The badge for one mission. A fixture mission always reads Fixture; a live
- * mission only reads Live while the server health agrees.
+ * The badge for one mission, driven by mission.mode: where its model calls came
+ * from. The server's current mode is separate context (serverModeNote).
  */
 export function missionModeBadge(
   mission: Mission | null,
   health: HealthStatus | null,
 ): ModeBadgeView {
-  if (mission?.mode === 'fixture') {
-    const base = deriveModeBadge(
-      health ? { ...health, mode: 'fixture' } : null,
-    );
-    return base.kind === 'fixture'
-      ? { ...base, missingEnv: [] }
-      : {
-          kind: 'fixture',
-          label: 'Fixture',
-          description:
-            'Fixture mode: model responses are scripted fixtures, not a live model.',
-          missingEnv: [],
-        };
-  }
+  if (mission?.mode === 'fixture')
+    return {
+      kind: 'fixture',
+      label: 'Fixture',
+      description:
+        'Fixture mode: model responses are scripted fixtures, not a live model.',
+      missingEnv: [],
+    };
+  if (mission?.mode === 'live')
+    return {
+      kind: 'live',
+      label: 'Live',
+      description: `Live mission: Nemotron reasoning on ${mission.provider.plannerModel} via ${mission.provider.host}.`,
+      missingEnv: [],
+    };
   return deriveModeBadge(health);
+}
+
+/** Context line when the server's current mode differs from a live mission's. */
+export function serverModeNote(
+  mission: Mission | null,
+  health: HealthStatus | null,
+): string | null {
+  if (mission?.mode !== 'live' || !health || health.mode === 'live')
+    return null;
+  return health.mode === 'fixture'
+    ? 'The server is now in fixture mode; this live mission cannot start or continue until live mode returns.'
+    : `The server is now blocked${
+        health.missingEnv.length
+          ? `: missing ${health.missingEnv.join(', ')}`
+          : ''
+      }; this live mission cannot start or continue until live mode returns.`;
 }
 
 const STREAM_TEXT: Record<StreamStatus, string> = {
@@ -148,6 +165,7 @@ export function MissionHeader({
   onAction: (action: MissionLifecycleAction) => void;
 }) {
   const badge = missionModeBadge(mission, health);
+  const serverNote = serverModeNote(mission, health);
   return (
     <header className="nd-mission-head" aria-label="Mission summary">
       <div className="page-heading nd-heading">
@@ -189,6 +207,9 @@ export function MissionHeader({
         <IntelligenceBadge badge={deriveIntelligenceBadge(health)} />
         {mission && <StatusPill status={mission.status} />}
       </p>
+      {serverNote && (
+        <p className="nd-note nd-server-mode-note">{serverNote}</p>
+      )}
       {mission?.mode === 'fixture' && (
         <p className="nd-note nd-fixture-note">
           FIXTURE mission: model responses are scripted fixtures, not a live

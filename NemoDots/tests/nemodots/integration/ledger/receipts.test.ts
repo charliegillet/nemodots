@@ -92,27 +92,22 @@ describe('immutability (trigger, holds for every role including the owner)', () 
     );
     expect(ObservationReceiptSchema.safeParse(receipt).success).toBe(true);
     const { app, admin } = getDb();
-    for (const pool of [app, admin]) {
-      for (const sql of [
-        "UPDATE ledger.observation_receipts SET normalized_value = '{}'::jsonb WHERE id = $1",
-        "UPDATE ledger.observation_receipts SET content_digest = repeat('0', 64) WHERE id = $1",
-        'UPDATE ledger.observation_receipts SET source_revision = source_revision + 1 WHERE id = $1',
-        "UPDATE ledger.observation_receipts SET observed_at = observed_at - interval '1 day' WHERE id = $1",
-        'DELETE FROM ledger.observation_receipts WHERE id = $1',
-        "UPDATE ledger.observation_receipts SET status = 'supported' WHERE id = $1", // no-op status but...
-        "UPDATE ledger.observation_receipts SET status = 'superseded' WHERE id = $1", // missing version bump
-        "UPDATE ledger.observation_receipts SET status = 'superseded', status_version = 5 WHERE id = $1",
-      ]) {
-        if (sql.includes("status = 'supported'")) {
-          // an UPDATE that changes nothing is allowed; prove the row is intact below
-          await pool.query(sql, [receipt.id]);
-          continue;
-        }
+    const tampering = [
+      "UPDATE ledger.observation_receipts SET normalized_value = '{}'::jsonb WHERE id = $1",
+      "UPDATE ledger.observation_receipts SET content_digest = repeat('0', 64) WHERE id = $1",
+      'UPDATE ledger.observation_receipts SET source_revision = source_revision + 1 WHERE id = $1',
+      "UPDATE ledger.observation_receipts SET observed_at = observed_at - interval '1 day' WHERE id = $1",
+      'DELETE FROM ledger.observation_receipts WHERE id = $1',
+      // a status change must be a legal transition AND advance status_version by exactly one
+      "UPDATE ledger.observation_receipts SET status = 'superseded' WHERE id = $1",
+      "UPDATE ledger.observation_receipts SET status = 'superseded', status_version = 5 WHERE id = $1",
+      'UPDATE ledger.observation_receipts SET status_version = status_version + 1 WHERE id = $1',
+    ];
+    for (const pool of [app, admin])
+      for (const sql of tampering)
         await expect(pool.query(sql, [receipt.id])).rejects.toThrow(
           /immutable/i,
         );
-      }
-    }
     const after = await currentReceipt(app, {
       ownerId: scope.ownerId,
       environment: scope.environment,

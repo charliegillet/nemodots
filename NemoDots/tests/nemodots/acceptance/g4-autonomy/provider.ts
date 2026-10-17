@@ -13,6 +13,8 @@ import type { AddressInfo } from 'node:net';
 export interface ToolCallSpec {
   name: string;
   args: unknown;
+  /** Tool call id on the wire (default `call_<n>_<i>`); lets a script replay an id with a different payload. */
+  id?: string;
   /** Send the arguments as this raw string instead of JSON.stringify(args). */
   rawArguments?: string;
 }
@@ -38,6 +40,8 @@ export type ProviderReply =
 export interface ProviderCall {
   /** 1-based sequence over every chat completion received. */
   n: number;
+  /** The X-Request-Id header the app sent (CONTRACTS section 3: ModelCallRecord.id), or null. */
+  requestId: string | null;
   /** `worker` when tools are offered, otherwise `structured` (planner and others). */
   kind: 'worker' | 'structured';
   body: Record<string, any>;
@@ -48,11 +52,24 @@ export interface ProviderCall {
   /** Parsed `tool` message contents (JSON when parseable). */
   toolMessages: unknown[];
   toolNames: string[];
+  /** Names of the tool calls the assistant already made in this conversation, in order. */
+  toolCallNames: string[];
   stream: boolean;
 }
 export interface RecordedCall {
   n: number;
+  /** X-Request-Id sent by the app (== ModelCallRecord.id), or null. */
+  requestId: string | null;
+  /** X-Request-Id the upstream provider answered with (passthrough only). */
+  upstreamRequestId: string | null;
+  /** When the request reached the provider (before any gate). */
+  arrivedAt: number;
+  /** When the reply was decided/sent. */
   at: number;
+  /** The scripted reply (scripted mode only). */
+  scripted: ProviderReply | null;
+  /** The full upstream response body, streamed chunks accumulated (passthrough only). */
+  responseText: string;
   kind: ProviderCall['kind'];
   body: Record<string, any>;
   text: string;
@@ -92,6 +109,11 @@ export interface Provider {
   readonly url: string;
   readonly host: string;
   readonly calls: RecordedCall[];
+  /** Highest number of chat completions simultaneously in flight so far. */
+  readonly peakInFlight: number;
+  /** Chat completions in flight right now. */
+  readonly inFlight: number;
+  resetPeak(): void;
   setScript(script: ProviderScript): void;
   /** Hold the next matching reply until released (deterministic mid-attempt interleaving). */
   gate(match: (call: ProviderCall) => boolean): {
@@ -119,6 +141,8 @@ export async function startProvider(
   }[] = [];
   const sockets = new Set<import('node:net').Socket>();
   let sequence = 0;
+  let inFlight = 0;
+  let peakInFlight = 0;
 
   const server = http.createServer(async (req, res) => {
     const chunks: Buffer[] = [];
@@ -142,7 +166,17 @@ export async function startProvider(
       }
       if (req.method === 'POST' && path.endsWith('/chat/completions')) {
         const body = JSON.parse(raw) as Record<string, any>;
+        const arrivedAt = Date.now();
+        inFlight += 1;
+        peakInFlight = Math.max(peakInFlight, inFlight);
+        let counted = true;
+        const settle = () => {
+          if (counted) inFlight -= 1;
+          counted = false;
+        };
+        res.once('close', settle);
         sequence += 1;
+        const header = req.headers['x-request-id'];
         const messages: any[] = Array.isArray(body.messages)
           ? body.messages
           : [];
@@ -151,6 +185,7 @@ export async function startProvider(
           .map((message) => parseMaybe(messageText(message)));
         const call: ProviderCall = {
           n: sequence,
+          requestId: typeof header === 'string' ? header : null,
           kind:
             Array.isArray(body.tools) && body.tools.length
               ? 'worker'
@@ -159,6 +194,13 @@ export async function startProvider(
           text: messages.map(messageText).join('\n'),
           toolResults: toolMessages.length,
           toolMessages,
+          toolCallNames: messages
+            .filter((message) => message?.role === 'assistant')
+            .flatMap((message) =>
+              Array.isArray(message.tool_calls) ? message.tool_calls : [],
+            )
+            .map((tc: any) => tc?.function?.name ?? tc?.name)
+            .filter(Boolean),
           toolNames: (body.tools ?? [])
             .map((tool: any) => tool?.function?.name ?? tool?.name)
             .filter(Boolean),
@@ -173,6 +215,11 @@ export async function startProvider(
         const reply = await script(call);
         const record: RecordedCall = {
           n: call.n,
+          requestId: call.requestId,
+          upstreamRequestId: null,
+          arrivedAt,
+          scripted: reply.type === 'passthrough' ? null : reply,
+          responseText: '',
           at: Date.now(),
           kind: call.kind,
           body,
@@ -218,16 +265,21 @@ export async function startProvider(
       },
       body: req.method === 'GET' ? undefined : raw,
     });
-    if (record) record.status = upstream.status;
+    if (record) {
+      record.status = upstream.status;
+      record.upstreamRequestId = upstream.headers.get('x-request-id');
+    }
     res.writeHead(upstream.status, {
       'content-type':
         upstream.headers.get('content-type') ?? 'application/json',
     });
     if (!upstream.body) return void res.end();
     const reader = upstream.body.getReader();
+    const decoder = new TextDecoder();
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
+      if (record) record.responseText += decoder.decode(value, { stream: true });
       res.write(value);
     }
     res.end();
@@ -292,7 +344,7 @@ export async function startProvider(
             content: null,
             tool_calls: reply.calls.map((spec, i) => ({
               index: i,
-              id: `call_${call.n}_${i}`,
+              id: spec.id ?? `call_${call.n}_${i}`,
               type: 'function',
               function: {
                 name: spec.name,
@@ -367,6 +419,15 @@ export async function startProvider(
     url: `http://127.0.0.1:${address.port}/v1`,
     host: `127.0.0.1:${address.port}`,
     calls,
+    get peakInFlight() {
+      return peakInFlight;
+    },
+    get inFlight() {
+      return inFlight;
+    },
+    resetPeak() {
+      peakInFlight = inFlight;
+    },
     setScript(next) {
       script = next;
     },
@@ -385,4 +446,82 @@ export async function startProvider(
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },
   };
+}
+
+export interface ParsedCompletion {
+  content: string;
+  toolCalls: { id: string | null; name: string; args: unknown }[];
+}
+
+function parseArgs(raw: unknown): unknown {
+  if (typeof raw !== 'string') return raw;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+}
+
+/**
+ * What the model (or the scripted stand-in) actually returned for a recorded
+ * request: scripted replies are read from the script, pass-through replies are
+ * parsed from the upstream body (plain JSON or an accumulated SSE stream).
+ */
+export function completionOf(record: RecordedCall): ParsedCompletion {
+  const out: ParsedCompletion = { content: '', toolCalls: [] };
+  const scripted = record.scripted;
+  if (scripted) {
+    if (scripted.type === 'content') out.content = scripted.text;
+    if (scripted.type === 'tool_calls')
+      out.toolCalls = scripted.calls.map((c, i) => ({
+        id: c.id ?? `call_${record.n}_${i}`,
+        name: c.name,
+        args: c.rawArguments ?? c.args,
+      }));
+    return out;
+  }
+  const text = record.responseText.trim();
+  if (!text) return out;
+  const byIndex = new Map<
+    number,
+    { id: string | null; name: string; args: string }
+  >();
+  const absorb = (message: any, key: 'message' | 'delta') => {
+    if (typeof message?.content === 'string') out.content += message.content;
+    for (const [i, call] of (message?.tool_calls ?? []).entries()) {
+      const index = typeof call?.index === 'number' ? call.index : i;
+      const entry = byIndex.get(index) ?? { id: null, name: '', args: '' };
+      if (call?.id) entry.id = call.id;
+      if (call?.function?.name) entry.name += call.function.name;
+      if (typeof call?.function?.arguments === 'string')
+        entry.args += call.function.arguments;
+      byIndex.set(index, entry);
+    }
+    return key;
+  };
+  if (text.startsWith('data:') || text.includes('\ndata:')) {
+    for (const line of text.split('\n')) {
+      if (!line.startsWith('data:')) continue;
+      const data = line.slice(5).trim();
+      if (!data || data === '[DONE]') continue;
+      try {
+        const chunk = JSON.parse(data);
+        for (const choice of chunk.choices ?? [])
+          absorb(choice.delta ?? choice.message, 'delta');
+      } catch {
+        /* partial frame */
+      }
+    }
+  } else {
+    try {
+      const body = JSON.parse(text);
+      for (const choice of body.choices ?? []) absorb(choice.message, 'message');
+    } catch {
+      /* not JSON */
+    }
+  }
+  out.toolCalls = [...byIndex.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([, v]) => ({ id: v.id, name: v.name, args: parseArgs(v.args) }));
+  return out;
 }

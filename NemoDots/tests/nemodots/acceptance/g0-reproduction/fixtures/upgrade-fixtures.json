@@ -370,9 +370,7 @@
             "task_id": "00000000-0000-4000-8000-000000000601",
             "attempt_id": "00000000-0000-4000-8000-000000000701",
             "claim": "The cache namespace appears to have changed.",
-            "supporting_receipt_ids": [
-              "00000000-0000-4000-8000-000000000201"
-            ],
+            "supporting_receipt_ids": ["00000000-0000-4000-8000-000000000201"],
             "confidence": "medium"
           }
         },
