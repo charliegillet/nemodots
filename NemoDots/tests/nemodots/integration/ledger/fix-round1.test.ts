@@ -9,7 +9,7 @@
 // pass cannot come from the deadlock detector resolving a cycle.
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   InvalidObservationError,
   SupportError,
@@ -41,6 +41,24 @@ const getDb = useLedgerDb();
 
 beforeEach(async () => {
   await resetAuthority(getDb().admin);
+});
+
+// Connections a test holds open across awaits. A failing assertion must not
+// leave a transaction (and its locks) behind for the next test, so the
+// backends are terminated and the connections destroyed after every test.
+const held: { client: pg.PoolClient; pid: number }[] = [];
+async function open(pool: pg.Pool): Promise<pg.PoolClient> {
+  const client = await pool.connect();
+  held.push({ client, pid: await backendPid(client) });
+  return client;
+}
+afterEach(async () => {
+  for (const { client, pid } of held.splice(0)) {
+    await getDb()
+      .admin.query('SELECT pg_terminate_backend($1)', [pid])
+      .catch(() => {});
+    client.release(new Error('terminated by the test'));
+  }
 });
 
 /** Well inside deadlock_timeout (1 s): a blocked statement that was merely unblocked. */
@@ -219,7 +237,7 @@ describe('retiring a controlled receipt vs a concurrent G2 publication', () => {
       const reg = await registerMember(scope, 'db.pool_max');
       const attempt = await insertAttempt(scope);
 
-      const retractor = await app.connect();
+      const retractor = await open(app);
       await retractor.query('BEGIN');
       await transitionReceipt(
         retractor,
@@ -227,7 +245,7 @@ describe('retiring a controlled receipt vs a concurrent G2 publication', () => {
         { ledger: FX },
       );
 
-      const publisher = await app.connect();
+      const publisher = await open(app);
       const pid = await backendPid(publisher);
       let publicationError: unknown = null;
       const publication = (async () => {
@@ -257,9 +275,7 @@ describe('retiring a controlled receipt vs a concurrent G2 publication', () => {
       })();
       expect(await waitsOnLock(admin, pid, 3_000)).toBe(true);
       await retractor.query('COMMIT');
-      retractor.release();
       await publication;
-      publisher.release();
 
       expect(publicationError).toBeInstanceOf(SupportError);
       expect((publicationError as SupportError).reason).toBe(
@@ -281,7 +297,7 @@ describe('retiring a controlled receipt vs a concurrent G2 publication', () => {
       const reg = await registerMember(scope, 'db.pool_max');
       const attempt = await insertAttempt(scope);
 
-      const publisher = await app.connect();
+      const publisher = await open(app);
       await publisher.query('BEGIN');
       await assertCurrent(
         publisher,
@@ -300,7 +316,7 @@ describe('retiring a controlled receipt vs a concurrent G2 publication', () => {
         FX,
       );
 
-      const retractor = await app.connect();
+      const retractor = await open(app);
       const pid = await backendPid(retractor);
       await retractor.query('BEGIN');
       const retirement = transitionReceipt(
@@ -310,10 +326,8 @@ describe('retiring a controlled receipt vs a concurrent G2 publication', () => {
       );
       expect(await waitsOnLock(admin, pid, 3_000)).toBe(true);
       await publisher.query('COMMIT');
-      publisher.release();
       const result = await withTimeout(retirement, 5_000, 'retirement');
       await retractor.query('COMMIT');
-      retractor.release();
 
       expect(result.invalidation!.affected.attemptIds).toEqual([attempt.id]);
       expect(await statusOf('task_attempts', attempt.id)).toBe('invalidated');
@@ -352,14 +366,14 @@ describe('closure versus in-flight commits and publications (lock order)', () =>
     await inTx(app, (client) => updateConfig(client, 'db.pool_max', 4));
 
     // G1 commit, ARCHITECTURE 5.1: the intent first, then the config row.
-    const committer = await app.connect();
+    const committer = await open(app);
     await committer.query('BEGIN');
     await committer.query(
       'SELECT id FROM fx_coordinator.action_intents WHERE id = $1 FOR UPDATE',
       [intentId],
     );
 
-    const watcher = await app.connect();
+    const watcher = await open(app);
     const watcherPid = await backendPid(watcher);
     let watcherError: unknown = null;
     const registration = (async () => {
@@ -399,8 +413,6 @@ describe('closure versus in-flight commits and publications (lock order)', () =>
     }
     const commitMs = Date.now() - started;
     const result = await withTimeout(registration, 5_000, 'registration');
-    committer.release();
-    watcher.release();
 
     expect(code(commitError)).toBeNull();
     expect(code(watcherError)).toBeNull();
@@ -430,14 +442,14 @@ describe('closure versus in-flight commits and publications (lock order)', () =>
     );
 
     // Publication (fence.ts): the attempt row first, the ledger afterwards.
-    const publisher = await app.connect();
+    const publisher = await open(app);
     await publisher.query('BEGIN');
     await publisher.query(
       'SELECT id FROM fx_coordinator.task_attempts WHERE id = $1 FOR UPDATE',
       [held.id],
     );
 
-    const watcher = await app.connect();
+    const watcher = await open(app);
     const watcherPid = await backendPid(watcher);
     let watcherError: unknown = null;
     const registration = (async () => {
@@ -489,8 +501,6 @@ describe('closure versus in-flight commits and publications (lock order)', () =>
     }
     const publicationMs = Date.now() - started;
     const result = await withTimeout(registration, 5_000, 'registration');
-    publisher.release();
-    watcher.release();
 
     expect(code(publicationError)).toBeNull();
     expect(code(watcherError)).toBeNull();
@@ -522,20 +532,19 @@ describe('edge cycle lock', () => {
       from: node('attempt', randomUUID(), m.mission, m.task),
       to: node('task_output', randomUUID(), m.mission, m.task),
     });
-    const holder = await app.connect();
+    const holder = await open(app);
     await holder.query('BEGIN');
     await addEdges(holder, [edge(a)]);
 
-    const other = await app.connect();
+    const other = await open(app);
     const pid = await backendPid(other);
     await other.query('BEGIN');
     const write = addEdges(other, [edge(b)]);
     const blocked = await waitsOnLock(admin, pid, 750);
+    // Releasing the holder first keeps a regression a failed assertion, not a hang.
+    await holder.query('COMMIT');
     await write;
     await other.query('COMMIT');
-    await holder.query('COMMIT');
-    holder.release();
-    other.release();
     expect(blocked).toBe(false);
   });
 
@@ -608,7 +617,7 @@ describe('recordReadSet', () => {
     const first = await registerHealth(scope, { status: 'ok' });
     const attempt = await insertAttempt(scope);
 
-    const registrar = await app.connect();
+    const registrar = await open(app);
     await registrar.query('BEGIN');
     await registerObservation(
       registrar,
@@ -619,7 +628,7 @@ describe('recordReadSet', () => {
       },
       { ledger: FX },
     );
-    const reader = await app.connect();
+    const reader = await open(app);
     const pid = await backendPid(reader);
     await reader.query('BEGIN');
     const read = recordReadSet(
@@ -636,8 +645,6 @@ describe('recordReadSet', () => {
     await registrar.query('COMMIT');
     const error = await read;
     await reader.query('ROLLBACK');
-    registrar.release();
-    reader.release();
     expect(error).toBeInstanceOf(SupportError);
     expect(
       await count(

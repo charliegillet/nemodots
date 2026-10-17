@@ -101,6 +101,12 @@ export interface Thresholds {
     controlSuccess: { classes: string[]; minRate: number };
     falseBlockRate: { max: number };
   };
+  provider: {
+    maxRetriesPerCall: number;
+    backoffBaseMs: number;
+    backoffCapMs: number;
+    maxInFlightPerModel: number;
+  };
   boundedRecovery: {
     maxRepairAttemptsPerTaskPerInvalidationEvent: number;
     maxAttemptsPerTask: number;

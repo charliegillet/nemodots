@@ -4,7 +4,14 @@
 // still usable. Repair scheduling is NOT here: the coordinator consumes the
 // InvalidationEvent through RecoveryPort / the outbox.
 //
+// Lock order (see prelock.ts): the caller has locked the coordinator rows the
+// closure marks BEFORE the registry/config/receipt locks below; `locked`
+// carries that set and the closure verifies it before writing.
+//
 // Order inside supersedeAndInvalidate():
+//   0. the prior head's receipt row FOR NO KEY UPDATE (the lock the status
+//      UPDATE takes), so a publication holding it FOR SHARE has committed its
+//      edges before the closure reads the graph,
 //   1. closure read (recursive CTE; ClosureCapExceeded here writes nothing),
 //   2. new receipt + revision row + graph node,
 //   3. compare-and-set of the prior head (superseded / retracted) + transition row,
@@ -31,16 +38,18 @@ import {
   type GraphNodeKind,
   type NodeMeta,
 } from './closure.js';
-import { ClosureCapExceeded } from './errors.js';
+import { ClosureCapExceeded, CoarseInvalidationRequiredError } from './errors.js';
 import { coordinatorSchema, type LedgerOptions } from './options.js';
+import { assertLocked, unionAffected } from './prelock.js';
 import {
   insertReceipt,
+  lockReceiptForTransition,
   transitionRow,
   type ReceiptDraft,
   type ReceiptRow,
 } from './receipt-store.js';
 
-export { ClosureCapExceeded };
+export { ClosureCapExceeded, unionAffected };
 
 // --- closure read -----------------------------------------------------------
 
@@ -385,6 +394,11 @@ export interface SupersedeInput {
   /** null skips the marks (tests of the pure graph); default marks the coordinator's rows. */
   marker?: ClosureMarker | null;
   ledger?: LedgerOptions;
+  /**
+   * Coordinator rows the caller has locked (prelock.ts). When set, a closure
+   * that reaches other marked rows throws PrelockInsufficient before any write.
+   */
+  locked?: Affected;
 }
 
 export interface SupersedeResult {
@@ -409,14 +423,17 @@ export async function supersedeAndInvalidate(
   input: SupersedeInput,
 ): Promise<SupersedeResult> {
   const { prior, draft } = input;
-  const closure = isLiveHead(prior)
-    ? await loadClosure(
-        client,
-        { receiptId: prior.id, sourceKey: input.sourceKey },
-        input.limits,
-        input.ledger,
-      )
-    : null;
+  let closure: LoadedClosure | null = null;
+  if (isLiveHead(prior)) {
+    await lockReceiptForTransition(client, prior.id);
+    closure = await loadClosure(
+      client,
+      { receiptId: prior.id, sourceKey: input.sourceKey },
+      input.limits,
+      input.ledger,
+    );
+    if (input.locked) assertLocked(input.locked, closure.affected);
+  }
   const receipt = await insertReceipt(client, {
     ...draft,
     supersedes: prior ? prior.id : null,

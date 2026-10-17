@@ -201,6 +201,26 @@ export async function liveVersion(
   return result;
 }
 
+/**
+ * The authority row of one member (value and version), read without a lock.
+ * Callers hold the row's FOR SHARE / FOR UPDATE lock from liveVersion() in the
+ * same transaction, so the pair cannot change under them.
+ */
+export async function liveMember(
+  client: PgClient,
+  key: string,
+  options?: LedgerOptions,
+): Promise<{ value: unknown; version: number } | null> {
+  const schema = checkoutSchema(options);
+  const { rows } = await client.query<{ value: unknown; version: number }>(
+    `SELECT value, version FROM ${schema}.config_entries WHERE key = $1`,
+    [key],
+  );
+  return rows[0]
+    ? { value: rows[0].value, version: Number(rows[0].version) }
+    : null;
+}
+
 /** Sorted member keys currently in the authority (for collection observations). */
 export async function liveMemberKeys(
   client: PgClient,

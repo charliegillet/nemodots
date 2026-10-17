@@ -290,7 +290,7 @@ describe('G5.7 client timing is first NONEMPTY content, per call (not aggregate 
       }),
       ctx('worker'),
     );
-    const a = r.attempts[0];
+    const a = r.attempts.at(-1)!; // shared-quota 429s can precede the served attempt
     expect(a.firstContentAt).not.toBeNull();
     expect(t(a.startedAt)).toBeLessThanOrEqual(t(a.headersAt));
     expect(t(a.headersAt)).toBeLessThanOrEqual(t(a.firstContentAt));
@@ -334,7 +334,7 @@ describe('G5.7 client timing is first NONEMPTY content, per call (not aggregate 
       ctx('worker'),
     );
     expect(r.outcome).toBe('completed');
-    const a = r.attempts[0];
+    const a = r.attempts.at(-1)!; // shared-quota 429s can precede the served attempt
     // The proxy wrote headers plus the empty/reasoning prelude at once, then held
     // 1.5 s before forwarding any upstream content. Measuring from the client's
     // headersAt (not startedAt) removes Crusoe's own time-to-first-byte from the
@@ -343,7 +343,9 @@ describe('G5.7 client timing is first NONEMPTY content, per call (not aggregate 
     // Direct check against the proxy's wall clock: firstContentAt must not be
     // earlier than the moment the first content-bearing delta was forwarded
     // (50 ms loopback/clock slack).
-    const rec = proxy.seen.find((x) => x.url.endsWith('/chat/completions'))!;
+    const rec = proxy.seen
+      .filter((x) => x.url.endsWith('/chat/completions'))
+      .at(-1)!;
     expect(rec.firstContentForwardedAt).not.toBeNull();
     expect(t(a.firstContentAt)).toBeGreaterThanOrEqual(
       rec.firstContentForwardedAt! - 50,

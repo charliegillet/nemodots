@@ -3,6 +3,12 @@
 // the (public) mission option admission.minAgeMs. Scenario steps go in through
 // the private injector (nemodots_injector role, advanceConfig) or the public
 // owner edit route; nothing about class, fault, key or value reaches the team.
+//
+// Independent observation channels (none of them is the system's own report):
+//   - harness-only read-only SQL role (not in the app or worker environment)
+//   - the verifier's pass-through provider proxy on every trial
+//   - a Redis keyspace subscriber on db 7 under the trial prefix
+//   - plain HTTP against the checkout API
 import { createHmac, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import pg from 'pg';
@@ -33,30 +39,22 @@ import {
 import { ProviderProxy } from './provider-proxy.js';
 import type {
   CheckoutProbeSurface,
+  CrashStateAtKill,
   ProbeRecord,
   RecordedEvent,
   StepApplication,
   TrialRecord,
 } from './record.js';
+import { WORKER_PROGRESS_KINDS } from './scoring.js';
 import { Sut, importEntry } from './sut.js';
 import {
+  RedisEffectWatcher,
   VerifierDb,
   seedStaleCacheBlobs,
   staleCacheBlobs,
 } from './verifier-db.js';
 
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled']);
-const PROGRESS_KINDS = new Set([
-  'task.status',
-  'attempt.started',
-  'attempt.finished',
-  'model_call.recorded',
-  'tool_call.recorded',
-  'action.proposed',
-  'action.decided',
-  'action.committed',
-  'recovery.recorded',
-]);
 
 export async function surface(sku: string): Promise<CheckoutProbeSurface> {
   const get = async (path: string) => {
@@ -175,12 +173,15 @@ export class StepApplier {
             value: step.value,
             causedBy: { actor: 'injector' },
           });
+          application.commitStartMs = Date.now();
           await client.query('COMMIT');
+          application.commitEndMs = Date.now();
         } catch (error) {
           await client.query('ROLLBACK').catch(() => undefined);
           throw error;
         }
       } else {
+        application.commitStartMs = Date.now();
         let response = await this.api.post(
           `/sandbox/sources/${encodeURIComponent(step.key)}`,
           { value: step.value, expectedVersion: before.version },
@@ -190,6 +191,7 @@ export class StepApplier {
             `/sandbox/sources/${encodeURIComponent(`checkout.config/${step.key}`)}`,
             { value: step.value, expectedVersion: before.version },
           );
+        application.commitEndMs = Date.now();
         if (response.status !== 200)
           throw new Error(
             `owner edit of ${step.key} returned HTTP ${response.status}`,
@@ -283,13 +285,11 @@ export async function runTrial(
       'OPENAI_API_KEY is not available; live Crusoe trials cannot run',
     );
 
-  const proxy = trial.disruption
-    ? new ProviderProxy(upstream, trial.disruption)
-    : null;
-  if (proxy) await proxy.listen(G6.proxyPort);
-  const expectedProviderHost = proxy
-    ? `${G6.host}:${G6.proxyPort}`
-    : new URL(upstream).host;
+  // EVERY trial goes through the verifier proxy; only provider-disruption
+  // trials configure a disruption window.
+  const proxy = new ProviderProxy(upstream, trial.disruption ?? null);
+  await proxy.listen(G6.proxyPort);
+  const expectedProviderHost = `${G6.host}:${G6.proxyPort}`;
 
   const record: TrialRecord = {
     trialId: trial.trialId,
@@ -298,6 +298,7 @@ export async function runTrial(
     goalUsed: manifest.missionGoal,
     constraintsUsed: manifest.missionConstraints,
     expectedProviderHost,
+    upstreamHost: new URL(upstream).host,
     startedAtMs,
     missionStartedAtMs: null,
     endedAtMs: startedAtMs,
@@ -308,23 +309,32 @@ export async function runTrial(
     events: [],
     eventStream: { reconnects: 0, duplicatesDropped: 0 },
     proxyLog: null,
+    modelsListing: null,
     stepApplications: [],
+    triggerFires: [],
     preTrialConfig: {},
     finalConfig: {},
     configVersions: [],
+    orderingBasis: 'start_time_with_harness_brackets',
     businessBefore: null,
     businessAfterReadOnly: null,
     readLoad: { requests: 0, failures: 0 },
     checkoutBefore: null,
     checkoutAfter: null,
     probe: null,
+    taggedOrders: [],
     health: null,
     loadSamples: [],
     cacheAfter: null,
+    lineage: null,
+    redisEffects: null,
     crash: trial.crash
       ? {
           at: trial.crash.at,
+          workerStartedAtMs: null,
+          leaseOwnersBeforeWorker: [],
           killedAtMs: null,
+          atKill: null,
           restartedAtMs: null,
           firstEventAfterRestartMs: null,
         }
@@ -337,22 +347,30 @@ export async function runTrial(
   let applier: StepApplier | null = null;
   let collector: EventCollector | null = null;
   let load: ReadLoad | null = null;
+  let redisWatch: RedisEffectWatcher | null = null;
   const timers: NodeJS.Timeout[] = [];
   try {
     sut = await Sut.start({
       trialId: trial.trialId,
       ownerToken,
-      providerBaseUrl: proxy
-        ? `http://${G6.host}:${G6.proxyPort}/v1`
-        : undefined,
+      providerBaseUrl: `http://${G6.host}:${G6.proxyPort}/v1`,
       separateWorker: !!trial.crash,
     });
     const api = new NemoApi(ownerToken);
-    db = await VerifierDb.connect(sut.database);
+    db = await VerifierDb.connect(sut);
+    const reader = await db.currentUser();
+    if (!reader.startsWith('acc6_ro_'))
+      record.runnerErrors.push(
+        `the invariant reader runs as ${reader}, not the harness-only role`,
+      );
+    record.orderingBasis = db.commitTimestamps
+      ? 'commit_timestamp'
+      : 'start_time_with_harness_brackets';
     applier = new StepApplier(sut, api, db);
     await applier.open();
+    redisWatch = await RedisEffectWatcher.start(sut.redisPrefix);
 
-    // Pre-trial reads (verifier role + plain HTTP).
+    // Pre-trial reads (reader role + plain HTTP).
     record.businessBefore = await db.snapshot();
     record.preTrialConfig = await db.configEntries();
     record.checkoutBefore = await surface(PROBE.sku);
@@ -394,6 +412,12 @@ export async function runTrial(
     const fire = (index: number, step: Step, delayMs: number) => {
       if (fired.has(index)) return;
       fired.add(index);
+      if (step.trigger.kind === 'on_action_proposed')
+        record.triggerFires.push({
+          index,
+          key: step.trigger.key,
+          atMs: Date.now(),
+        });
       timers.push(
         setTimeout(() => {
           applier!
@@ -425,6 +449,25 @@ export async function runTrial(
       if (trial.crash && !crashState.done) maybeCrash(event.kind, payload);
     });
 
+    const readCrashState = async (): Promise<CrashStateAtKill> => {
+      const running = await db!.runningAttempts(missionId);
+      const snapshot = await api.get<{
+        actions?: { id: string; status: string }[];
+      }>(`/missions/${missionId}`);
+      const outbox = await db!
+        .outboxState()
+        .catch(() => ({ pending: 0, claimed: 0 }));
+      return {
+        leaseOwners: [...new Set(running.map((a) => a.leaseOwner))],
+        runningAttempts: running,
+        intents: (snapshot.body?.actions ?? []).map((a) => ({
+          id: a.id,
+          status: a.status,
+        })),
+        outbox,
+      };
+    };
+
     const maybeCrash = (kind: string, payload: Record<string, unknown>) => {
       const crash = trial.crash!;
       const hit =
@@ -451,6 +494,9 @@ export async function runTrial(
         }
         if (crashState.done) return;
         crashState.done = true;
+        // Lease holders and intent/outbox state at the moment of the kill, read
+        // with the reader role, so the report shows what was really in flight.
+        record.crash!.atKill = await readCrashState();
         record.crash!.killedAtMs = Date.now();
         await sut!.killWorker();
         await sleep(crash.restartAfterMs);
@@ -495,6 +541,17 @@ export async function runTrial(
         fire(index, step, delay);
       }
 
+    if (trial.crash) {
+      // The app must host no workers (NEMODOTS_WORKERS=0). Prove it: with the
+      // mission started and no separate worker yet, nothing may hold a lease.
+      await sleep(4000);
+      record.crash!.leaseOwnersBeforeWorker = [
+        ...new Set((await db.runningAttempts(missionId)).map((a) => a.leaseOwner)),
+      ];
+      sut.startWorker();
+      record.crash!.workerStartedAtMs = Date.now();
+    }
+
     // Wait for the mission to end (or the wall-clock limit).
     const deadline = startedAtMs + maxWall;
     let blockedSince: number | null = null;
@@ -507,7 +564,7 @@ export async function runTrial(
       if (missionStatus === 'blocked_provider') {
         blockedSince ??= Date.now();
         const disruptionOver =
-          !proxy ||
+          !trial.disruption ||
           !proxy.log.some(
             (e) => e.disposition !== 'forwarded' && Date.now() - e.at < 130_000,
           );
@@ -555,6 +612,8 @@ export async function runTrial(
 
     record.finalConfig = await db.configEntries();
     record.configVersions = await db.configVersions();
+    record.taggedOrders = await db.taggedOrders();
+    record.lineage = await db.lineage(missionId);
     const ns = record.finalConfig['cache.namespace']?.value;
     const schema = record.finalConfig['cache.schema_version']?.value;
     if (typeof ns === 'string' && typeof schema === 'number') {
@@ -577,14 +636,32 @@ export async function runTrial(
       reconnects: collector.reconnects,
       duplicatesDropped: collector.duplicatesDropped,
     };
+    record.redisEffects = await redisWatch.stop();
+    redisWatch = null;
 
-    // Crash resume time: first progress event after the restart.
+    // Which models were requested, and does the upstream list them?
+    const requested = new Set<string>();
+    for (const event of record.events)
+      if (event.kind === 'model_call.recorded') {
+        const model = (event.payload.model as { requested?: string })
+          ?.requested;
+        if (model) requested.add(model);
+      }
+    for (const name of [
+      record.snapshot?.mission.provider.plannerModel,
+      record.snapshot?.mission.provider.workerModel,
+    ])
+      if (typeof name === 'string' && name) requested.add(name);
+    record.modelsListing = await proxy.checkModels([...requested]);
+
+    // Crash resume time: first worker progress or recovery after the restart.
     if (record.crash?.restartedAtMs)
       record.crash.firstEventAfterRestartMs =
         record.events.find(
           (e) =>
             e.receivedAt > record.crash!.restartedAtMs! &&
-            PROGRESS_KINDS.has(e.kind),
+            ((WORKER_PROGRESS_KINDS as readonly string[]).includes(e.kind) ||
+              e.kind === 'recovery.recorded'),
         )?.receivedAt ?? null;
 
     // Held-out leak scan over everything the runtime emitted.
@@ -598,9 +675,12 @@ export async function runTrial(
       health.text,
       telemetry.text,
     ].join('\n');
-    const urls = Object.values(ROLE_ENV)
-      .map((name) => process.env[name] ?? '')
-      .filter(Boolean);
+    const urls = [
+      ...Object.values(ROLE_ENV)
+        .map((name) => process.env[name] ?? '')
+        .filter(Boolean),
+      sut.readerUrl,
+    ];
     record.leaks = scanLeaks(
       corpus,
       leakTokens(ref, secret, urls),
@@ -621,10 +701,13 @@ export async function runTrial(
     for (const timer of timers) clearTimeout(timer);
     await load?.stop().catch(() => undefined);
     await collector?.stop().catch(() => undefined);
+    if (redisWatch) {
+      record.redisEffects = await redisWatch.stop().catch(() => null);
+    }
     await applier?.close();
     await db?.close().catch(() => undefined);
-    record.proxyLog = proxy ? [...proxy.log] : null;
-    await proxy?.close();
+    record.proxyLog = [...proxy.log];
+    await proxy.close();
     await sut?.stop();
     record.endedAtMs = Date.now();
   }
@@ -705,6 +788,7 @@ export async function verifierProbe(
   const runId = `acc6-${randomBytes(6).toString('hex')}`;
   const inventoryBefore = await db.inventoryQuantity(PROBE.sku);
   const rowCountsBefore = await db.rowCounts();
+  const normalizedBefore = await db.normalizedValues();
   const create = await checkoutRequest('POST', '/orders', {
     body: { items: [{ sku: PROBE.sku, quantity }] },
     headers: {
@@ -751,5 +835,6 @@ export async function verifierProbe(
     orderId,
     reads,
     businessAfter: await db.snapshot().catch(() => null),
+    normalized: { before: normalizedBefore, after: await db.normalizedValues() },
   };
 }

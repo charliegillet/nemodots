@@ -197,6 +197,39 @@ export async function getReceiptRows(
   return new Map(rows.map((row) => [row.id, mapReceiptRow(row)]));
 }
 
+/**
+ * Locks receipt rows FOR SHARE in id order. A status change (supersession,
+ * retraction, expiry) UPDATEs the row and so conflicts with this lock: a
+ * publication that holds it either commits its edges before the retirement
+ * reads the graph, or waits and then sees the new status [C9/C13, ARCHITECTURE
+ * 5.1 step 6].
+ */
+export async function lockReceiptsShared(
+  client: PgClient,
+  receiptIds: readonly string[],
+): Promise<void> {
+  if (receiptIds.length === 0) return;
+  await client.query(
+    'SELECT id FROM ledger.observation_receipts WHERE id = ANY($1::uuid[]) ORDER BY id FOR SHARE',
+    [[...new Set(receiptIds)]],
+  );
+}
+
+/**
+ * Takes the lock the status UPDATE would take (FOR NO KEY UPDATE) before the
+ * closure reads the graph, so a publication that holds the row FOR SHARE has
+ * committed its edges by the time the closure runs.
+ */
+export async function lockReceiptForTransition(
+  client: PgClient,
+  receiptId: string,
+): Promise<void> {
+  await client.query(
+    'SELECT id FROM ledger.observation_receipts WHERE id = $1 FOR NO KEY UPDATE',
+    [receiptId],
+  );
+}
+
 /** The highest-revision receipt of a source (its head), whatever its status. */
 export async function headReceipt(
   client: PgClient,

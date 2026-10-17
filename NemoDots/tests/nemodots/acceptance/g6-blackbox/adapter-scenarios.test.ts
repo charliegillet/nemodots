@@ -55,7 +55,7 @@ async function use(kind: 'sandbox' | 'app'): Promise<void> {
       withApp: kind === 'app',
     });
     api = new NemoApi(token);
-    db = await VerifierDb.connect(sut.database);
+    db = await VerifierDb.connect(sut);
     applier = new StepApplier(sut, api, db);
     await applier.open();
     baseline = Object.fromEntries(
@@ -158,7 +158,7 @@ describe('G6.10 deterministic adapter: healthy checkout baseline', () => {
     await use('sandbox');
     const before = await db.snapshot();
     const probe = await verifierProbe(db, 2);
-    const checks = scoreProbe(probe);
+    const checks = scoreProbe(probe, before);
     expect(checks['INV-2'], checks['INV-2'].detail).toMatchObject({ ok: true });
     expect(checks['INV-3'], checks['INV-3'].detail).toMatchObject({ ok: true });
     expect(checks['INV-4'], checks['INV-4'].detail).toMatchObject({ ok: true });

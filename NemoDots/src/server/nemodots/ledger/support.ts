@@ -6,7 +6,10 @@
 //            until the publication commits;
 //   'update' G1 commits: the same rows FOR UPDATE.
 // Lock order: the collection row, then member rows in key order (the order of
-// every writer, ARCHITECTURE 5.1), then the registry rows of observed sources.
+// every writer, ARCHITECTURE 5.1), then the registry rows of observed sources,
+// then the receipt rows FOR SHARE (id order). The last lock is what a
+// retraction / expiry / supersession UPDATE conflicts with, for controlled
+// and observed receipts alike.
 // Reads happen after the locks, so a statement that waited sees the writer's
 // committed result (READ COMMITTED).
 import type {
@@ -18,7 +21,11 @@ import type {
 } from '../contracts/index.js';
 import { SupportError } from './errors.js';
 import type { LedgerOptions } from './options.js';
-import { getReceiptRows, type ReceiptRow } from './receipt-store.js';
+import {
+  getReceiptRows,
+  lockReceiptsShared,
+  type ReceiptRow,
+} from './receipt-store.js';
 import { liveVersion, lockSourcesShared } from './sources.js';
 
 export interface AssertCurrentOptions {
@@ -111,6 +118,10 @@ export async function assertCurrent(
       ? await liveVersion(client, [...controlledKeys], opts.lockMode, options)
       : new Map<string, number | null>();
   await lockSourcesShared(client, [...observedSourceIds]);
+  // The receipt rows themselves (ARCHITECTURE 5.1 step 6): retraction and
+  // expiry of a controlled receipt change neither the authority version nor
+  // wait on the registry row, so this is the lock they conflict with.
+  await lockReceiptsShared(client, ids);
 
   // 3. Read the verdict inputs after the locks.
   const rows = await getReceiptRows(client, ids);

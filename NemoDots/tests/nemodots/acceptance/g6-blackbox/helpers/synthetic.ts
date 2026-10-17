@@ -4,6 +4,9 @@
 // known-good record one defect at a time.
 import type { FrozenTrial } from './frozen.js';
 import type { TrialRecord } from './record.js';
+import { EXPECTED_UPSTREAM_HOST } from './scoring.js';
+
+export const PROXY_HOST = '127.0.0.1:4722';
 
 const id = (n: number, tag = 'a') =>
   `${tag}${String(n).padStart(7, '0')}-0000-4000-8000-000000000000`;
@@ -29,6 +32,12 @@ export const SYNTHETIC_TRIAL: FrozenTrial = {
     keyPredicates: [{ key: 'orders.write_enabled', equals: true }],
   },
 };
+
+const GOOD_ORDER_BODY = () => ({
+  id: 'o1',
+  status: 'confirmed',
+  items: [{ sku: 'PROBE-SKU', quantity: 1 }],
+});
 
 const hashSnapshot = (rows: number) => ({
   hash: 'h'.repeat(64),
@@ -62,13 +71,22 @@ export function goodRecord(cls = 'repairable_checkout_fault'): TrialRecord {
       mode: 'live',
       status: 'succeeded',
       provider: {
-        host: 'api.example.test',
+        host: PROXY_HOST,
         plannerModel: 'm',
         workerModel: 'm',
       },
       cancellation: null,
     },
-    tasks: [{ id: taskId, status: 'succeeded', role: 'routing_specialist' }],
+    tasks: [
+      {
+        id: taskId,
+        status: 'succeeded',
+        role: 'routing_specialist',
+        parentId: null,
+        prerequisites: [],
+        createdByModelCallId: null,
+      },
+    ],
     attempts: [
       {
         id: attemptId,
@@ -77,6 +95,11 @@ export function goodRecord(cls = 'repairable_checkout_fault'): TrialRecord {
         kind: 'initial',
         status: 'published',
         repairOf: null,
+        readSetReceiptIds: [id(6, '1')],
+        modelCallIds: [modelCallId],
+        inheritedDependencyVector: [],
+        startedAt: iso(2000),
+        finishedAt: iso(25_000),
       },
     ],
     outputs: [],
@@ -103,6 +126,8 @@ export function goodRecord(cls = 'repairable_checkout_fault'): TrialRecord {
         taskId,
         attemptId,
         modelCallId,
+        toolCallId: 'tc-1',
+        proposedAt: iso(10_000),
         action: 'set_config',
         status: 'verified',
         payload: { key: 'orders.write_enabled', value: true },
@@ -157,7 +182,8 @@ export function goodRecord(cls = 'repairable_checkout_fault'): TrialRecord {
     frozen: JSON.parse(JSON.stringify(SYNTHETIC_TRIAL)) as FrozenTrial,
     goalUsed: 'neutral goal',
     constraintsUsed: [],
-    expectedProviderHost: 'api.example.test',
+    expectedProviderHost: PROXY_HOST,
+    upstreamHost: EXPECTED_UPSTREAM_HOST,
     startedAtMs: T0,
     missionStartedAtMs: T0 + 1000,
     endedAtMs: T0 + 200_000,
@@ -178,7 +204,8 @@ export function goodRecord(cls = 'repairable_checkout_fault'): TrialRecord {
           taskId,
           role: 'worker',
           model: { requested: 'm', returned: 'm' },
-          provider: { host: 'api.example.test', mode: 'live' },
+          provider: { host: PROXY_HOST, mode: 'live' },
+          outcome: 'completed',
           prefixDigest: 'p',
           contextDigest: 'c',
           usage: { cachedTokens: null },
@@ -193,12 +220,37 @@ export function goodRecord(cls = 'repairable_checkout_fault'): TrialRecord {
       },
     ],
     eventStream: { reconnects: 0, duplicatesDropped: 0 },
-    proxyLog: null,
+    proxyLog: [
+      {
+        n: 1,
+        method: 'POST',
+        path: '/v1/chat/completions',
+        modelCall: true,
+        disposition: 'forwarded',
+        upstreamStatus: 200,
+        at: T0 + 4000,
+        endedAt: T0 + 4900,
+        upstreamHost: EXPECTED_UPSTREAM_HOST,
+        model: 'm',
+        stream: false,
+        bodyDigest: 'digest-1',
+        upstreamError: null,
+      },
+    ],
+    modelsListing: {
+      checked: true,
+      status: 200,
+      listed: { m: true },
+      note: 'ok',
+    },
+    triggerFires: [],
     stepApplications: [
       {
         index: 0,
         step: SYNTHETIC_TRIAL.steps[0],
         appliedAtMs: T0,
+        commitStartMs: T0 - 5,
+        commitEndMs: T0 + 10,
         versionBefore: 1,
         versionAfter: 2,
         valueAfter: false,
@@ -237,6 +289,7 @@ export function goodRecord(cls = 'repairable_checkout_fault'): TrialRecord {
         causedByActor: 'seed',
       },
     },
+    orderingBasis: 'start_time_with_harness_brackets',
     configVersions: [
       {
         key: 'orders.write_enabled',
@@ -245,6 +298,7 @@ export function goodRecord(cls = 'repairable_checkout_fault'): TrialRecord {
         causedByActionId: null,
         causedByActor: 'seed',
         at: iso(-1000),
+        commitAt: null,
       },
       {
         key: 'orders.write_enabled',
@@ -253,6 +307,7 @@ export function goodRecord(cls = 'repairable_checkout_fault'): TrialRecord {
         causedByActionId: null,
         causedByActor: 'injector',
         at: iso(0),
+        commitAt: null,
       },
       {
         key: 'orders.write_enabled',
@@ -261,6 +316,7 @@ export function goodRecord(cls = 'repairable_checkout_fault'): TrialRecord {
         causedByActionId: intentId,
         causedByActor: 'action',
         at: iso(30_000),
+        commitAt: null,
       },
     ],
     businessBefore: hashSnapshot(5),
@@ -281,14 +337,49 @@ export function goodRecord(cls = 'repairable_checkout_fault'): TrialRecord {
       create: { status: 201, body: { id: 'o1' } },
       orderId: 'o1',
       reads: [
-        { status: 200, body: { id: 'o1', sku: 'PROBE-SKU', quantity: 1 } },
-        { status: 200, body: { id: 'o1', sku: 'PROBE-SKU', quantity: 1 } },
+        { status: 200, body: GOOD_ORDER_BODY() },
+        { status: 200, body: GOOD_ORDER_BODY() },
       ],
       businessAfter: hashSnapshot(5),
+      normalized: {
+        before: { ordersRecentDigest: 'x', inventory: { 'PROBE-SKU': 50 } },
+        after: { ordersRecentDigest: 'x', inventory: { 'PROBE-SKU': 50 } },
+      },
     },
+    taggedOrders: [
+      {
+        id: 'o1',
+        probeRunId: 'acc6-synthetic',
+        items: [{ sku: 'PROBE-SKU', quantity: 1 }],
+      },
+    ],
     health: { windowMs: 20000, samples: healthSamples },
     loadSamples: [],
     cacheAfter: null,
+    lineage: [
+      {
+        id: modelCallId,
+        taskId,
+        attemptId,
+        createdAtMs: T0 + 5000,
+        contextVector: [
+          {
+            sourceKey: 'checkout.config/orders.write_enabled',
+            sourceRevision: 2,
+            receiptId: id(6, '1'),
+          },
+        ],
+        outputVector: [],
+      },
+    ],
+    redisEffects: {
+      available: true,
+      reason: null,
+      markerSets: {},
+      fenceSets: 0,
+      cacheDeletes: 0,
+      totalEvents: 0,
+    },
     crash: null,
     leaks: [],
   };

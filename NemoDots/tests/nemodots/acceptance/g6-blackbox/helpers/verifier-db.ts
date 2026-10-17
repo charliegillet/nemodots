@@ -40,7 +40,7 @@ export interface ConfigVersionRow {
    * the real commit order; `at` is not (a transaction that starts early and
    * commits late has an early `at`).
    */
-  commitAt: string | null;
+  commitAt?: string | null;
 }
 
 export interface ReaderTarget {

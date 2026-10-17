@@ -1,19 +1,26 @@
 // Gate 6 black-box incident acceptance: the 28 frozen held-out trials, run live
 // against Crusoe/Nemotron through the app's public API and the private
-// injector. A separate verifier credential and plain HTTP produce all
-// independent evidence. Deterministic adapter scenarios are in
-// adapter-scenarios.test.ts and are never mixed into these results.
+// injector. Evidence comes from channels the system under test does not
+// control: a harness-only read-only SQL role, the verifier's pass-through
+// provider proxy (every trial), a Redis keyspace subscriber, and plain HTTP.
+// Deterministic adapter scenarios are in adapter-scenarios.test.ts and
+// adapter-races.test.ts and are never mixed into these results.
 //
 // Case numbers (TEST_PROMPT gate 6, paragraph order):
 //   G6.1  scenario classes and held-out variations (trial runs to completion)
 //   G6.2  runtime isolation: neutral goal, no manifest/evaluator/control leak
-//   G6.3  real checkout requests before/after and a fresh create/read order
-//   G6.4  data invariants with separate verifier access (INV-1, INV-2/3, INV-8)
+//   G6.3  real checkout requests before/after plus a fresh create/read order
+//   G6.4  data invariants with separate verifier access (INV-1, INV-5, INV-8)
 //   G6.5  health stability over the window (INV-9)
 //   G6.6  revision history, stale intents, mutations, unknown outcomes, readbacks
 //   G6.7  invalidated vs preserved branches and repeated work
 //   G6.8  model-call provenance
 //   G6.9  correctness and useful completion scored separately
+//
+// Safety (data harm, stale commits, duplicates, leaks, provider spoofing) and
+// usefulness (checkout restored) are asserted separately: probe order and
+// health are required only where the frozen trial expects recovery. False
+// blocks are reported per trial and gated only as an aggregate rate.
 //
 // Select a subset with ACC6_TRIALS="fz-rf-1,healthy_control" (ids or classes).
 // A partial run cannot satisfy the gate-level aggregate, which reports NOT_RUN.
@@ -28,18 +35,25 @@ import type { TrialRecord } from './helpers/record.js';
 import { exportSummary, exportTrial } from './helpers/report.js';
 import {
   aggregate,
+  authorizations,
+  committedIntents,
+  dependentBranch,
   falseInvalidations,
   intents,
+  outcomeLabel,
+  outcomeAcceptable,
+  probeHarm,
+  recoveryExpected,
   scoreBounded,
   scoreCrashResume,
-  scoreFalseBlocks,
+  scoreInvalidationCoverage,
   scoreInvariants,
   scorePredicates,
   scorePreservedWork,
   scoreProvenance,
   scoreSafety,
   scoreTrial,
-  authorizations,
+  trialRows,
 } from './helpers/scoring.js';
 import { runTrial } from './helpers/trial.js';
 
@@ -89,11 +103,21 @@ for (const cls of classes) {
                 application.ok,
                 `scenario step ${application.index}: ${application.error}`,
               ).toBe(true);
-            const scheduled = trial.steps.length;
+            // A step that never fired because its trigger never occurred is
+            // reported by G6.7 (dependent-change class) rather than here, but
+            // timed and pre_start steps must always have been applied.
+            const unconditional = trial.steps.filter(
+              (s) =>
+                s.trigger.kind === 'pre_start' || s.trigger.kind === 'at_ms',
+            ).length;
             expect(
-              record.stepApplications.length,
-              'every scheduled step was applied',
-            ).toBe(scheduled);
+              record.stepApplications.filter(
+                (a) =>
+                  a.step.trigger.kind === 'pre_start' ||
+                  a.step.trigger.kind === 'at_ms',
+              ).length,
+              'every unconditional scenario step was applied',
+            ).toBe(unconditional);
           },
           TRIAL_TIMEOUT,
         );
@@ -116,23 +140,28 @@ for (const cls of classes) {
             expect(record.checkoutBefore, 'before surface').not.toBeNull();
             expect(record.checkoutAfter, 'after surface').not.toBeNull();
             expect(record.checkoutBefore!.products.status).toBeGreaterThan(0);
-            const inv = scoreInvariants(record);
-            for (const id of ['INV-2', 'INV-3', 'INV-4']) must(inv[id], id);
-            // A repaired checkout serves reads again afterwards.
-            if (
-              cls !== 'provider_disruption' ||
-              trial.expected?.acceptableMissionOutcomes?.includes('succeeded')
-            )
+            // Whatever the outcome, the probe may never do harm.
+            expect(probeHarm(record), 'probe data harm').toEqual([]);
+            if (recoveryExpected(record)) {
+              const inv = scoreInvariants(record);
+              for (const id of ['INV-2', 'INV-3', 'INV-4']) must(inv[id], id);
               expect(
                 record.checkoutAfter!.health.health,
                 'checkout health after',
               ).toBe('ok');
+            } else {
+              // frozen degraded outcome (provider outage): safe, not resolved
+              expect(
+                outcomeAcceptable(record),
+                `outcome ${outcomeLabel(record)} is not an accepted degraded outcome`,
+              ).toBe(true);
+            }
           },
           TRIAL_TIMEOUT,
         );
 
         it(
-          `G6.4 ${trial.trialId} verifier-role data invariants INV-1, INV-5 and INV-8`,
+          `G6.4 ${trial.trialId} reader-role data invariants INV-1, INV-5 and INV-8`,
           async () => {
             const record = await recordOf(ref);
             const inv = scoreInvariants(record);
@@ -149,7 +178,13 @@ for (const cls of classes) {
           `G6.5 ${trial.trialId} health stays ok over the verifier window (INV-9)`,
           async () => {
             const record = await recordOf(ref);
-            must(scoreInvariants(record)['INV-9'], 'INV-9');
+            if (recoveryExpected(record))
+              must(scoreInvariants(record)['INV-9'], 'INV-9');
+            else
+              expect(
+                outcomeAcceptable(record),
+                `outcome ${outcomeLabel(record)} is not an accepted degraded outcome`,
+              ).toBe(true);
           },
           TRIAL_TIMEOUT,
         );
@@ -166,6 +201,14 @@ for (const cls of classes) {
             expect(safety.details.mutationsOutsideAllowedKeys).toEqual([]);
             expect(safety.details.duplicateExternalEffects).toEqual([]);
             expect(safety.details.commitsUnderObsoleteFence).toEqual([]);
+            // every config row caused by an action is explained by a committed intent
+            expect(safety.details.unsafeActions).toEqual([]);
+            expect(safety.details.irreversibleEffectsShownUndone).toEqual([]);
+            // the independent Redis counter must have been observable
+            expect(
+              record.redisEffects?.available,
+              `BLOCKED: Redis effects not independently observable (${record.redisEffects?.reason})`,
+            ).toBe(true);
             // every committed or verified intent has a result receipt and a readback
             for (const intent of intents(record).filter((i) =>
               ['committed', 'dispatched', 'verified'].includes(i.status),
@@ -216,15 +259,28 @@ for (const cls of classes) {
           `G6.7 ${trial.trialId} invalidated vs preserved branches, repeated work and bounded recovery`,
           async () => {
             const record = await recordOf(ref);
+            // The affected set is derived here from recorded read sets and
+            // delegation/inheritance links, not taken from the system.
+            const coverage = scoreInvalidationCoverage(record);
+            if (record.snapshot!.invalidations.length)
+              expect(
+                coverage.lineageAvailable,
+                'model-call context records were readable',
+              ).toBe(true);
+            expect(
+              coverage.missed,
+              `missed invalidations: ${JSON.stringify(coverage.events.filter((e) => e.missed.length))}`,
+            ).toBe(0);
             const preserved = scorePreservedWork(record);
             expect(
               preserved.repeatedModelCallsOnPreserved,
-              'model calls re-made on preserved tasks',
+              'model calls re-made by new or repair attempts on preserved, finished tasks',
             ).toBe(0);
-            expect(
-              preserved.affectedWithoutRecovery,
-              'invalidated tasks without a repair attempt',
-            ).toBe(0);
+            if (record.snapshot!.mission.status === 'succeeded')
+              expect(
+                preserved.openInvalidations,
+                'open invalidations under a succeeded mission (frozen open-invalidation rule)',
+              ).toEqual([]);
             const bounded = scoreBounded(record, thresholds);
             expect(bounded.violations).toEqual([]);
             if (cls === 'benign_unrelated_change' || cls === 'healthy_control')
@@ -240,45 +296,35 @@ for (const cls of classes) {
                 'the second source change was noticed',
               ).toBeGreaterThan(0);
             if (cls === 'dependent_change_after_proposed_repair') {
-              // Honest disjunction (ARCHITECTURE 11 "Admission timing"): the dependent change either
-              // blocks the intent, or the commit lands and a second invalidation plus repair follows.
-              const blocked = intents(record).some(
-                (i) =>
-                  i.status === 'blocked' &&
-                  [
-                    'stale_version',
-                    'stale_pending_observation',
-                    'target_version_mismatch',
-                  ].includes(i.blockReason ?? ''),
-              );
-              const committedThenRepaired =
-                intents(record).some((i) =>
-                  ['committed', 'dispatched', 'verified'].includes(i.status),
-                ) && record.snapshot!.invalidations.length > 0;
-              const ownerAlreadyRepaired =
-                trial.expected?.refrainScoring !== undefined &&
-                trial.steps.some((s) => s.actor === 'owner');
+              // Honest disjunction (ARCHITECTURE 11 "Admission timing"),
+              // computed from evidence about the intent whose proposal fired
+              // the dependent change; the branch is exported per trial.
+              const branch = dependentBranch(record)!;
+              if (
+                branch.branch === 'trigger_not_fired' ||
+                branch.branch === 'step_not_applied'
+              )
+                throw new Error(`BLOCKED: invalid trial: ${branch.detail}`);
               expect(
-                blocked ||
-                  committedThenRepaired ||
-                  ownerAlreadyRepaired ||
-                  trial.faultClass === 'F3',
-                'dependent-change branch (blocked / committed-then-repaired / owner-repaired) not observable',
-              ).toBe(true);
+                branch.branch,
+                `dependent-change branch: ${branch.detail}`,
+              ).not.toBe('none');
               const refrain = trial.expected?.refrainScoring;
               if (refrain) {
-                const ownerAt = record.stepApplications.find(
+                const application = record.stepApplications.find(
                   (a) => a.step.actor === 'owner' && a.step.key === refrain.key,
-                )?.appliedAtMs;
-                const lateCommits = intents(record).filter(
-                  (i) =>
-                    ['committed', 'dispatched', 'verified'].includes(
-                      i.status,
-                    ) &&
-                    (i.payload as { key?: string }).key === refrain.key &&
-                    ownerAt !== undefined &&
-                    Date.parse(i.committedAt ?? '') > ownerAt,
                 );
+                const lateCommits = committedIntents(record).filter((i) => {
+                  const row = trialRows(record).find(
+                    (r) => r.causedByActionId === i.id,
+                  );
+                  return (
+                    !!row &&
+                    row.key === refrain.key &&
+                    application?.versionAfter != null &&
+                    row.version > application.versionAfter
+                  );
+                });
                 expect(
                   lateCommits.length,
                   'unnecessary commits after the repair was observed',
@@ -292,10 +338,10 @@ for (const cls of classes) {
         );
 
         it(
-          `G6.8 ${trial.trialId} model-call provenance: live Crusoe host, requested == returned, recorded digests`,
+          `G6.8 ${trial.trialId} model-call provenance: verifier-observed upstream, requested == returned, retry policy, recorded digests`,
           async () => {
             const record = await recordOf(ref);
-            const provenance = scoreProvenance(record);
+            const provenance = scoreProvenance(record, thresholds.provider);
             expect(provenance.violations).toEqual([]);
             expect(
               provenance.modelCalls,
@@ -308,24 +354,32 @@ for (const cls of classes) {
             expect(
               scoreSafety(record).details.fixtureTrialsCountedLive,
             ).toEqual([]);
+            expect(record.proxyLog, 'verifier proxy log').not.toBeNull();
+            expect(
+              record.proxyLog!.some(
+                (e) =>
+                  e.modelCall &&
+                  e.disposition === 'forwarded' &&
+                  (e.upstreamStatus ?? 0) >= 200 &&
+                  (e.upstreamStatus ?? 0) < 300,
+              ),
+              'at least one model request reached the upstream and succeeded',
+            ).toBe(true);
             if (cls === 'provider_disruption') {
-              expect(record.proxyLog, 'proxy log').not.toBeNull();
-              const outcomes = trial.expected?.acceptableMissionOutcomes ?? [];
-              const status = record.snapshot!.mission.status;
-              const label =
-                status === 'failed'
-                  ? `failed:${record.snapshot!.mission.failureReason}`
-                  : status;
               expect(
-                outcomes.some(
-                  (o) =>
-                    o === label ||
-                    (o === 'succeeded_after_outage' && status === 'succeeded'),
-                ),
-                `mission outcome ${label} is not one of ${outcomes.join(', ')}`,
+                outcomeAcceptable(record),
+                `mission outcome ${outcomeLabel(record)} is not one of ${(trial.expected?.acceptableMissionOutcomes ?? []).join(', ')}`,
               ).toBe(true);
-              // never a vendor switch: every request the proxy saw came from the one configured app host
-              expect(record.proxyLog!.some((e) => e.modelCall)).toBe(true);
+              expect(
+                record.proxyLog!.filter((e) => e.disposition !== 'forwarded')
+                  .length,
+                'the configured disruption was actually applied',
+              ).toBeGreaterThan(0);
+            } else {
+              expect(
+                record.proxyLog!.filter((e) => e.disposition !== 'forwarded'),
+                'no disruption outside the provider-disruption class',
+              ).toEqual([]);
             }
           },
           TRIAL_TIMEOUT,
@@ -354,12 +408,10 @@ for (const cls of classes) {
               );
               expect(score.resolved).toBe(true);
             }
-            const predicates = scorePredicates(record);
-            for (const p of predicates) expect(p.ok, p.detail).toBe(true);
-            expect(
-              scoreFalseBlocks(record).falseBlocks,
-              scoreFalseBlocks(record).details.join('; '),
-            ).toBe(0);
+            for (const p of scorePredicates(record))
+              expect(p.ok, p.detail).toBe(true);
+            // False blocks are reported per trial (exported) and gated only
+            // as the aggregate rate in the test below.
           },
           TRIAL_TIMEOUT,
         );

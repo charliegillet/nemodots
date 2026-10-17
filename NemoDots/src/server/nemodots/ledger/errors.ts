@@ -15,6 +15,8 @@ export type LedgerErrorCode =
   | 'receipt_conflict'
   | 'receipt_not_registrable'
   | 'closure_cap_exceeded'
+  | 'closure_unstable'
+  | 'coarse_required'
   | 'edge_invalid'
   | 'edge_cycle'
   | 'model_call_invalid'
@@ -146,6 +148,30 @@ export class ClosureCapExceeded extends LedgerError {
     super(
       'closure_cap_exceeded',
       `invalidation closure for ${sourceKey} exceeds the ${cap} cap (depth ${limits.maxDepth}, nodes ${limits.maxNodes})`,
+    );
+  }
+}
+
+/**
+ * The set of coordinator rows a closure must mark kept growing while the
+ * registration retried to lock it (publications keep adding edges to the
+ * receipt). Nothing was written; the caller retries the whole step.
+ */
+export class ClosureUnstableError extends LedgerError {
+  constructor(readonly rounds: number) {
+    super(
+      'closure_unstable',
+      `the invalidation closure kept changing across ${rounds} lock rounds`,
+    );
+  }
+}
+
+/** registerWithoutClosure supersedes a live receipt and must say which missions it covers. */
+export class CoarseInvalidationRequiredError extends LedgerError {
+  constructor(sourceKey: string) {
+    super(
+      'coarse_required',
+      `superseding the live receipt of ${sourceKey} without a closure needs a coarse invalidation covering at least one mission`,
     );
   }
 }

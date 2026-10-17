@@ -1,6 +1,7 @@
 // Exports per-trial evidence and the gate summary under .local/acceptance/g6/.
 // The record holds no secrets: role URLs, the probe secret and tokens are never
-// stored on it (leaks are recorded as labels only).
+// stored on it (leaks are recorded as labels only), and the provider proxy log
+// keeps digests and timings, never request bodies or credentials.
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { SCRATCH } from './config.js';
@@ -8,7 +9,10 @@ import type { Thresholds } from './frozen.js';
 import type { TrialRecord } from './record.js';
 import {
   aggregate,
+  dependentBranch,
   scoreCrashResume,
+  scoreFalseBlocks,
+  scoreInvalidationCoverage,
   scoreInvariants,
   scorePreservedWork,
   scoreProvenance,
@@ -25,9 +29,15 @@ export function exportTrial(record: TrialRecord, t: Thresholds): string {
       {
         score: scoreTrial(record, t),
         invariants: scoreInvariants(record),
+        // frozen reporting fields
+        whichDisjunctionBranch: dependentBranch(record),
+        invalidationCoverage: scoreInvalidationCoverage(record),
         preservedWork: scorePreservedWork(record),
-        provenance: scoreProvenance(record),
+        falseBlocks: scoreFalseBlocks(record),
+        provenance: scoreProvenance(record, t.provider),
         crash: scoreCrashResume(record, t),
+        orderingBasis: record.orderingBasis,
+        redisEffects: record.redisEffects,
         record,
       },
       null,
@@ -48,6 +58,7 @@ export function exportSummary(records: TrialRecord[], t: Thresholds): string {
         generatedAt: new Date().toISOString(),
         mode: 'live autonomous trials only; deterministic adapter scenarios are reported separately',
         trials: records.length,
+        orderingBasis: [...new Set(records.map((r) => r.orderingBasis))],
         aggregate: aggregate(scores, t),
         scores,
       },
