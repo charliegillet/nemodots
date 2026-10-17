@@ -13,7 +13,7 @@
     <text x="250" y="300" font-size="12" fill="#5b6b65" text-anchor="middle">superseded</text>
     <circle cx="620" cy="262" r="16" fill="#ffffff" stroke="#0f9d58" stroke-width="3"/>
     <text x="620" y="267" font-size="13" font-weight="700" fill="#0f9d58" text-anchor="middle">r2</text>
-    <text x="620" y="300" font-size="12" fill="#0f9d58" text-anchor="middle">source changed · new receipt</text>
+    <text x="602" y="300" font-size="12" fill="#0f9d58" text-anchor="end">source changed · new receipt</text>
     <path d="M268 262 L600 262" stroke="#0f9d58" stroke-width="2" stroke-dasharray="6 6"/>
 
     <path d="M636 256 C 665 240, 672 216, 700 216" fill="none" stroke="#c62828" stroke-width="2"/>
