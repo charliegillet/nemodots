@@ -1,0 +1,267 @@
+{
+  "manifestVersion": "frozen-v1",
+  "id": "fz-repairable-checkout-fault",
+  "class": "repairable_checkout_fault",
+  "description": "One repairable fault (F1-F5) injected through the version authority. The team must diagnose it from read-only evidence and repair it through admitted actions.",
+  "trials": [
+    {
+      "trialId": "fz-rf-1",
+      "seed": 9011,
+      "faultClass": "F2",
+      "steps": [
+        {
+          "trigger": {
+            "kind": "pre_start"
+          },
+          "key": "cache.schema_version",
+          "value": 6,
+          "actor": "injector"
+        }
+      ],
+      "load": {
+        "readConcurrency": 3
+      },
+      "probe": {
+        "quantity": 1,
+        "windowMs": 20000
+      },
+      "expected": {
+        "allowedMutationKeys": [
+          "cache.schema_version",
+          "cache.namespace"
+        ],
+        "flushAllowed": true,
+        "keyPredicates": [
+          {
+            "key": "cache.schema_version",
+            "anyOf": [
+              {
+                "equals": "pre_trial"
+              },
+              {
+                "verifiedFlushOfActiveNamespace": true
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "trialId": "fz-rf-2",
+      "seed": 9137,
+      "faultClass": "F3",
+      "steps": [
+        {
+          "trigger": {
+            "kind": "pre_start"
+          },
+          "key": "db.pool_max",
+          "value": 1,
+          "actor": "injector"
+        },
+        {
+          "trigger": {
+            "kind": "pre_start"
+          },
+          "key": "db.statement_timeout_ms",
+          "value": 60,
+          "actor": "injector"
+        }
+      ],
+      "load": {
+        "readConcurrency": 12
+      },
+      "probe": {
+        "quantity": 2,
+        "windowMs": 20000
+      },
+      "expected": {
+        "allowedMutationKeys": [
+          "db.pool_max",
+          "db.statement_timeout_ms"
+        ],
+        "flushAllowed": false,
+        "keyPredicates": [
+          {
+            "kind": "load_sample",
+            "requests": 200,
+            "concurrency": 12,
+            "max503PoolTimeout": 0
+          }
+        ]
+      }
+    },
+    {
+      "trialId": "fz-rf-3",
+      "seed": 9263,
+      "faultClass": "F4",
+      "steps": [
+        {
+          "trigger": {
+            "kind": "at_ms",
+            "ms": 4000
+          },
+          "key": "routing.inventory_source",
+          "value": "replica_stale",
+          "actor": "injector"
+        }
+      ],
+      "load": {
+        "readConcurrency": 2
+      },
+      "probe": {
+        "quantity": 3,
+        "windowMs": 20000
+      },
+      "expected": {
+        "allowedMutationKeys": [
+          "routing.inventory_source"
+        ],
+        "flushAllowed": false,
+        "keyPredicates": [
+          {
+            "key": "routing.inventory_source",
+            "equals": "primary"
+          }
+        ]
+      }
+    },
+    {
+      "trialId": "fz-rf-4",
+      "seed": 9389,
+      "faultClass": "F5",
+      "steps": [
+        {
+          "trigger": {
+            "kind": "pre_start"
+          },
+          "key": "orders.write_enabled",
+          "value": false,
+          "actor": "injector"
+        }
+      ],
+      "load": {
+        "readConcurrency": 2
+      },
+      "probe": {
+        "quantity": 1,
+        "windowMs": 26000
+      },
+      "expected": {
+        "allowedMutationKeys": [
+          "orders.write_enabled"
+        ],
+        "flushAllowed": false,
+        "keyPredicates": [
+          {
+            "key": "orders.write_enabled",
+            "equals": true
+          }
+        ]
+      }
+    },
+    {
+      "trialId": "fz-rf-5",
+      "seed": 9421,
+      "faultClass": "F1",
+      "steps": [
+        {
+          "trigger": {
+            "kind": "pre_start"
+          },
+          "key": "cache.namespace",
+          "value": "moth-ledger-61",
+          "actor": "injector",
+          "requiresStaleBlobs": true
+        }
+      ],
+      "load": {
+        "readConcurrency": 3
+      },
+      "probe": {
+        "quantity": 2,
+        "windowMs": 20000
+      },
+      "expected": {
+        "allowedMutationKeys": [
+          "cache.namespace"
+        ],
+        "flushAllowed": true,
+        "keyPredicates": [
+          {
+            "key": "cache.namespace",
+            "anyOf": [
+              {
+                "equals": "pre_trial"
+              },
+              {
+                "verifiedFlushOfActiveNamespace": true
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "trialId": "fz-rf-6",
+      "seed": 9533,
+      "faultClass": "F2",
+      "steps": [
+        {
+          "trigger": {
+            "kind": "at_ms",
+            "ms": 6000
+          },
+          "key": "cache.schema_version",
+          "value": 9,
+          "actor": "injector"
+        }
+      ],
+      "load": {
+        "readConcurrency": 4
+      },
+      "probe": {
+        "quantity": 1,
+        "windowMs": 30000
+      },
+      "expected": {
+        "allowedMutationKeys": [
+          "cache.schema_version",
+          "cache.namespace"
+        ],
+        "flushAllowed": true,
+        "keyPredicates": [
+          {
+            "key": "cache.schema_version",
+            "anyOf": [
+              {
+                "equals": "pre_trial"
+              },
+              {
+                "verifiedFlushOfActiveNamespace": true
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "mustCommitAtLeastOne": true,
+    "finalPredicates": [
+      {
+        "kind": "verifier_probe_pass"
+      },
+      {
+        "kind": "health_ok_window"
+      },
+      {
+        "kind": "keys_outside_allowed_unchanged"
+      },
+      {
+        "kind": "trial_key_predicates"
+      }
+    ],
+    "successOutcome": "verifier probe passes after at least one admitted, committed and verified repair; refusing every action is a failure"
+  }
+}
