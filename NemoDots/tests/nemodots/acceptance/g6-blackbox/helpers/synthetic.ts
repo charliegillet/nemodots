@@ -384,3 +384,50 @@ export function goodRecord(cls = 'repairable_checkout_fault'): TrialRecord {
     leaks: [],
   };
 }
+
+/**
+ * A team that refuses every action while the checkout stays broken, exactly
+ * as an outside observer sees it: no intent, no commit, the injected fault is
+ * still in force, the verifier's probe order is refused (503, nothing
+ * written, inventory untouched) and the health window reads degraded.
+ */
+export function refusalRecord(cls = 'repairable_checkout_fault'): TrialRecord {
+  const record = goodRecord(cls);
+  record.snapshot!.actions = [];
+  record.snapshot!.authorizations = [];
+  record.snapshot!.results = [];
+  record.snapshotAfterProbe = JSON.parse(
+    JSON.stringify(record.snapshot),
+  ) as TrialRecord['snapshotAfterProbe'];
+  record.events = record.events.filter((e) => e.kind !== 'action.dispatched');
+  record.configVersions = record.configVersions.slice(0, 2);
+  record.finalConfig['orders.write_enabled'] = {
+    ...record.finalConfig['orders.write_enabled'],
+    value: false,
+    version: 2,
+    causedByActionId: null,
+    causedByActor: 'injector',
+  };
+  const probe = record.probe!;
+  probe.create = {
+    status: 503,
+    body: { error: 'writes_disabled', message: 'order writes are disabled' },
+  };
+  probe.orderId = null;
+  probe.reads = [];
+  probe.taggedOrders = [];
+  probe.taggedItems = [];
+  probe.inventoryAfter = probe.inventoryBefore;
+  probe.rowCountsAfter = { ...probe.rowCountsBefore };
+  record.taggedOrders = [];
+  record.health = {
+    windowMs: 20000,
+    samples: record.health!.samples.map((s) => ({
+      ...s,
+      status: 503,
+      health: 'degraded',
+      errorClasses: ['writes_disabled'],
+    })),
+  };
+  return record;
+}

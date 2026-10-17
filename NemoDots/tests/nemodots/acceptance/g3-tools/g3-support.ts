@@ -215,6 +215,75 @@ export async function tablesContaining(
   }
 }
 
+export interface PageLedgerTrace {
+  /** ledger.sources rows whose key is exactly opendots.page/<id> */
+  sources: number;
+  /** source_revision values recorded in ledger.source_revisions, ascending */
+  revisions: number[];
+  /** source_revision values of ledger.observation_receipts (status any), ascending */
+  receiptRevisions: number[];
+  /** ledger.observation_receipts ids of that source by revision */
+  receiptIdByRevision: Record<number, string>;
+  /** distinct pageSnapshots revisions named by ledger.context_snapshots.injected for this page */
+  injectedRevisions: number[];
+}
+
+/**
+ * What the ledger holds for one page, read from the CONTRACTED tables only (CONTRACTS section 11:
+ * ledger.sources, ledger.source_revisions, ledger.observation_receipts, ledger.context_snapshots).
+ * A trace in any other table (event payload, error log, audit row) does not count.
+ */
+export async function pageLedgerTrace(
+  adminUrl: string,
+  pageId: string,
+): Promise<PageLedgerTrace> {
+  const key = `opendots.page/${pageId}`;
+  const sources = await adminQuery<{ id: string }>(
+    adminUrl,
+    `SELECT id FROM ledger.sources WHERE key = $1`,
+    [key],
+  );
+  const ids = sources.map((row) => row.id);
+  const revisions = ids.length
+    ? await adminQuery<{ source_revision: number }>(
+        adminUrl,
+        `SELECT source_revision FROM ledger.source_revisions WHERE source_id = ANY($1::uuid[]) ORDER BY source_revision`,
+        [ids],
+      )
+    : [];
+  const receipts = ids.length
+    ? await adminQuery<{ id: string; source_revision: number }>(
+        adminUrl,
+        `SELECT id, source_revision FROM ledger.observation_receipts WHERE source_id = ANY($1::uuid[]) ORDER BY source_revision`,
+        [ids],
+      )
+    : [];
+  const snapshots = await adminQuery<{ injected: unknown }>(
+    adminUrl,
+    `SELECT injected FROM ledger.context_snapshots WHERE injected::text LIKE '%' || $1 || '%'`,
+    [pageId],
+  );
+  const injectedRevisions = new Set<number>();
+  for (const { injected } of snapshots) {
+    const entries = (injected as { pageSnapshots?: unknown[] } | null)
+      ?.pageSnapshots;
+    for (const entry of entries ?? []) {
+      const e = entry as { pageId?: string; revision?: number };
+      if (e.pageId === pageId && typeof e.revision === 'number')
+        injectedRevisions.add(e.revision);
+    }
+  }
+  return {
+    sources: ids.length,
+    revisions: revisions.map((row) => Number(row.source_revision)),
+    receiptRevisions: receipts.map((row) => Number(row.source_revision)),
+    receiptIdByRevision: Object.fromEntries(
+      receipts.map((row) => [Number(row.source_revision), row.id]),
+    ),
+    injectedRevisions: [...injectedRevisions].sort((a, b) => a - b),
+  };
+}
+
 export async function adminQuery<T = Record<string, unknown>>(
   adminUrl: string,
   text: string,
@@ -229,25 +298,132 @@ export async function adminQuery<T = Record<string, unknown>>(
   }
 }
 
-/** Digest of every row of the controlled configuration tables (checkout.config_entries, ...), when present. */
+/** Tables whose rows an unauthorised tool call could create or change (CONTRACTS section 11). */
+const STATE_TABLES = [
+  'coordinator.action_intents',
+  'coordinator.authorizations',
+  'coordinator.result_receipts',
+  'coordinator.tasks',
+  'coordinator.task_attempts',
+  'coordinator.findings',
+  'coordinator.outbox',
+  'coordinator.missions',
+  'checkout.config_versions',
+] as const;
+
+async function tableDigest(adminUrl: string, table: string): Promise<string> {
+  const [schema, name] = table.split('.');
+  const exists = await adminQuery<{ n: number }>(
+    adminUrl,
+    `SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2`,
+    [schema, name],
+  );
+  if (!exists[0]?.n) return `${table}: absent`;
+  const body = await adminQuery<{ n: number; d: string }>(
+    adminUrl,
+    `SELECT count(*)::int AS n, md5(coalesce(string_agg(x::text, E'\\n' ORDER BY x::text), '')) AS d FROM ${table} x`,
+  );
+  return `${table}: ${body[0].n} rows ${body[0].d}`;
+}
+
+export interface ControlledFingerprint {
+  /** config tables, intents, authorizations, tasks, findings, outbox and the Redis prefix: must not change on a refused call */
+  state: string;
+  /** rows of ledger.observation_receipts: a legitimate READ may add one, a refused call must not */
+  receipts: number;
+}
+
+/**
+ * Digest of every row of the controlled configuration tables (checkout.config_*), of the action-bearing
+ * coordinator tables, and of every key under the acc3 Redis prefix, plus the receipt count.
+ */
 export async function controlledStateFingerprint(
   adminUrl: string,
-): Promise<string> {
-  const rows = await adminQuery<{ t: string }>(
+  redisPrefix?: string,
+): Promise<ControlledFingerprint> {
+  const cfg = await adminQuery<{ t: string }>(
     adminUrl,
     `SELECT table_schema || '.' || table_name AS t FROM information_schema.tables
      WHERE table_type = 'BASE TABLE' AND table_schema = 'checkout'
        AND table_name LIKE 'config%' ORDER BY 1`,
   );
   const parts: string[] = [];
-  for (const { t } of rows) {
-    const body = await adminQuery<{ r: string }>(
-      adminUrl,
-      `SELECT coalesce(string_agg(x::text, E'\\n' ORDER BY x::text), '') AS r FROM ${t} x`,
+  for (const { t } of cfg) parts.push(await tableDigest(adminUrl, t));
+  for (const table of STATE_TABLES)
+    if (!cfg.some(({ t }) => t === table))
+      parts.push(await tableDigest(adminUrl, table));
+  if (redisPrefix) parts.push(await redisDigest(redisPrefix));
+  const receipts = await adminQuery<{ n: number }>(
+    adminUrl,
+    `SELECT count(*)::int AS n FROM ledger.observation_receipts`,
+  ).catch(() => [{ n: -1 }]);
+  return { state: parts.join('\n'), receipts: receipts[0].n };
+}
+
+/**
+ * Seeds the checkout configuration (test-local values, admin role) and a Redis sentinel under the world's
+ * prefix, so that a write to an existing key, a new action row or a namespace flush is visible to the fingerprint.
+ */
+export async function seedControlledState(world: {
+  db: Acc3Database | null;
+  redisPrefix: string;
+}): Promise<void> {
+  if (!world.db) throw new Error('seedControlledState needs the NemoDots database');
+  const entries: [string, string][] = [
+    ['cache.namespace', '"acc3-ns-a"'],
+    ['db.pool_max', '2'],
+    ['ui.banner_text', '"acc3 banner"'],
+  ];
+  for (const [key, value] of entries) {
+    await adminQuery(
+      world.db.admin,
+      `INSERT INTO checkout.config_entries (key, value, version, caused_by_actor)
+       VALUES ($1, $2::jsonb, 1, 'seed') ON CONFLICT (key) DO NOTHING`,
+      [key, value],
     );
-    parts.push(`${t}\n${body[0]?.r ?? ''}`);
+    await adminQuery(
+      world.db.admin,
+      `INSERT INTO checkout.config_versions (key, version, value, caused_by_actor)
+       VALUES ($1, 1, $2::jsonb, 'seed') ON CONFLICT (key, version) DO NOTHING`,
+      [key, value],
+    );
   }
-  return parts.join('\n--\n');
+  const client = createClient({ url: acc3RedisUrl() });
+  await client.connect();
+  try {
+    await client.set(`${world.redisPrefix}:cache:acc3-sentinel-1`, 'cached');
+    await client.set(`${world.redisPrefix}:cache:acc3-sentinel-2`, 'cached');
+  } finally {
+    await client.quit();
+  }
+}
+
+async function redisDigest(prefix: string): Promise<string> {
+  const client = createClient({ url: acc3RedisUrl() });
+  await client.connect();
+  try {
+    const keys: string[] = [];
+    for await (const batch of client.scanIterator({
+      MATCH: `${prefix}:*`,
+      COUNT: 200,
+    }))
+      keys.push(...batch);
+    keys.sort();
+    const parts: string[] = [];
+    for (const key of keys) {
+      const type = await client.type(key);
+      let body = '';
+      if (type === 'string') body = String(await client.get(key));
+      else if (type === 'hash') body = JSON.stringify(await client.hGetAll(key));
+      else if (type === 'list') body = JSON.stringify(await client.lRange(key, 0, -1));
+      else if (type === 'set') body = JSON.stringify((await client.sMembers(key)).sort());
+      else if (type === 'zset') body = JSON.stringify(await client.zRangeWithScores(key, 0, -1));
+      parts.push(`${key}=${type}:${body}`);
+    }
+    return `redis ${keys.length} keys ${parts.join('|')}`;
+  } finally {
+    await client.quit();
+  }
 }
 
 /* ------------------------------------------------------------------ redis (database 4) */
