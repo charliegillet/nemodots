@@ -308,11 +308,15 @@ describe('read sets and publication links', () => {
       attemptId,
       receiptIds: [member.receipt.id, health.receipt.id, member.receipt.id],
     };
-    expect(await inTx(app, (client) => recordReadSet(client, link, FX))).toEqual({
+    expect(
+      await inTx(app, (client) => recordReadSet(client, link, FX)),
+    ).toEqual({
       inserted: 2,
       existing: 0,
     });
-    expect(await inTx(app, (client) => recordReadSet(client, link, FX))).toEqual({
+    expect(
+      await inTx(app, (client) => recordReadSet(client, link, FX)),
+    ).toEqual({
       inserted: 0,
       existing: 2,
     });

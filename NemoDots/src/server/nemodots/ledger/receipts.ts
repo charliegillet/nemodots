@@ -53,10 +53,7 @@ import {
 } from './errors.js';
 import type { ClosureLimits } from './closure.js';
 import type { LedgerOptions } from './options.js';
-import {
-  runWithClosureLocks,
-  type ClosureLockPlan,
-} from './prelock.js';
+import { runWithClosureLocks, type ClosureLockPlan } from './prelock.js';
 import {
   appendConfirmation,
   getReceiptRow,
@@ -472,7 +469,12 @@ async function previewRegistration(
   const head = await headReceipt(client, source.id);
   if (!isLive(head)) return null;
   if (source.authority === 'controlled') {
-    const live = await liveVersion(client, [source.key], 'none', options.ledger);
+    const live = await liveVersion(
+      client,
+      [source.key],
+      'none',
+      options.ledger,
+    );
     if (live.get(source.key) === head.sourceRevision) return null;
   } else if (
     head.status === 'supported' &&
@@ -714,12 +716,7 @@ export async function transitionReceipt(
     },
   };
   return runWithClosureLocks(client, plan, (locked) =>
-    transitionLocked(
-      client,
-      input,
-      options,
-      plan.enabled ? locked : undefined,
-    ),
+    transitionLocked(client, input, options, plan.enabled ? locked : undefined),
   );
 }
 

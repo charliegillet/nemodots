@@ -38,7 +38,10 @@ import {
   type GraphNodeKind,
   type NodeMeta,
 } from './closure.js';
-import { ClosureCapExceeded, CoarseInvalidationRequiredError } from './errors.js';
+import {
+  ClosureCapExceeded,
+  CoarseInvalidationRequiredError,
+} from './errors.js';
 import { coordinatorSchema, type LedgerOptions } from './options.js';
 import { assertLocked, unionAffected } from './prelock.js';
 import {
@@ -532,8 +535,12 @@ export interface CoarseInvalidation {
 }
 
 /** The union of the coarse affected sets: what a cap-path registration marks. */
-export function coarseAffected(coarse: CoarseInvalidation | undefined): Affected {
-  return unionAffected((coarse?.perMission ?? []).map((entry) => entry.affected));
+export function coarseAffected(
+  coarse: CoarseInvalidation | undefined,
+): Affected {
+  return unionAffected(
+    (coarse?.perMission ?? []).map((entry) => entry.affected),
+  );
 }
 
 /**
@@ -597,7 +604,9 @@ export async function supersedeWithoutClosure(
     input.marker === undefined
       ? createCoordinatorMarker(input.ledger)
       : input.marker;
-  const marks = marker ? await marker.mark(client, { eventId, affected }) : null;
+  const marks = marker
+    ? await marker.mark(client, { eventId, affected })
+    : null;
   const perMission = input.coarse!.perMission;
   const event = await insertInvalidationEvent(client, {
     sourceId: prior.sourceId,
