@@ -108,6 +108,14 @@ export type CompileContextInput = {
   invalidations: readonly InvalidationInput[];
   history: readonly HistoryItemInput[];
   itemCapBytes?: number;
+  /**
+   * Attempt-scope entries (C10/I8). Unioned into snapshot.dependencyVector
+   * whether or not the matching receipts were injected, truncated or dropped
+   * by scope selection, so a later change to anything the attempt read still
+   * invalidates what the attempt produces.
+   */
+  readSetVector?: readonly DependencyEntry[];
+  inheritedVector?: readonly DependencyEntry[];
 };
 
 export type CompiledContext = {
@@ -129,6 +137,11 @@ function assertUnique(label: string, ids: readonly string[]): void {
     if (seen.has(id)) throw new RangeError(`duplicate ${label} "${id}"`);
     seen.add(id);
   }
+}
+
+/** Plans are recorded as 'plan:<id>' because the snapshot kind enum has no 'plan'. */
+function snapshotArtifactId(a: { kind: ArtifactKind; id: string }): string {
+  return a.kind === 'plan' ? `plan:${a.id}` : a.id;
 }
 
 function selectTools(names: readonly TeamToolName[] | undefined): ToolSchema[] {
@@ -165,6 +178,10 @@ export function compileContext(input: CompileContextInput): CompiledContext {
   assertUnique(
     'artifact',
     input.inheritedArtifacts.map((a) => `${a.kind}/${a.id}`),
+  );
+  assertUnique(
+    'artifact snapshot id',
+    input.inheritedArtifacts.map((a) => snapshotArtifactId(a)),
   );
   assertUnique(
     'page',
@@ -410,14 +427,30 @@ export function compileContext(input: CompileContextInput): CompiledContext {
     const content = capped.truncated
       ? `${capped.text}\n[truncated: kept ${capped.keptBytes} of ${capped.originalBytes} bytes]`
       : capped.text;
+    // Tool call arguments are model-visible text too: redacted and capped.
+    // A cut argument string is no longer JSON; the record keeps it identifiable.
+    const toolCalls =
+      item.role === 'assistant' && item.toolCalls
+        ? item.toolCalls.map((c) => {
+            const args = redactSecrets(c.arguments);
+            const cut = truncateUtf8(args.text, cap);
+            redactions += args.count;
+            if (cut.truncated)
+              truncations.push({
+                item: `history:toolcall:${c.id}`,
+                originalBytes: cut.originalBytes,
+                keptBytes: cut.keptBytes,
+                originalDigest: sha256Hex(args.text),
+              });
+            return { ...c, arguments: cut.text };
+          })
+        : undefined;
     messages.push(
       item.role === 'assistant'
         ? {
             role: 'assistant',
             content,
-            ...(item.toolCalls
-              ? { toolCalls: item.toolCalls.map((c) => ({ ...c })) }
-              : {}),
+            ...(toolCalls ? { toolCalls } : {}),
           }
         : { role: 'user', content },
     );
@@ -506,9 +539,19 @@ export function compileContext(input: CompileContextInput): CompiledContext {
     ...pages.map((p) => p.dependencyVector ?? []),
     ...memories.map((m) => m.dependencyVector ?? []),
     ...input.history.map((h) => h.dependencyVector),
+    input.readSetVector ?? [],
+    input.inheritedVector ?? [],
   );
 
-  const fullText = `${system}${messages.map((m) => m.content).join('')}`;
+  const fullText = `${system}${messages
+    .map(
+      (m) =>
+        m.content +
+        (m.role === 'assistant' && m.toolCalls
+          ? m.toolCalls.map((c) => c.name + c.arguments).join('')
+          : ''),
+    )
+    .join('')}`;
   const snapshot = ContextSnapshotSchema.parse({
     id: input.snapshotId,
     contextSchemaVersion: CONTEXT_SCHEMA_VERSION,
@@ -526,10 +569,10 @@ export function compileContext(input: CompileContextInput): CompiledContext {
         contentDigest: receipt.contentDigest,
       })),
       inheritedArtifacts: artifacts.map((artifact) => ({
-        // The snapshot enum has no 'plan'; plan outputs are recorded as
-        // task_output with no receipt dependence (reported as a contract gap).
+        // The snapshot enum has no 'plan' (contract gap): plans are recorded as
+        // task_output under the unambiguous id 'plan:<id>', no receipt dependence.
         kind: artifact.kind === 'plan' ? 'task_output' : artifact.kind,
-        id: artifact.id,
+        id: snapshotArtifactId(artifact),
         digest: artifact.digest,
         dependencyReceiptIds: [
           ...new Set(artifactVector(artifact).map((e) => e.receiptId)),

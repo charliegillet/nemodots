@@ -1,4 +1,8 @@
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import {
+  createServer,
+  type IncomingMessage,
+  type ServerResponse,
+} from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import type {
@@ -42,7 +46,12 @@ export async function startStub(handler: Handler): Promise<Stub> {
       let body: Record<string, unknown> | null = null;
       const text = Buffer.concat(chunks).toString('utf8');
       if (text) body = JSON.parse(text);
-      const entry: Seen = { method: req.method ?? '', url: req.url ?? '', headers: req.headers, body };
+      const entry: Seen = {
+        method: req.method ?? '',
+        url: req.url ?? '',
+        headers: req.headers,
+        body,
+      };
       const index = seen.push(entry) - 1;
       active++;
       max = Math.max(max, active);
@@ -67,7 +76,11 @@ export async function startStub(handler: Handler): Promise<Stub> {
 
 export const API_KEY = 'test-key-not-a-real-secret-0123456789';
 
-export function chunk(delta: Record<string, unknown>, finish: string | null = null, extra: Record<string, unknown> = {}) {
+export function chunk(
+  delta: Record<string, unknown>,
+  finish: string | null = null,
+  extra: Record<string, unknown> = {},
+) {
   return `data: ${JSON.stringify({
     id: 'chatcmpl-x',
     object: 'chat.completion.chunk',
@@ -92,13 +105,26 @@ export function sse(res: ServerResponse) {
   res.writeHead(200, { 'content-type': 'text/event-stream' });
 }
 
-export function json(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) {
+export function json(
+  res: ServerResponse,
+  status: number,
+  body: unknown,
+  headers: Record<string, string> = {},
+) {
   res.writeHead(status, { 'content-type': 'application/json', ...headers });
   res.end(JSON.stringify(body));
 }
 
 /** A normal streamed text answer. */
-export function textStream(res: ServerResponse, words: string[], usage: Record<string, unknown> | null = { prompt_tokens: 30, completion_tokens: 3, prompt_tokens_details: { cached_tokens: 0 } }) {
+export function textStream(
+  res: ServerResponse,
+  words: string[],
+  usage: Record<string, unknown> | null = {
+    prompt_tokens: 30,
+    completion_tokens: 3,
+    prompt_tokens_details: { cached_tokens: 0 },
+  },
+) {
   sse(res);
   res.write(chunk({ role: 'assistant', content: '' }));
   for (const w of words) res.write(chunk({ content: w }));
@@ -128,10 +154,17 @@ export function request(over: Partial<ChatRequest> = {}): ChatRequest {
 }
 
 export function ctx(signal: AbortSignal = new AbortController().signal) {
-  return { signal, modelCallId: randomUUID() as ModelCallId, role: 'worker' as const };
+  return {
+    signal,
+    modelCallId: randomUUID() as ModelCallId,
+    role: 'worker' as const,
+  };
 }
 
-export function client(stub: Stub, over: Partial<ConstructorParameters<typeof CrusoeInferenceClient>[0]> = {}) {
+export function client(
+  stub: Stub,
+  over: Partial<ConstructorParameters<typeof CrusoeInferenceClient>[0]> = {},
+) {
   const sleeps: number[] = [];
   const instance = new CrusoeInferenceClient({
     baseUrl: stub.baseUrl,

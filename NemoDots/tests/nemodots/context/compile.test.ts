@@ -278,7 +278,7 @@ describe('injected lists and dependency vector', () => {
       without.snapshot.dependencyVector,
     );
     expect(withPlan.snapshot.injected.inheritedArtifacts).toEqual([
-      expect.objectContaining({ id: 'plan-1', dependencyReceiptIds: [] }),
+      expect.objectContaining({ id: 'plan:plan-1', dependencyReceiptIds: [] }),
     ]);
     expect(withPlan.system).toContain('<data kind="plan" id="plan-1"');
   });

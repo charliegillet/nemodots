@@ -48,6 +48,19 @@ export interface InferenceClientOptions {
   now?: () => number;
 }
 
+/** Optional per-delta observer (live tests cancel after N deltas; a UI may stream). */
+export type StreamObserver = (delta: {
+  content: string | null;
+  reasoning: string | null;
+}) => void;
+
+export interface CompleteContext {
+  signal: AbortSignal;
+  modelCallId: string;
+  role: string;
+  onDelta?: StreamObserver;
+}
+
 export const NULL_USAGE: Usage = Object.freeze({
   promptTokens: null,
   completionTokens: null,
@@ -131,7 +144,10 @@ class Accumulator {
     { id: string; name: string; args: string }
   >();
 
-  constructor(private readonly now: () => string) {}
+  constructor(
+    private readonly now: () => string,
+    private readonly onDelta?: StreamObserver,
+  ) {}
 
   /** One SSE `data:` payload. */
   chunk(payload: string) {
@@ -162,6 +178,23 @@ class Accumulator {
     }
     const reasoning = delta.reasoning ?? delta.reasoning_content;
     if (typeof reasoning === 'string') this.reasoning += reasoning;
+    if (this.onDelta) {
+      const content =
+        typeof delta.content === 'string' && delta.content.length > 0
+          ? delta.content
+          : null;
+      const thought =
+        typeof reasoning === 'string' && reasoning.length > 0
+          ? reasoning
+          : null;
+      if (content !== null || thought !== null) {
+        try {
+          this.onDelta({ content, reasoning: thought });
+        } catch {
+          // an observer must never break inference
+        }
+      }
+    }
     if (Array.isArray(delta.tool_calls))
       for (const raw of delta.tool_calls) {
         const call = record(raw);
@@ -361,7 +394,7 @@ export class CrusoeInferenceClient implements InferenceAdapter {
 
   async complete(
     req: ChatRequest,
-    ctx: { signal: AbortSignal; modelCallId: string; role: string },
+    ctx: CompleteContext,
   ): Promise<StampedChatResult> {
     const body = JSON.stringify(buildChatBody(req)); // throws on invalid requests
     const semaphore = this.semaphoreFor(req.model);
@@ -435,7 +468,7 @@ export class CrusoeInferenceClient implements InferenceAdapter {
   private async tryOnce(
     req: ChatRequest,
     body: string,
-    ctx: { signal: AbortSignal; modelCallId: string },
+    ctx: CompleteContext,
     n: number,
     semaphore: Semaphore,
   ): Promise<TryResult> {
@@ -480,7 +513,7 @@ export class CrusoeInferenceClient implements InferenceAdapter {
     };
     const onAbort = () => controller.abort();
     ctx.signal.addEventListener('abort', onAbort, { once: true });
-    const accumulator = new Accumulator(() => this.iso());
+    const accumulator = new Accumulator(() => this.iso(), ctx.onDelta);
     try {
       if (ctx.signal.aborted) return cancelled();
       arm();

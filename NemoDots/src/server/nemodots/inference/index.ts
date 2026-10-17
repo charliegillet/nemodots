@@ -10,6 +10,8 @@ export {
   DEFAULT_MAX_IN_FLIGHT,
   DEFAULT_TIMEOUT_MS,
   NULL_USAGE,
+  type CompleteContext,
+  type StreamObserver,
   parseUsage,
   type InferenceClientOptions,
 } from './client.js';

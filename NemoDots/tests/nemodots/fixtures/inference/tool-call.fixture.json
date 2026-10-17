@@ -1,0 +1,63 @@
+{
+  "format": "nemodots.inference.fixture.v1",
+  "label": "Hand-authored tool call + continuation fixture (not live evidence)",
+  "provenance": "hand-authored",
+  "host": "fixture.local",
+  "models": [
+    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B"
+  ],
+  "entries": [
+    {
+      "key": "2b6e1690667293c09b9433a44b97863858e5846483f65b477885f4bd1ced5ae5",
+      "request": {
+        "model": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B",
+        "systemDigest": "561042253fe36e358c88b4b2e9c2474a25cebde03717e04be1ae9e7983b2b21e",
+        "messageCount": 3,
+        "toolSchemaHash": "2cbec219b5a857a08f09f5f6331221baf88af7672f55df734ace190490efae28"
+      },
+      "response": {
+        "modelReturned": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B",
+        "reasoning": null,
+        "content": "Checkout health reports status ok.",
+        "finishReason": "stop",
+        "outcome": "completed",
+        "usage": {
+          "promptTokens": 421,
+          "completionTokens": 16,
+          "cachedTokens": null,
+          "reasoningTokens": null
+        },
+        "toolCalls": []
+      }
+    },
+    {
+      "key": "5bdede3e15e00348178ab4df29c468f8ecfef2bc223ad16780fb25156cdcfb33",
+      "request": {
+        "model": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B",
+        "systemDigest": "561042253fe36e358c88b4b2e9c2474a25cebde03717e04be1ae9e7983b2b21e",
+        "messageCount": 1,
+        "toolSchemaHash": "2cbec219b5a857a08f09f5f6331221baf88af7672f55df734ace190490efae28"
+      },
+      "response": {
+        "modelReturned": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B",
+        "reasoning": null,
+        "content": null,
+        "finishReason": "tool_calls",
+        "outcome": "tool_calls",
+        "usage": {
+          "promptTokens": 337,
+          "completionTokens": 30,
+          "cachedTokens": null,
+          "reasoningTokens": null
+        },
+        "toolCalls": [
+          {
+            "toolCallId": "chatcmpl-tool-fixture0001",
+            "name": "observe_source",
+            "arguments": "{\"sourceKey\":\"checkout.health\"}"
+          }
+        ]
+      }
+    }
+  ]
+}

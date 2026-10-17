@@ -37,7 +37,7 @@ describe('fixtures', () => {
     });
     expect(state.lastEventId).toBe(EventKindSchema.options.length);
     expect(state.mission?.id).toBe(ids.mission);
-    expect(state.actions[0].status).toBe('failed');
+    expect(state.actions[0].status).toBe('outcome_unknown');
   });
 });
 

@@ -19,8 +19,10 @@ const SECRET_PATTERNS: readonly RegExp[] = [
   /\bsk-[A-Za-z0-9_-]{20,}/g,
   /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/g,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
-  /\b(?:CRUSOE_API_KEY|OPENAI_API_KEY|CPK_INTELLIGENCE_API_KEY)\s*[=:]\s*\S+/g,
+  /\b(?:CRUSOE_API_KEY|OPENAI_API_KEY|CPK_INTELLIGENCE_API_KEY)["']?\s*[=:]\s*(?:"[^"]*"|'[^']*'|[^\s,"'}\]]+)/g,
 ];
+const SECRET_KEY =
+  /^(?:.*(?:api_?key|secret|password|passwd|token|credential|private_?key).*|crusoe_api_key|openai_api_key|cpk_intelligence_api_key)$/i;
 const ACTOR_KEY = /^(?:actor|caused_?by_?actor)$/i;
 
 /** Replace obvious credentials with a marker. Returns the text and the count. */
@@ -45,6 +47,11 @@ export function stripActors(value: unknown): { value: unknown; count: number } {
       for (const [key, item] of Object.entries(node)) {
         if (ACTOR_KEY.test(key)) {
           count += 1;
+          continue;
+        }
+        if (SECRET_KEY.test(key) && item !== null && item !== undefined) {
+          count += 1;
+          out[key] = '[REDACTED]';
           continue;
         }
         out[key] = walk(item);
