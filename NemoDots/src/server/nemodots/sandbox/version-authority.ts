@@ -79,10 +79,7 @@ export interface AdvanceConfigResult {
 }
 
 export type ConfigVersionErrorCode =
-  | 'stale_version'
-  | 'missing_key'
-  | 'invalid_key'
-  | 'invalid_input';
+  'stale_version' | 'missing_key' | 'invalid_key' | 'invalid_input';
 
 export class ConfigVersionError extends Error {
   constructor(
@@ -118,7 +115,10 @@ function assertKey(key: string) {
     );
 }
 
-function assertScalar(key: string, value: unknown): asserts value is ConfigScalar {
+function assertScalar(
+  key: string,
+  value: unknown,
+): asserts value is ConfigScalar {
   const ok =
     typeof value === 'string' ||
     typeof value === 'boolean' ||
@@ -429,7 +429,11 @@ export function advanceConfigTx(
   input: AdvanceConfigInput,
   options?: TransactionOptions,
 ): Promise<AdvanceConfigResult> {
-  return withTransaction(pool, (client) => advanceConfig(client, input), options);
+  return withTransaction(
+    pool,
+    (client) => advanceConfig(client, input),
+    options,
+  );
 }
 
 /**

@@ -308,6 +308,56 @@ describe('selectDependencyEdges', () => {
   });
 });
 
+describe('malformed events never break the reducer', () => {
+  it('counts an unknown kind as malformed and keeps the state usable', () => {
+    const raw = {
+      id: 5,
+      missionId: ids.mission,
+      kind: 'agent.spawned',
+      at: T0,
+      payload: { kind: 'agent.spawned' },
+    };
+    const result = applyMissionEvent(fresh(), raw as never);
+    expect(result.outcome).toBe('malformed');
+    expect(result.state.counters.malformed).toBe(1);
+    const next = missionReducer(result.state, {
+      type: 'event',
+      event: ev(6, payload('task.created')),
+    });
+    expect(next.tasks).toHaveLength(1);
+    expect(next.missionId).toBe(ids.mission);
+  });
+
+  it('counts a kind-correct payload with missing fields as malformed without recording its id', () => {
+    const raw = {
+      id: 5,
+      missionId: ids.mission,
+      kind: 'task.created',
+      at: T0,
+      payload: { kind: 'task.created' },
+    };
+    const result = applyMissionEvent(fresh(), raw as never);
+    expect(result.outcome).toBe('malformed');
+    expect(result.state.events).toHaveLength(0);
+    expect(result.state.seenIds.has(5)).toBe(false);
+    expect(result.state.lastEventId).toBe(0);
+  });
+
+  it('skips a malformed retained event when a snapshot is merged', () => {
+    const bad = {
+      id: 99,
+      missionId: ids.mission,
+      kind: 'task.created',
+      at: T0,
+      payload: { kind: 'task.created' },
+    };
+    const state = { ...fresh(), events: [bad as never] };
+    const merged = mergeMissionSnapshot(state, snapshot()).state;
+    expect(merged.missionId).toBe(ids.mission);
+    expect(merged.mission).not.toBeNull();
+  });
+});
+
 it('keeps the changed-evidence ids stable for timeline tests', () => {
   expect(invalidationId).toMatch(/^[0-9a-f]{64}$/);
 });

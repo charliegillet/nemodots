@@ -141,7 +141,7 @@ export class EventCollector {
     }
     this.seen.add(id);
     this.lastId = Math.max(this.lastId, id);
-    let parsed: Record<string, unknown> = {};
+    let parsed: Record<string, unknown>;
     try {
       parsed = JSON.parse(data.join('\n')) as Record<string, unknown>;
     } catch {
@@ -165,10 +165,9 @@ export class EventCollector {
 /** payload of a MissionEvent as {kind, ...fields} */
 export function payloadOf(event: CollectedEvent): Record<string, unknown> {
   const payload = event.data.payload;
-  return (payload && typeof payload === 'object' ? payload : event.data) as Record<
-    string,
-    unknown
-  >;
+  return (
+    payload && typeof payload === 'object' ? payload : event.data
+  ) as Record<string, unknown>;
 }
 
 export interface CheckoutResult {
@@ -309,7 +308,10 @@ export async function loadSample(
         const n = issued;
         issued += 1;
         try {
-          const response = await checkoutRequest('GET', paths[n % paths.length]);
+          const response = await checkoutRequest(
+            'GET',
+            paths[n % paths.length],
+          );
           const key = String(response.status);
           result.status[key] = (result.status[key] ?? 0) + 1;
           if (response.status === 503 && /pool_timeout/.test(response.text))

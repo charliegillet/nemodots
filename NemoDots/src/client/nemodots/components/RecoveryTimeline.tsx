@@ -1,4 +1,5 @@
 import type { MissionEvent } from '../../../server/nemodots/contracts/index.js';
+import type { InvalidationNode, RecoveryNode } from '../mission-events';
 import { formatTimestamp, humanize, plural, shortId } from '../format';
 import { Panel, type PanelState } from './Panel';
 import { UntrustedText } from './UntrustedText';
@@ -7,7 +8,8 @@ export type TimelineStep =
   'evidence' | 'decision' | 'repair' | 'invalidation' | 'recovery' | 'resolved';
 
 export interface TimelineEntry {
-  eventId: number;
+  /** null for an entry rebuilt from a snapshot node (no durable event retained) */
+  eventId: number | null;
   at: string;
   step: TimelineStep;
   stepLabel: string;
@@ -127,15 +129,138 @@ export function buildTimelineEntries(
         break;
     }
   }
-  return entries.sort((a, b) => a.eventId - b.eventId);
+  return entries.sort((a, b) => (a.eventId ?? 0) - (b.eventId ?? 0));
+}
+
+const STEP_ORDER: Record<TimelineStep, number> = {
+  evidence: 0,
+  invalidation: 1,
+  decision: 2,
+  recovery: 3,
+  repair: 4,
+  resolved: 5,
+};
+
+/**
+ * Entries for invalidations and recoveries that a merged snapshot holds but the
+ * retained event list does not cover (the page was loaded after they happened).
+ * Limit: a snapshot does not carry the evidence-registered, decision or repair
+ * attempt.started events, nor per-attempt start times, so only the invalidation,
+ * recovery and resolution steps can be rebuilt; the repair attempt is named in
+ * the recovery entry's detail.
+ */
+export function buildSnapshotFallbackEntries(
+  events: readonly MissionEvent[],
+  invalidations: readonly InvalidationNode[],
+  recoveries: readonly RecoveryNode[],
+): TimelineEntry[] {
+  const recordedIds = new Set<string>();
+  const resolvedIds = new Set<string>();
+  const recoveryIds = new Set<string>();
+  for (const event of events) {
+    const p = event.payload;
+    if (p.kind === 'invalidation.recorded')
+      recordedIds.add(p.invalidationEventId);
+    else if (p.kind === 'invalidation.resolved')
+      resolvedIds.add(p.invalidationEventId);
+    else if (p.kind === 'recovery.recorded') recoveryIds.add(p.recovery.id);
+  }
+  const entries: TimelineEntry[] = [];
+  for (const node of invalidations) {
+    if (!node.known) continue;
+    if (!recordedIds.has(node.id) && node.createdAt)
+      entries.push({
+        eventId: null,
+        at: node.createdAt,
+        step: 'invalidation',
+        stepLabel: STEP_LABEL.invalidation,
+        title: `Invalidation recorded: ${humanize(node.reason ?? 'unknown').toLowerCase()} on ${node.sourceKey}`,
+        detail: `Affects ${plural(node.affected.taskIds.length, 'task')}, ${plural(
+          node.affected.attemptIds.length,
+          'attempt',
+        )}, ${plural(node.affected.actionIds.length, 'action')}; preserves ${plural(
+          node.preservedTaskIds.length,
+          'task',
+        )}${
+          node.closure
+            ? `; closure depth ${node.closure.depth}, ${plural(node.closure.nodes, 'node')}${
+                node.closure.capped ? ' (capped)' : ''
+              }`
+            : ''
+        } (from snapshot)`,
+        note: null,
+        invalidationEventId: node.id,
+      });
+    if (node.resolvedAt && !resolvedIds.has(node.id))
+      entries.push({
+        eventId: null,
+        at: node.resolvedAt,
+        step: 'resolved',
+        stepLabel: STEP_LABEL.resolved,
+        title: `Invalidation ${shortId(node.id)} resolved`,
+        detail: `Resolved at ${formatTimestamp(node.resolvedAt)} (from snapshot)`,
+        note: null,
+        invalidationEventId: node.id,
+      });
+  }
+  for (const node of recoveries) {
+    if (recoveryIds.has(node.id)) continue;
+    entries.push({
+      eventId: null,
+      at: node.createdAt,
+      step: 'recovery',
+      stepLabel: STEP_LABEL.recovery,
+      title: `Recovery: ${humanize(node.kind).toLowerCase()}`,
+      detail: `${
+        node.newAttemptId
+          ? `Repair attempt ${shortId(node.newAttemptId)} scheduled; `
+          : ''
+      }from snapshot`,
+      note: node.detail || null,
+      invalidationEventId: node.invalidationEventId,
+    });
+  }
+  return entries;
+}
+
+/** Event entries plus snapshot fallback entries, merged chronologically. */
+export function buildTimeline(
+  events: readonly MissionEvent[],
+  invalidations: readonly InvalidationNode[] = [],
+  recoveries: readonly RecoveryNode[] = [],
+): TimelineEntry[] {
+  const fromEvents = buildTimelineEntries(events);
+  const fallback = buildSnapshotFallbackEntries(
+    events,
+    invalidations,
+    recoveries,
+  );
+  if (fallback.length === 0) return fromEvents;
+  const time = (entry: TimelineEntry) => {
+    const t = Date.parse(entry.at);
+    return Number.isNaN(t) ? 0 : t;
+  };
+  return [...fromEvents, ...fallback].sort(
+    (a, b) =>
+      time(a) - time(b) ||
+      (a.eventId ?? 0) - (b.eventId ?? 0) ||
+      STEP_ORDER[a.step] - STEP_ORDER[b.step],
+  );
 }
 
 export function RecoveryTimeline({
   events,
+  invalidations,
+  recoveries,
   loading,
   error,
-}: PanelState & { events: readonly MissionEvent[] }) {
-  const entries = buildTimelineEntries(events);
+}: PanelState & {
+  events: readonly MissionEvent[];
+  /** MissionState.invalidations/recoveries: fallback after a snapshot merge */
+  invalidations?: readonly InvalidationNode[];
+  recoveries?: readonly RecoveryNode[];
+}) {
+  const entries = buildTimeline(events, invalidations, recoveries);
   return (
     <Panel
       title="Recovery timeline"
@@ -148,7 +273,10 @@ export function RecoveryTimeline({
       <ol className="nd-timeline-list" aria-label="Recovery events in order">
         {entries.map((entry) => (
           <li
-            key={entry.eventId}
+            key={
+              entry.eventId ??
+              `${entry.step}-${entry.invalidationEventId}-${entry.at}`
+            }
             className={`nd-timeline-item nd-step-${entry.step}`}
           >
             <span className="nd-step">{entry.stepLabel}</span>
@@ -159,8 +287,8 @@ export function RecoveryTimeline({
               )}
               {entry.note && <UntrustedText text={entry.note} />}
               <p className="nd-id">
-                event {entry.eventId} ·{' '}
-                <time dateTime={entry.at}>{formatTimestamp(entry.at)}</time>
+                {entry.eventId === null ? 'snapshot' : `event ${entry.eventId}`}{' '}
+                · <time dateTime={entry.at}>{formatTimestamp(entry.at)}</time>
               </p>
             </div>
           </li>

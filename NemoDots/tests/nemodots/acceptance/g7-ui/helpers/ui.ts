@@ -1,7 +1,12 @@
 // Browser helpers: system Chrome via Playwright, console/network capture, and
 // locators that rely only on accessible names and roles (documented in
 // FRONTEND.md section 8 and the component aria-labels), never on CSS classes.
-import { type Browser, type BrowserContext, type Page, chromium } from 'playwright';
+import {
+  type Browser,
+  type BrowserContext,
+  type Page,
+  chromium,
+} from 'playwright';
 import { existsSync } from 'node:fs';
 import { APP_URL, redact } from './env.js';
 
@@ -27,7 +32,10 @@ export interface Captured {
 
 export async function newPage(
   browser: Browser,
-  options: { token?: string | null; viewport?: { width: number; height: number } } = {},
+  options: {
+    token?: string | null;
+    viewport?: { width: number; height: number };
+  } = {},
 ): Promise<{ context: BrowserContext; page: Page; captured: Captured }> {
   const context = await browser.newContext({
     baseURL: APP_URL,
@@ -42,12 +50,23 @@ export async function newPage(
       }
     }, options.token);
   const page = await context.newPage();
-  const captured: Captured = { console: [], pageErrors: [], requests: [], responseBodies: [] };
-  page.on('console', (m) => captured.console.push({ type: m.type(), text: redact(m.text()) }));
+  const captured: Captured = {
+    console: [],
+    pageErrors: [],
+    requests: [],
+    responseBodies: [],
+  };
+  page.on('console', (m) =>
+    captured.console.push({ type: m.type(), text: redact(m.text()) }),
+  );
   page.on('pageerror', (e) => captured.pageErrors.push(redact(String(e))));
-  page.on('request', (r) => captured.requests.push({ method: r.method(), url: r.url() }));
+  page.on('request', (r) =>
+    captured.requests.push({ method: r.method(), url: r.url() }),
+  );
   page.on('response', async (r) => {
-    const entry = captured.requests.find((x) => x.url === r.url() && x.status === undefined);
+    const entry = captured.requests.find(
+      (x) => x.url === r.url() && x.status === undefined,
+    );
     if (entry) entry.status = r.status();
     if (r.url().includes('/api/nemodots/') && !r.url().endsWith('/events')) {
       try {
@@ -75,8 +94,13 @@ export const humanize = (value: string) => value.replace(/_/g, ' ');
 
 /** Case-insensitive regex for a status shown as text ("blocked_provider" -> /blocked provider/i). */
 export const statusText = (value: string) =>
-  new RegExp(`\\b${humanize(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+  new RegExp(
+    `\\b${humanize(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`,
+    'i',
+  );
 
 export function consoleErrors(captured: Captured) {
-  return captured.console.filter((m) => m.type === 'error' || m.type === 'assert');
+  return captured.console.filter(
+    (m) => m.type === 'error' || m.type === 'assert',
+  );
 }

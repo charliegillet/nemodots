@@ -240,7 +240,10 @@ describe('openMissionStream', () => {
           );
         },
       });
-      return new Response(body, { status: 200 });
+      return new Response(body, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      });
     });
     const statuses: StreamStatus[] = [];
     const handle = openMissionStream({
@@ -304,5 +307,76 @@ describe('openMissionStream', () => {
     expect(received).toEqual([2]);
     expect(errors).toHaveLength(2);
     handle.close();
+  });
+
+  it('treats a 200 with a non-SSE content type as a failure with growing backoff', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response('<html>spa</html>', {
+          status: 200,
+          headers: { 'Content-Type': 'text/html' },
+        }),
+    );
+    const statuses: StreamStatus[] = [];
+    const handle = openMissionStream({
+      missionId: ids.mission,
+      onEvent: () => undefined,
+      onStatus: (s) => statuses.push(s),
+      onError: () => undefined,
+      fetchImpl,
+      random: () => 0,
+      baseDelayMs: 500,
+      maxDelayMs: 30000,
+    });
+    await vi.advanceTimersByTimeAsync(60000);
+    // delays 250, 500, 1000, ... capped at 15000: far fewer than the 121 fetches of a flat 500 ms loop
+    expect(fetchImpl.mock.calls.length).toBeLessThan(15);
+    expect(statuses).not.toContain('open');
+    handle.close();
+  });
+
+  it('keeps growing the backoff when a stream sends bytes but no valid event', async () => {
+    const fetchImpl = vi.fn(async () =>
+      streamResponse([': keep-alive\n\n', 'data: not json\n\n']),
+    );
+    const handle = openMissionStream({
+      missionId: ids.mission,
+      onEvent: () => undefined,
+      onError: () => undefined,
+      fetchImpl,
+      random: () => 0,
+      baseDelayMs: 500,
+      maxDelayMs: 30000,
+    });
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(fetchImpl.mock.calls.length).toBeLessThan(15);
+    handle.close();
+  });
+
+  it('resets the backoff after a valid event', async () => {
+    const e1 = ev(1, payload('task.created'));
+    const fetchImpl = vi.fn(async () => streamResponse([sse(e1)]));
+    const handle = openMissionStream({
+      missionId: ids.mission,
+      onEvent: () => undefined,
+      fetchImpl,
+      random: () => 0,
+      baseDelayMs: 1000,
+    });
+    await vi.advanceTimersByTimeAsync(5000);
+    // every connection delivered a valid event, so the delay stays at the 500 ms floor
+    expect(fetchImpl.mock.calls.length).toBeGreaterThanOrEqual(9);
+    handle.close();
+  });
+
+  it('rejects an unknown event kind in the structural guard', () => {
+    const raw = {
+      id: 5,
+      missionId: ids.mission,
+      kind: 'agent.spawned',
+      at: new Date().toISOString(),
+      payload: { kind: 'agent.spawned' },
+    };
+    expect(isMissionEvent(raw)).toBe(false);
   });
 });

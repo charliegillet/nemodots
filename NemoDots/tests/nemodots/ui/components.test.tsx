@@ -19,6 +19,7 @@ import {
 } from '../../../src/client/nemodots/components/ModeBadge';
 import {
   RecoveryTimeline,
+  buildTimeline,
   buildTimelineEntries,
 } from '../../../src/client/nemodots/components/RecoveryTimeline';
 import { StatusPill } from '../../../src/client/nemodots/components/StatusPill';
@@ -27,6 +28,7 @@ import { TelemetryPanel } from '../../../src/client/nemodots/components/Telemetr
 import {
   applyMissionEvent,
   createMissionState,
+  mergeMissionSnapshot,
   selectDependencyEdges,
   type MissionState,
 } from '../../../src/client/nemodots/mission-events';
@@ -40,7 +42,7 @@ import {
   invalidationId,
   telemetry,
 } from '../contracts/fixtures.js';
-import { ev, ids, payload, T0, T1 } from './helpers';
+import { ev, ids, payload, snapshot, T0, T1 } from './helpers';
 
 const html = (node: React.ReactElement) =>
   renderToStaticMarkup(node).replace(/<!-- -->/g, '');
@@ -472,6 +474,46 @@ describe('RecoveryTimeline', () => {
     expect(markup).toContain('Block reason: stale version');
     expect(markup).toContain('repair with fresh reads');
     expect(markup).toContain('aria-label="Recovery events in order"');
+  });
+
+  it('rebuilds invalidation, recovery and resolution from snapshot nodes when no events cover them', () => {
+    const state = mergeMissionSnapshot(
+      createMissionState(ids.mission),
+      snapshot(),
+    ).state;
+    expect(state.events).toHaveLength(0);
+    expect(state.invalidations.length).toBeGreaterThan(0);
+    expect(state.recoveries.length).toBeGreaterThan(0);
+    const bare = html(<RecoveryTimeline events={state.events} />);
+    expect(bare).toContain('No evidence changes or recoveries yet');
+    const markup = html(
+      <RecoveryTimeline
+        events={state.events}
+        invalidations={state.invalidations}
+        recoveries={state.recoveries}
+      />,
+    );
+    expect(markup).not.toContain('No evidence changes or recoveries yet');
+    expect(markup).toContain('Invalidation recorded');
+    expect(markup).toContain('Recovery:');
+    expect(markup).toContain('from snapshot');
+  });
+
+  it('does not duplicate steps that retained events already cover', () => {
+    const events = recoveryEvents();
+    const state = mergeMissionSnapshot(
+      createMissionState(ids.mission),
+      snapshot(),
+    ).state;
+    const entries = buildTimeline(
+      events,
+      state.invalidations.map((i) => ({ ...i, id: invalidationId })),
+      state.recoveries.map((r) => ({
+        ...r,
+        id: (events[5].payload as { recovery: { id: string } }).recovery.id,
+      })),
+    );
+    expect(entries.filter((e) => e.eventId === null)).toEqual([]);
   });
 
   it('escapes recovery notes', () => {

@@ -3,9 +3,7 @@
   "label": "Hand-authored tool call + continuation fixture (not live evidence)",
   "provenance": "hand-authored",
   "host": "fixture.local",
-  "models": [
-    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B"
-  ],
+  "models": ["nvidia/NVIDIA-Nemotron-3-Super-120B-A12B"],
   "entries": [
     {
       "key": "2b6e1690667293c09b9433a44b97863858e5846483f65b477885f4bd1ced5ae5",

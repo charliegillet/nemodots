@@ -273,9 +273,7 @@ export async function portIsFree(port: number) {
   return new Promise<boolean>((resolve) => {
     const server = createServer();
     server.once('error', () => resolve(false));
-    server.listen(port, '127.0.0.1', () =>
-      server.close(() => resolve(true)),
-    );
+    server.listen(port, '127.0.0.1', () => server.close(() => resolve(true)));
   });
 }
 
@@ -287,7 +285,8 @@ export async function waitForHttp(
   const deadline = Date.now() + timeoutMs;
   let last = 'no response';
   while (Date.now() < deadline) {
-    if (proc.exited()) throw new Error(`process exited early: ${proc.output()}`);
+    if (proc.exited())
+      throw new Error(`process exited early: ${proc.output()}`);
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(2000) });
       return res;

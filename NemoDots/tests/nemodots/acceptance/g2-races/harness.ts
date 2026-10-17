@@ -14,10 +14,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import pg from 'pg';
 import { createClient } from 'redis';
 import { barrier, latch, withTimeout } from '../../helpers/barrier.js';
-import {
-  stackRoleUrls,
-  withDatabase,
-} from '../../helpers/test-db.js';
+import { stackRoleUrls, withDatabase } from '../../helpers/test-db.js';
 import { migrate } from '../../../../src/server/nemodots/db/migrate.js';
 import { digest } from '../../../../src/server/nemodots/contracts/index.js';
 import type {
@@ -55,12 +52,16 @@ export async function entry<T = unknown>(
 ): Promise<T> {
   const abs = resolve(APP_ROOT, 'src/server/nemodots', file);
   const label = `src/server/nemodots/${file}${name ? `#${name}` : ''}`;
-  if (!existsSync(abs)) throw new EntryPointMissing(label, 'file does not exist');
+  if (!existsSync(abs))
+    throw new EntryPointMissing(label, 'file does not exist');
   let mod: Rec;
   try {
     mod = await import(/* @vite-ignore */ pathToFileURL(abs).href);
   } catch (e) {
-    throw new EntryPointMissing(label, `failed to load: ${(e as Error).message}`);
+    throw new EntryPointMissing(
+      label,
+      `failed to load: ${(e as Error).message}`,
+    );
   }
   if (!name) return mod as T;
   if (typeof mod[name] === 'undefined')
@@ -119,14 +120,18 @@ export interface World {
   redis: ReturnType<typeof createClient>;
   redisMode: { current: 'ok' | 'drop_reply' | 'fail_before' };
   // setup / mutation
-  seedAttempt(role?: string): Promise<AttemptCtx>;
+  seedAttempt(role?: string, missionId?: string): Promise<AttemptCtx>;
   receipts: Map<string, string>;
   registerMember(key: string): Promise<string>;
   registerObserved(label: 'health' | 'redis', value?: unknown): Promise<string>;
   advance(
     key: string,
     value: unknown,
-    o?: { actor?: 'injector' | 'owner'; register?: boolean; expectedVersion?: number },
+    o?: {
+      actor?: 'injector' | 'owner';
+      register?: boolean;
+      expectedVersion?: number;
+    },
   ): Promise<void>;
   holdRowLock(
     key: string,
@@ -142,7 +147,9 @@ export interface World {
   onHook(point: HookPoint, fn: (ctx: Rec) => Promise<void> | void): void;
   clearHooks(): Promise<void>;
   // inspection (verifier-owned SQL; no production reads)
-  cfg(key: string): Promise<{ value: unknown; version: number; causedBy: string | null }>;
+  cfg(
+    key: string,
+  ): Promise<{ value: unknown; version: number; causedBy: string | null }>;
   history(key: string): Promise<Rec[]>;
   intent(id: string): Promise<Rec>;
   auths(id: string): Promise<Rec[]>;
@@ -164,7 +171,29 @@ export interface World {
   watcherPoll(): Promise<void>;
 }
 
+/** Resolve every production entry point first so a missing one is reported before any infrastructure error. */
+async function requireEntries() {
+  const wanted: [string, string?][] = [
+    ['actions/index.ts', 'createActionAdmission'],
+    ['actions/test-hooks.ts'],
+    ['actions/dispatch.ts', 'cacheKey'],
+    ['coordinator/test-support.ts'],
+    ['sandbox/version-authority.ts', 'advanceConfig'],
+    ['ledger/receipts.ts', 'registerObservation'],
+    ['watcher/watcher.ts', 'createWatcher'],
+  ];
+  const missing: string[] = [];
+  for (const [f, n] of wanted)
+    await entry(f, n).catch((e: Error) => missing.push(e.message));
+  if (missing.length)
+    throw new EntryPointMissing(
+      'Gate 2 entry points',
+      `\n${missing.join('\n')}`,
+    );
+}
+
 export async function withWorld<T>(fn: (w: World) => Promise<T>): Promise<T> {
+  await requireEntries();
   const base = stackRoleUrls();
   const db = `${DB_PREFIX}${randomBytes(6).toString('hex')}`;
   const adminBoot = new pg.Client({ connectionString: base.admin });
@@ -192,7 +221,13 @@ export async function withWorld<T>(fn: (w: World) => Promise<T>): Promise<T> {
     const injector = mk('injector');
     const verifier = mk('verifier');
     const world = await build({
-      db, prefix, admin, app, injector, verifier, redis,
+      db,
+      prefix,
+      admin,
+      app,
+      injector,
+      verifier,
+      redis,
     });
     try {
       return await fn(world);
@@ -202,7 +237,10 @@ export async function withWorld<T>(fn: (w: World) => Promise<T>): Promise<T> {
   } finally {
     for (const p of pools) await p.end().catch(() => {});
     try {
-      for await (const keys of redis.scanIterator({ MATCH: `${prefix}:*`, COUNT: 200 }))
+      for await (const keys of redis.scanIterator({
+        MATCH: `${prefix}:*`,
+        COUNT: 200,
+      }))
         if (keys.length) await redis.unlink(keys);
     } catch {
       /* best effort, own prefix only */
@@ -216,8 +254,13 @@ export async function withWorld<T>(fn: (w: World) => Promise<T>): Promise<T> {
 }
 
 async function build(c: {
-  db: string; prefix: string; admin: pg.Pool; app: pg.Pool;
-  injector: pg.Pool; verifier: pg.Pool; redis: ReturnType<typeof createClient>;
+  db: string;
+  prefix: string;
+  admin: pg.Pool;
+  app: pg.Pool;
+  injector: pg.Pool;
+  verifier: pg.Pool;
+  redis: ReturnType<typeof createClient>;
 }): Promise<World> {
   const { admin, app, injector, verifier, prefix } = c;
   const redisMode = { current: 'ok' as 'ok' | 'drop_reply' | 'fail_before' };
@@ -227,7 +270,10 @@ async function build(c: {
     get(target, prop, recv) {
       const v = Reflect.get(target, prop, target);
       if (typeof v !== 'function') return v;
-      const scripted = /^(eval|evalsha|evalRo|evalShaRo|EVAL|EVALSHA|sendCommand|functionCall|fCall)/i.test(String(prop));
+      const scripted =
+        /^(eval|evalsha|evalRo|evalShaRo|EVAL|EVALSHA|sendCommand|functionCall|fCall)/i.test(
+          String(prop),
+        );
       if (!scripted) return v.bind(target);
       return async (...args: unknown[]) => {
         if (redisMode.current === 'fail_before')
@@ -247,14 +293,12 @@ async function build(c: {
   );
   const hooks = await entry<Rec>('actions/test-hooks.ts');
   const support = await entry<Rec>('coordinator/test-support.ts');
-  const advanceConfig = await entry<(cl: pg.PoolClient, a: Rec) => Promise<unknown>>(
-    'sandbox/version-authority.ts',
-    'advanceConfig',
-  );
-  const registerObservation = await entry<(cl: pg.PoolClient, a: Rec) => Promise<Rec>>(
-    'ledger/receipts.ts',
-    'registerObservation',
-  );
+  const advanceConfig = await entry<
+    (cl: pg.PoolClient, a: Rec) => Promise<unknown>
+  >('sandbox/version-authority.ts', 'advanceConfig');
+  const registerObservation = await entry<
+    (cl: pg.PoolClient, a: Rec) => Promise<Rec>
+  >('ledger/receipts.ts', 'registerObservation');
   const cacheKey = await entry<(p: string, ns: string, n: string) => string>(
     'actions/dispatch.ts',
     'cacheKey',
@@ -265,9 +309,16 @@ async function build(c: {
   );
 
   const actions = createActions({
-    pool: app, redis: flaky, redisPrefix: prefix, dispatcherLeaseMs: 30_000,
+    pool: app,
+    redis: flaky,
+    redisPrefix: prefix,
+    dispatcherLeaseMs: 30_000,
   }) as World['actions'];
-  const watcher = await createWatcher({ pool: app, redis: flaky, redisPrefix: prefix });
+  const watcher = await createWatcher({
+    pool: app,
+    redis: flaky,
+    redisPrefix: prefix,
+  });
 
   const seed = async (role = 'database_specialist', missionId?: string) =>
     (await support.seedRunningAttempt(app, { role, missionId })) as AttemptCtx;
@@ -275,7 +326,10 @@ async function build(c: {
   const mission = attempt.missionId as string;
   const scope = {
     ownerId: process.env.OWNER_ID ?? 'acc2-owner',
-    missionId: mission, spaceId: null, environment: 'test', resource: 'checkout',
+    missionId: mission,
+    spaceId: null,
+    environment: 'test',
+    resource: 'checkout',
   };
   const receipts = new Map<string, string>();
 
@@ -299,19 +353,36 @@ async function build(c: {
       'SELECT value, version, caused_by_action_id FROM checkout.config_entries WHERE key=$1',
       [key],
     );
-    if (!r.rows[0]) throw new Error(`config key ${key} not seeded by migration 0004`);
-    return { value: r.rows[0].value, version: Number(r.rows[0].version), causedBy: r.rows[0].caused_by_action_id };
+    if (!r.rows[0])
+      throw new Error(`config key ${key} not seeded by migration 0004`);
+    return {
+      value: r.rows[0].value,
+      version: Number(r.rows[0].version),
+      causedBy: r.rows[0].caused_by_action_id,
+    };
   };
 
   const registerMember: World['registerMember'] = async (key) => {
     const cur = await cfg(key);
     const r = await tx(app, (cl) =>
       registerObservation(cl, {
-        source: { key: `checkout.config/${key}`, sourceType: 'controlled_config', authority: 'controlled', scope },
+        source: {
+          key: `checkout.config/${key}`,
+          sourceType: 'controlled_config',
+          authority: 'controlled',
+          scope,
+        },
         trust: 'controlled_authority',
         normalizedValue: { value: cur.value },
         rawRef: null,
-        provenance: { kind: 'watcher', toolCallId: null, modelCallId: null, attemptId: null, causedByActionId: null, selfWrite: 'none' },
+        provenance: {
+          kind: 'watcher',
+          toolCallId: null,
+          modelCallId: null,
+          attemptId: null,
+          causedByActionId: null,
+          selfWrite: 'none',
+        },
         negative: null,
         expiresAt: null,
       }),
@@ -323,11 +394,24 @@ async function build(c: {
     const key = label === 'health' ? 'checkout.health' : 'redis.stats';
     const r = await tx(app, (cl) =>
       registerObservation(cl, {
-        source: { key, sourceType: label === 'health' ? 'observed_endpoint' : 'observed_store', authority: 'observed', scope },
+        source: {
+          key,
+          sourceType:
+            label === 'health' ? 'observed_endpoint' : 'observed_store',
+          authority: 'observed',
+          scope,
+        },
         trust: 'observed_tool',
         normalizedValue: value ?? { status: 'ok' },
         rawRef: null,
-        provenance: { kind: 'watcher', toolCallId: null, modelCallId: null, attemptId: null, causedByActionId: null, selfWrite: 'none' },
+        provenance: {
+          kind: 'watcher',
+          toolCallId: null,
+          modelCallId: null,
+          attemptId: null,
+          causedByActionId: null,
+          selfWrite: 'none',
+        },
         negative: null,
         expiresAt: null,
       }),
@@ -340,7 +424,12 @@ async function build(c: {
   for (const [k, v] of Object.entries(SETUP_CONFIG)) {
     const cur = await cfg(k);
     await tx(app, (cl) =>
-      advanceConfig(cl, { key: k, value: v, expectedVersion: cur.version, causedBy: { actor: 'owner' } }),
+      advanceConfig(cl, {
+        key: k,
+        value: v,
+        expectedVersion: cur.version,
+        causedBy: { actor: 'owner' },
+      }),
     );
   }
   for (const k of Object.keys(SETUP_CONFIG)) await registerMember(k);
@@ -350,10 +439,25 @@ async function build(c: {
   const other = await seed('database_specialist');
   const foreign = await tx(app, (cl) =>
     registerObservation(cl, {
-      source: { key: 'checkout.health', sourceType: 'observed_endpoint', authority: 'observed', scope: { ...scope, missionId: other.missionId } },
-      trust: 'observed_tool', normalizedValue: { status: 'ok' }, rawRef: null,
-      provenance: { kind: 'watcher', toolCallId: null, modelCallId: null, attemptId: null, causedByActionId: null, selfWrite: 'none' },
-      negative: null, expiresAt: null,
+      source: {
+        key: 'checkout.health',
+        sourceType: 'observed_endpoint',
+        authority: 'observed',
+        scope: { ...scope, missionId: other.missionId },
+      },
+      trust: 'observed_tool',
+      normalizedValue: { status: 'ok' },
+      rawRef: null,
+      provenance: {
+        kind: 'watcher',
+        toolCallId: null,
+        modelCallId: null,
+        attemptId: null,
+        causedByActionId: null,
+        selfWrite: 'none',
+      },
+      negative: null,
+      expiresAt: null,
     }),
   );
   receipts.set('foreign', foreign.id);
@@ -362,18 +466,26 @@ async function build(c: {
     const pool = o.actor === 'owner' ? app : injector;
     const expected = o.expectedVersion ?? (await cfg(key)).version;
     await tx(pool, (cl) =>
-      advanceConfig(cl, { key, value, expectedVersion: expected, causedBy: { actor: o.actor ?? 'injector' } }),
+      advanceConfig(cl, {
+        key,
+        value,
+        expectedVersion: expected,
+        causedBy: { actor: o.actor ?? 'injector' },
+      }),
     );
     if (o.register) await registerMember(key);
   };
 
   const propose: World['propose'] = async (s) => {
     const cur = s.payload.key ? await cfg(s.payload.key) : null;
-    const payload = s.action === 'set_config'
-      ? { expectedCurrentValueDigest: digest(cur?.value), ...s.payload }
-      : s.payload;
+    const payload =
+      s.action === 'set_config'
+        ? { expectedCurrentValueDigest: digest(cur?.value), ...s.payload }
+        : s.payload;
     const input = {
-      action: s.action, payload, rationale: 'g2 acceptance',
+      action: s.action,
+      payload,
+      rationale: 'g2 acceptance',
       supportingReceiptIds: s.cites.map((l) => {
         const id = receipts.get(l);
         if (!id) throw new Error(`no receipt labelled ${l}`);
@@ -381,10 +493,11 @@ async function build(c: {
       }),
     } as ProposeInput;
     const a = s.attempt ?? attempt;
-    return actions.propose(input, { ...a, toolCallId: s.toolCallId });
+    return actions.propose(input, { ...a, toolCallId: s.toolCallId } as never);
   };
 
-  const active: { point: HookPoint; fn: (ctx: Rec) => Promise<void> | void }[] = [];
+  const active: { point: HookPoint; fn: (ctx: Rec) => Promise<void> | void }[] =
+    [];
   const onHook: World['onHook'] = (point, fn) => {
     active.push({ point, fn });
     hooks.setHook(point, async (ctx: Rec) => fn(ctx));
@@ -392,32 +505,62 @@ async function build(c: {
 
   const w: World = {
     names: { db: c.db, prefix },
-    actions, attempt, mission, admin, redis: c.redis, redisMode, receipts,
-    seedAttempt: seed, registerMember, registerObserved, advance, propose,
+    actions,
+    attempt,
+    mission,
+    admin,
+    redis: c.redis,
+    redisMode,
+    receipts,
+    seedAttempt: seed,
+    registerMember,
+    registerObserved,
+    advance,
+    propose,
     async holdRowLock(key, value) {
       const cl = await injector.connect();
       await cl.query('BEGIN');
       const cur = await cfg(key);
-      await advanceConfig(cl, { key, value, expectedVersion: cur.version, causedBy: { actor: 'injector' } });
+      await advanceConfig(cl, {
+        key,
+        value,
+        expectedVersion: cur.version,
+        causedBy: { actor: 'injector' },
+      });
       let open = true;
       const close = async (sql: string) => {
         if (!open) return;
         open = false;
-        try { await cl.query(sql); } finally { cl.release(); }
+        try {
+          await cl.query(sql);
+        } finally {
+          cl.release();
+        }
       };
-      return { commit: () => close('COMMIT'), rollback: () => close('ROLLBACK') };
+      return {
+        commit: () => close('COMMIT'),
+        rollback: () => close('ROLLBACK'),
+      };
     },
     async proposeAdmit(s) {
       const i = await propose(s);
       return actions.admit(i.id, 'dispatcher-1');
     },
-    poolSpec: (toolCallId, value = 12, cites = ['member:db.pool_max', 'health']) => ({
-      action: 'set_config', payload: { key: POOL, value }, cites, toolCallId,
+    poolSpec: (
+      toolCallId,
+      value = 12,
+      cites = ['member:db.pool_max', 'health'],
+    ) => ({
+      action: 'set_config',
+      payload: { key: POOL, value },
+      cites,
+      toolCallId,
     }),
     flushSpec: (toolCallId) => ({
       action: 'flush_cache_namespace',
       payload: { namespace: 'acc-ns-a', reason: 'acceptance flush' },
-      cites: ['member:cache.namespace', 'redis'], toolCallId,
+      cites: ['member:cache.namespace', 'redis'],
+      toolCallId,
     }),
     park(point, only) {
       const reached = latch<Rec>();
@@ -438,37 +581,70 @@ async function build(c: {
     },
     cfg,
     async history(key) {
-      return (await verifier.query(
-        'SELECT * FROM checkout.config_versions WHERE key=$1 ORDER BY version', [key])).rows;
+      return (
+        await verifier.query(
+          'SELECT * FROM checkout.config_versions WHERE key=$1 ORDER BY version',
+          [key],
+        )
+      ).rows;
     },
     async intent(id) {
-      const r = await admin.query('SELECT * FROM coordinator.action_intents WHERE id=$1', [id]);
+      const r = await admin.query(
+        'SELECT * FROM coordinator.action_intents WHERE id=$1',
+        [id],
+      );
       return r.rows[0];
     },
     async auths(id) {
-      return (await admin.query('SELECT * FROM coordinator.authorizations WHERE action_id=$1 ORDER BY decided_at, id', [id])).rows;
+      return (
+        await admin.query(
+          'SELECT * FROM coordinator.authorizations WHERE action_id=$1 ORDER BY decided_at, id',
+          [id],
+        )
+      ).rows;
     },
     async resultReceipts(id) {
-      return (await admin.query('SELECT * FROM coordinator.result_receipts WHERE action_id=$1 ORDER BY recorded_at, id', [id])).rows;
+      return (
+        await admin.query(
+          'SELECT * FROM coordinator.result_receipts WHERE action_id=$1 ORDER BY recorded_at, id',
+          [id],
+        )
+      ).rows;
     },
     async actionRows() {
-      const r = await verifier.query('SELECT count(*)::int n FROM checkout.config_versions WHERE caused_by_action_id IS NOT NULL');
+      const r = await verifier.query(
+        'SELECT count(*)::int n FROM checkout.config_versions WHERE caused_by_action_id IS NOT NULL',
+      );
       return r.rows[0].n;
     },
     async outboxFor(id) {
-      return (await admin.query("SELECT * FROM coordinator.outbox WHERE payload::text LIKE '%' || $1 || '%'", [id])).rows;
+      return (
+        await admin.query(
+          "SELECT * FROM coordinator.outbox WHERE payload::text LIKE '%' || $1 || '%'",
+          [id],
+        )
+      ).rows;
     },
     async invalidationCount() {
-      return (await admin.query('SELECT count(*)::int n FROM ledger.invalidation_events')).rows[0].n;
+      return (
+        await admin.query(
+          'SELECT count(*)::int n FROM ledger.invalidation_events',
+        )
+      ).rows[0].n;
     },
     async currentReceipt(label) {
       const id = receipts.get(label);
       if (!id) return null;
-      const r = await admin.query('SELECT * FROM ledger.observation_receipts WHERE id=$1', [id]);
+      const r = await admin.query(
+        'SELECT * FROM ledger.observation_receipts WHERE id=$1',
+        [id],
+      );
       return r.rows[0] ?? null;
     },
     async plantCache(n = 3, ns = 'acc-ns-a') {
-      const keys = Array.from({ length: n }, (_, i) => cacheKey(prefix, ns, `k${i}`));
+      const keys = Array.from({ length: n }, (_, i) =>
+        cacheKey(prefix, ns, `k${i}`),
+      );
       for (const k of keys) await c.redis.set(k, 'v');
       return keys;
     },
@@ -476,12 +652,18 @@ async function build(c: {
       return Number(await c.redis.exists(keys));
     },
     async markerPresent(actionId) {
-      for await (const ks of c.redis.scanIterator({ MATCH: `${prefix}:*${actionId}*`, COUNT: 200 }))
+      for await (const ks of c.redis.scanIterator({
+        MATCH: `${prefix}:*${actionId}*`,
+        COUNT: 200,
+      }))
         if (ks.length) return true;
       return false;
     },
     async expireDispatcherLease(id) {
-      await admin.query("UPDATE coordinator.action_intents SET dispatcher_lease_expires_at = now() - interval '1 second' WHERE id=$1", [id]);
+      await admin.query(
+        "UPDATE coordinator.action_intents SET dispatcher_lease_expires_at = now() - interval '1 second' WHERE id=$1",
+        [id],
+      );
     },
     expireAuthorLease: (a) => support.expireAttemptLease(app, a.attemptId),
     completeAuthor: (a) => support.completeAttempt(app, a.attemptId),

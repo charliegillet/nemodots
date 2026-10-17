@@ -49,12 +49,17 @@ describe('G5.1 endpoint and model through the app adapter', () => {
     expect(models).toContain(live.model);
     expect(await adapter.verifyModel(live.model)).toBe(true);
     expect(
-      await adapter.verifyModel(`nvidia/acc5-no-such-model-${randomBytes(3).toString('hex')}`),
+      await adapter.verifyModel(
+        `nvidia/acc5-no-such-model-${randomBytes(3).toString('hex')}`,
+      ),
     ).toBe(false);
   });
 
   it('G5.1c a completed call is stamped live/Crusoe and returned model == requested model, with no secret in the record', async () => {
-    const r = await adapter.complete(chat(live.model, 'Reply with exactly: OK'), ctx('planner'));
+    const r = await adapter.complete(
+      chat(live.model, 'Reply with exactly: OK'),
+      ctx('planner'),
+    );
     expect(r.outcome).toBe('completed');
     expect(r.provider).toEqual({ host: EXPECTED_HOST, mode: 'live' });
     expect(r.modelReturned).toBe(live.model);
@@ -66,7 +71,10 @@ describe('G5.2 text, tool call + continuation, streaming, cancellation', () => {
   it('G5.2a real text completion: content from the model, finish stop, one attempt, numeric token counts', async () => {
     const nonce = randomBytes(4).toString('hex');
     const r = await adapter.complete(
-      chat(live.model, `Repeat this token exactly and nothing else: ZX-${nonce}`),
+      chat(
+        live.model,
+        `Repeat this token exactly and nothing else: ZX-${nonce}`,
+      ),
       ctx('worker'),
     );
     expect(r.outcome).toBe('completed');
@@ -78,20 +86,38 @@ describe('G5.2 text, tool call + continuation, streaming, cancellation', () => {
     expect(a.httpStatus).toBe(200);
     expect(a.streamed).toBe(false);
     expect(a.error).toBeNull();
-    expect(Number.isInteger(r.usage.promptTokens) && r.usage.promptTokens! > 0).toBe(true);
-    expect(Number.isInteger(r.usage.completionTokens) && r.usage.completionTokens! > 0).toBe(true);
+    expect(
+      Number.isInteger(r.usage.promptTokens) && r.usage.promptTokens! > 0,
+    ).toBe(true);
+    expect(
+      Number.isInteger(r.usage.completionTokens) &&
+        r.usage.completionTokens! > 0,
+    ).toBe(true);
   });
 
   it('G5.2b tool call then continuation: the model calls a typed team tool, and the final answer uses the tool result it could not have guessed', async () => {
     const tools = toolSchemas();
     const hash = toolSchemaHash();
     const secretRunbook = `rb-${randomBytes(4).toString('hex')}`;
-    const messages: import('../../../../src/server/nemodots/contracts/index.js').ChatMessage[] = [
-      { role: 'system', content: 'You operate through tools. When asked to call a tool, call it and do not answer in text first.' },
-      { role: 'user', content: 'Call the list_runbooks tool now with no arguments.' },
-    ];
+    const messages: import('../../../../src/server/nemodots/contracts/index.js').ChatMessage[] =
+      [
+        {
+          role: 'system',
+          content:
+            'You operate through tools. When asked to call a tool, call it and do not answer in text first.',
+        },
+        {
+          role: 'user',
+          content: 'Call the list_runbooks tool now with no arguments.',
+        },
+      ];
     const first = await adapter.complete(
-      chat(live.model, '', { messages, tools, toolSchemaHash: hash, maxTokens: 256 }),
+      chat(live.model, '', {
+        messages,
+        tools,
+        toolSchemaHash: hash,
+        maxTokens: 256,
+      }),
       ctx('worker'),
     );
     expect(first.outcome).toBe('tool_calls');
@@ -100,19 +126,33 @@ describe('G5.2 text, tool call + continuation, streaming, cancellation', () => {
     const call = first.toolCalls[0];
     expect(call.name).toBe('list_runbooks');
     expect(call.toolCallId).toBeTruthy();
-    expect(TEAM_TOOL_INPUTS.list_runbooks.safeParse(JSON.parse(call.arguments || '{}')).success).toBe(true);
+    expect(
+      TEAM_TOOL_INPUTS.list_runbooks.safeParse(
+        JSON.parse(call.arguments || '{}'),
+      ).success,
+    ).toBe(true);
 
     const second = await adapter.complete(
       chat(live.model, '', {
         messages: [
           ...messages,
-          { role: 'assistant', content: first.content, toolCalls: first.toolCalls },
+          {
+            role: 'assistant',
+            content: first.content,
+            toolCalls: first.toolCalls,
+          },
           {
             role: 'tool',
             toolCallId: call.toolCallId,
-            content: JSON.stringify([{ id: secretRunbook, title: 'Flush the checkout cache' }]),
+            content: JSON.stringify([
+              { id: secretRunbook, title: 'Flush the checkout cache' },
+            ]),
           },
-          { role: 'user', content: 'State the id of the single runbook the tool returned. Reply with the id only.' },
+          {
+            role: 'user',
+            content:
+              'State the id of the single runbook the tool returned. Reply with the id only.',
+          },
         ],
         tools,
         toolSchemaHash: hash,
@@ -128,7 +168,11 @@ describe('G5.2 text, tool call + continuation, streaming, cancellation', () => {
 
   it('G5.2c streaming completes with content, usage and streamed=true on the attempt', async () => {
     const r = await adapter.complete(
-      chat(live.model, 'List the numbers 1 to 5 separated by commas, nothing else.', { stream: true }),
+      chat(
+        live.model,
+        'List the numbers 1 to 5 separated by commas, nothing else.',
+        { stream: true },
+      ),
       ctx('worker'),
     );
     expect(r.outcome).toBe('completed');
@@ -145,10 +189,14 @@ describe('G5.2 text, tool call + continuation, streaming, cancellation', () => {
   it('G5.2d cancellation mid-stream: outcome aborted, finish cancelled, attempt usage ALL null, no retry, no tool calls', async () => {
     const controller = new AbortController();
     const pending = adapter.complete(
-      chat(live.model, 'Count from 1 to 600, one number per line, no other text.', {
-        stream: true,
-        maxTokens: 2000,
-      }),
+      chat(
+        live.model,
+        'Count from 1 to 600, one number per line, no other text.',
+        {
+          stream: true,
+          maxTokens: 2000,
+        },
+      ),
       ctx('worker', controller.signal),
     );
     setTimeout(() => controller.abort(), 1500);
@@ -164,17 +212,23 @@ describe('G5.2 text, tool call + continuation, streaming, cancellation', () => {
     expect(Object.values(r.usage)).toEqual([null, null, null, null]);
   });
 
-  it('G5.2e cancellation before send and cancellation while waiting for a slot never reach the network or leak a slot', async () => {
+  it('G5.2e cancellation before send never reaches the network and leaks no slot', async () => {
     const proxy = await startProxy(live.baseUrl);
     try {
       const viaProxy = await createAdapter({ OPENAI_BASE_URL: proxy.baseUrl });
       const pre = new AbortController();
       pre.abort();
-      const r0 = await viaProxy.complete(chat(live.model, 'hi'), ctx('worker', pre.signal));
+      const r0 = await viaProxy.complete(
+        chat(live.model, 'hi'),
+        ctx('worker', pre.signal),
+      );
       expect(r0.outcome).toBe('aborted');
       expect(proxy.seen).toHaveLength(0);
       // adapter still serves a normal request afterwards (slot not leaked)
-      const ok = await viaProxy.complete(chat(live.model, 'Reply with exactly: OK'), ctx('worker'));
+      const ok = await viaProxy.complete(
+        chat(live.model, 'Reply with exactly: OK'),
+        ctx('worker'),
+      );
       expect(ok.outcome).toBe('completed');
       expect(proxy.seen).toHaveLength(1);
     } finally {
@@ -188,10 +242,14 @@ describe('G5.2 text, tool call + continuation, streaming, cancellation', () => {
       const viaProxy = await createAdapter({ OPENAI_BASE_URL: proxy.baseUrl });
       const controller = new AbortController();
       const pending = viaProxy.complete(
-        chat(live.model, 'Count from 1 to 600, one number per line, no other text.', {
-          stream: true,
-          maxTokens: 2000,
-        }),
+        chat(
+          live.model,
+          'Count from 1 to 600, one number per line, no other text.',
+          {
+            stream: true,
+            maxTokens: 2000,
+          },
+        ),
         ctx('worker', controller.signal),
       );
       setTimeout(() => controller.abort(), 1500);
@@ -201,7 +259,10 @@ describe('G5.2 text, tool call + continuation, streaming, cancellation', () => {
       expect(proxy.seen).toHaveLength(1);
       expect(proxy.seen[0].clientClosedEarly).toBe(true);
       expect(proxy.current()).toBe(0);
-      const ok = await viaProxy.complete(chat(live.model, 'Reply with exactly: OK'), ctx('worker'));
+      const ok = await viaProxy.complete(
+        chat(live.model, 'Reply with exactly: OK'),
+        ctx('worker'),
+      );
       expect(ok.outcome).toBe('completed');
     } finally {
       await proxy.close();
@@ -215,7 +276,10 @@ describe('G5.7 client timing is first NONEMPTY content, per call (not aggregate 
 
   it('G5.7a live stream: startedAt <= headersAt <= firstContentAt <= finishedAt, all client clocks', async () => {
     const r = await adapter.complete(
-      chat(live.model, 'Write one short sentence about caches.', { stream: true, maxTokens: 200 }),
+      chat(live.model, 'Write one short sentence about caches.', {
+        stream: true,
+        maxTokens: 200,
+      }),
       ctx('worker'),
     );
     const a = r.attempts[0];
@@ -229,8 +293,30 @@ describe('G5.7 client timing is first NONEMPTY content, per call (not aggregate 
     proxy = await startProxy(live.baseUrl, () => ({
       kind: 'forward',
       prelude: [
-        JSON.stringify({ id: 'p', object: 'chat.completion.chunk', model: live.model, choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }] }),
-        JSON.stringify({ id: 'p', object: 'chat.completion.chunk', model: live.model, choices: [{ index: 0, delta: { reasoning: 'thinking about it' }, finish_reason: null }] }),
+        JSON.stringify({
+          id: 'p',
+          object: 'chat.completion.chunk',
+          model: live.model,
+          choices: [
+            {
+              index: 0,
+              delta: { role: 'assistant', content: '' },
+              finish_reason: null,
+            },
+          ],
+        }),
+        JSON.stringify({
+          id: 'p',
+          object: 'chat.completion.chunk',
+          model: live.model,
+          choices: [
+            {
+              index: 0,
+              delta: { reasoning: 'thinking about it' },
+              finish_reason: null,
+            },
+          ],
+        }),
       ],
       preludeDelayMs: 1500,
     }));
@@ -249,7 +335,10 @@ describe('G5.7 client timing is first NONEMPTY content, per call (not aggregate 
   });
 
   it('G5.7c a non-stream call has no first-content timestamp invented (null)', async () => {
-    const r = await adapter.complete(chat(live.model, 'Reply with exactly: OK'), ctx('worker'));
+    const r = await adapter.complete(
+      chat(live.model, 'Reply with exactly: OK'),
+      ctx('worker'),
+    );
     expect(r.attempts[0].streamed).toBe(false);
     expect(r.attempts[0].firstContentAt).toBeNull();
   });

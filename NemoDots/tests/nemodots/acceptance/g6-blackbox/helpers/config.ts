@@ -89,7 +89,9 @@ export function redisTrialUrl(env = process.env): string {
 export function probeSecret(env = process.env): string {
   const value = env.NEMODOTS_PROBE_SECRET;
   if (!value)
-    throw new BlockedError('NEMODOTS_PROBE_SECRET is not set (stack.mjs exec).');
+    throw new BlockedError(
+      'NEMODOTS_PROBE_SECRET is not set (stack.mjs exec).',
+    );
   return value;
 }
 

@@ -24,10 +24,13 @@ import type {
   ModelRole,
 } from '../../../../src/server/nemodots/contracts/index.js';
 
-export const APP_ROOT = fileURLToPath(
-  new URL('../../../../', import.meta.url),
-);
-export const PORTS = { checkout: 4700, app: 4701, redisDb: 6, dbPrefix: 'acc5_' };
+export const APP_ROOT = fileURLToPath(new URL('../../../../', import.meta.url));
+export const PORTS = {
+  checkout: 4700,
+  app: 4701,
+  redisDb: 6,
+  dbPrefix: 'acc5_',
+};
 export const EXPECTED_HOST = 'api.inference.crusoecloud.com';
 // LEAD_NOTES.md: verified primary model id (BUILD_PROMPT's id is wrong).
 export const PRIMARY_MODEL = 'nvidia/NVIDIA-Nemotron-3-Super-120B-A12B';
@@ -150,7 +153,9 @@ export async function createAdapter(
   overrides: Record<string, string | undefined> = {},
 ): Promise<Adapter> {
   const mod = await loadModule<{
-    createInferenceFromEnv?: (env: Record<string, string | undefined>) => Adapter;
+    createInferenceFromEnv?: (
+      env: Record<string, string | undefined>,
+    ) => Adapter;
   }>('src/server/nemodots/inference/index.ts');
   if (typeof mod.createInferenceFromEnv !== 'function')
     throw new EntryPointMissing(
@@ -182,7 +187,10 @@ export function chat(
   return {
     model,
     messages: [
-      { role: 'system', content: 'You are a terse assistant. Follow instructions exactly.' },
+      {
+        role: 'system',
+        content: 'You are a terse assistant. Follow instructions exactly.',
+      },
       { role: 'user', content: user },
     ],
     tools: [],
@@ -215,7 +223,12 @@ export interface SeenRequest {
 
 export type Action =
   | { kind: 'forward' }
-  | { kind: 'respond'; status: number; body: string; headers?: Record<string, string> }
+  | {
+      kind: 'respond';
+      status: number;
+      body: string;
+      headers?: Record<string, string>;
+    }
   | { kind: 'destroy' }
   | {
       kind: 'forward';
@@ -341,7 +354,8 @@ async function serve(
   }
   const path = rec.url.replace(/^\/v1/, '');
   const headers: Record<string, string> = {
-    'content-type': (req.headers['content-type'] as string) ?? 'application/json',
+    'content-type':
+      (req.headers['content-type'] as string) ?? 'application/json',
     accept: (req.headers.accept as string) ?? '*/*',
   };
   if (req.headers.authorization)
@@ -419,11 +433,19 @@ export const emptyDelta = (model: string) =>
     id: 'acc5-prelude',
     object: 'chat.completion.chunk',
     model,
-    choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }],
+    choices: [
+      {
+        index: 0,
+        delta: { role: 'assistant', content: '' },
+        finish_reason: null,
+      },
+    ],
   });
 
 /** Raw `usage` object the provider returned (from non-stream body or last SSE chunk). */
-export function rawUsageFromBody(text: string): Record<string, unknown> | undefined {
+export function rawUsageFromBody(
+  text: string,
+): Record<string, unknown> | undefined {
   try {
     const j = JSON.parse(text);
     return j.usage ?? undefined;

@@ -3,7 +3,10 @@
 // from production helpers.
 import pg from 'pg';
 import { createClient } from 'redis';
-import { businessSnapshot, type BusinessSnapshot } from '../../driver/business-hash.js';
+import {
+  businessSnapshot,
+  type BusinessSnapshot,
+} from '../../driver/business-hash.js';
 import { redisTrialUrl, roleUrl, withDatabase } from './config.js';
 
 export interface ConfigEntry {

@@ -53,6 +53,10 @@ History, for honest reporting:
 - Composio, voice, Slack, Automatic Learning, web-search browser, computers: disabled for the incident scope.
 - No public deployment, no pushing, no messages.
 
+## Product name in the UI
+
+The user-facing product name is **NemoDots** (page title, wordmark, unlock screen, user-facing messages and any new UI copy). Say "OpenDots" only for upstream attribution, upstream doc links (github.com/CopilotKit/OpenDots/...), and the CopilotKit telemetry identity, which stay unchanged.
+
 ## Coordination rules for parallel agents
 
 - One writer per file. Stay inside your task's allowed files; if you need a change elsewhere, report it as a dependency instead of editing.

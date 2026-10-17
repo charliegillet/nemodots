@@ -32,7 +32,8 @@ const HOP = new Set([
 ]);
 
 const isModelCall = (method: string, path: string) =>
-  method === 'POST' && /\/(chat\/completions|responses|completions)(\?|$)/.test(path);
+  method === 'POST' &&
+  /\/(chat\/completions|responses|completions)(\?|$)/.test(path);
 
 export class ProviderProxy {
   readonly log: ProxyLogEntry[] = [];
@@ -87,7 +88,8 @@ export class ProviderProxy {
     if (!d || !modelCall) return 'forwarded';
     // The disruption starts once `startAfterModelCalls` calls have been seen.
     if (this.modelCalls <= d.startAfterModelCalls) return 'forwarded';
-    if (this.disruptionStartedAt === null) this.disruptionStartedAt = this.now();
+    if (this.disruptionStartedAt === null)
+      this.disruptionStartedAt = this.now();
     if (d.requests !== undefined) {
       if (this.disruptedRequests >= d.requests) return 'forwarded';
       this.disruptedRequests += 1;

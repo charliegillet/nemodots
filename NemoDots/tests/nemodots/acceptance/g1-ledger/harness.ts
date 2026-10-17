@@ -227,6 +227,37 @@ export async function insertRow(
   given: Record<string, unknown>,
   options: InsertOptions & { depth?: number } = {},
 ): Promise<Record<string, unknown>> {
+  const values = await fillRow(db, schema, table, given, options);
+  return insertValues(db, table, [values]).then((rows) => rows[0]);
+}
+
+const toParam = (v: unknown) =>
+  v !== null && typeof v === 'object' && !(v instanceof Date) && !Buffer.isBuffer(v) ? JSON.stringify(v) : v;
+
+/** One multi-row INSERT of rows that share the same column set. */
+export async function insertValues(db: pg.Pool, table: string, rows: Record<string, unknown>[]): Promise<Record<string, unknown>[]> {
+  if (!rows.length) return [];
+  const names = Object.keys(rows[0]);
+  if (!names.length) return (await db.query(`INSERT INTO ${table} DEFAULT VALUES RETURNING *`)).rows;
+  const out: Record<string, unknown>[] = [];
+  for (let from = 0; from < rows.length; from += 1000) {
+    const chunk = rows.slice(from, from + 1000);
+    const params: unknown[] = [];
+    const tuples = chunk.map((row) => `(${names.map((n) => { params.push(toParam(row[n])); return `$${params.length}`; }).join(', ')})`);
+    const r = await db.query(`INSERT INTO ${table} (${names.map((n) => `"${n}"`).join(', ')}) VALUES ${tuples.join(', ')} RETURNING *`, params);
+    out.push(...r.rows);
+  }
+  return out;
+}
+
+/** Column values for one row: the given ones plus fillers for NOT NULL columns without defaults. */
+export async function fillRow(
+  db: pg.Pool,
+  schema: Schema,
+  table: string,
+  given: Record<string, unknown>,
+  options: InsertOptions & { depth?: number } = {},
+): Promise<Record<string, unknown>> {
   const depth = options.depth ?? 0;
   if (depth > 4) throw new Error(`SCHEMA BINDING: foreign key chain too deep seeding ${table}`);
   const cols = await schema.columns(table);
@@ -259,14 +290,5 @@ export async function insertRow(
       values[col.name] = make();
     }
   }
-  const names = Object.keys(values);
-  const params = names.map((n) => {
-    const v = values[n];
-    return v !== null && typeof v === 'object' && !(v instanceof Date) && !Buffer.isBuffer(v) ? JSON.stringify(v) : v;
-  });
-  const sql = names.length
-    ? `INSERT INTO ${table} (${names.map((n) => `"${n}"`).join(', ')}) VALUES (${names.map((_, i) => `$${i + 1}`).join(', ')}) RETURNING *`
-    : `INSERT INTO ${table} DEFAULT VALUES RETURNING *`;
-  const r = await db.query(sql, params);
-  return r.rows[0] as Record<string, unknown>;
+  return values;
 }

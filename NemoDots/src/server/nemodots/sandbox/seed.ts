@@ -18,6 +18,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 import { withTransaction } from '../db/tx.js';
+import { PROBE_SKU, PROBE_SKU_STOCK } from './constants.js';
 import { loadConfig, roleUrl } from './runtime-env.js';
 import {
   advanceConfig,
@@ -25,8 +26,6 @@ import {
   type ConfigScalar,
 } from './version-authority.js';
 
-export const PROBE_SKU = 'PROBE-SKU';
-export const PROBE_SKU_STOCK = 1_000_000;
 export const SEED_ORDER_COUNT = 200;
 export const SEED_PRODUCT_COUNT = 24;
 /** Seed orders are placed on this base date (all older than any recent-orders window). */

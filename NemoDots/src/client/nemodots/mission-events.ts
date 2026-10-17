@@ -7,6 +7,7 @@ import type {
   AuthorizationStage,
   BlockReason,
   ConfigValue,
+  EventKind,
   FailureReason,
   FindingConfidence,
   InvalidationReason,
@@ -36,6 +37,46 @@ import type {
 //  - nodes are built from an explicit allow-list of fields, so stray payload
 //    keys (control data, prompts) never reach the state or the views;
 //  - every list is bounded.
+
+const EVENT_KIND_TABLE: Record<EventKind, true> = {
+  'mission.created': true,
+  'mission.status': true,
+  'task.created': true,
+  'task.status': true,
+  'attempt.started': true,
+  'attempt.finished': true,
+  'attempt.aborted': true,
+  'model_call.recorded': true,
+  'tool_call.recorded': true,
+  'receipt.registered': true,
+  'receipt.confirmed': true,
+  'receipt.transition': true,
+  'finding.published': true,
+  'output.published': true,
+  'action.proposed': true,
+  'action.decided': true,
+  'action.committed': true,
+  'action.dispatched': true,
+  'action.verified': true,
+  'action.failed': true,
+  'action.outcome_unknown': true,
+  'invalidation.recorded': true,
+  'invalidation.resolved': true,
+  'recovery.recorded': true,
+  'probe.recorded': true,
+  'health.sampled': true,
+  'telemetry.updated': true,
+  heartbeat: true,
+};
+
+/**
+ * Client mirror of the contract's EventKind enum (the client cannot import the
+ * zod runtime). The Record type makes the compiler fail when a kind is added or
+ * removed on the server without updating this table.
+ */
+export const EVENT_KINDS: ReadonlySet<string> = new Set(
+  Object.keys(EVENT_KIND_TABLE),
+);
 
 export const LIMITS = Object.freeze({
   events: 500,
@@ -192,6 +233,8 @@ export interface InvalidationNode {
   preservedTaskIds: string[];
   closure: { depth: number; nodes: number; capped: boolean } | null;
   recordedEventId: number | null;
+  /** when the invalidation was recorded (event time or snapshot createdAt) */
+  createdAt: string | null;
   resolvedAt: string | null;
   known: boolean;
 }
@@ -429,6 +472,7 @@ const stubInvalidation = (id: string): InvalidationNode => ({
   preservedTaskIds: [],
   closure: null,
   recordedEventId: null,
+  createdAt: null,
   resolvedAt: null,
   known: false,
 });
@@ -880,6 +924,7 @@ function foldEvent(state: MissionState, event: MissionEvent): MissionState {
               capped: p.closure.capped,
             },
             recordedEventId: eventId,
+            createdAt: event.at,
             known: true,
           }),
           LIMITS.invalidations,
@@ -958,6 +1003,25 @@ function foldEvent(state: MissionState, event: MissionEvent): MissionState {
       return state;
     case 'heartbeat':
       return state;
+    default:
+      return state;
+  }
+}
+
+/**
+ * foldEvent over an event the server contract may have drifted from: a payload
+ * missing the fields its kind needs throws inside foldEvent; that is reported
+ * as null so the caller can count the event as malformed instead of crashing.
+ */
+function safeFold(
+  state: MissionState,
+  event: MissionEvent,
+): MissionState | null {
+  try {
+    const next = foldEvent(state, event);
+    return next ?? null;
+  } catch {
+    return null;
   }
 }
 
@@ -1009,7 +1073,8 @@ export function applyMissionEvent(
     !Number.isSafeInteger(event.id) ||
     event.id <= 0 ||
     !event.payload ||
-    event.payload.kind !== event.kind
+    event.payload.kind !== event.kind ||
+    !EVENT_KINDS.has(event.kind)
   )
     return reject(state, 'malformed');
   if (state.seenIds.has(event.id)) return reject(state, 'duplicate');
@@ -1029,7 +1094,11 @@ export function applyMissionEvent(
   next = { ...next, events: insertEvent(next.events, event) };
   // A merged snapshot already reflects everything up to its lastEventId; the
   // event is kept for the timeline but not folded twice.
-  if (event.id > state.snapshotEventId) next = foldEvent(next, event);
+  if (event.id > state.snapshotEventId) {
+    const folded = safeFold(next, event);
+    if (!folded) return reject(state, 'malformed');
+    next = folded;
+  }
   return { state: next, outcome: 'applied' };
 }
 
@@ -1280,6 +1349,7 @@ function viewsFromSnapshot(snapshot: MissionSnapshot): Partial<MissionState> {
             capped: event.closure.capped,
           },
           recordedEventId: at,
+          createdAt: event.createdAt,
           resolvedAt: event.resolvedAt,
           known: true,
         };
@@ -1327,7 +1397,7 @@ export function mergeMissionSnapshot(
     lastEventId: Math.max(state.lastEventId, snapshot.lastEventId),
   };
   for (const event of state.events)
-    if (event.id > snapshot.lastEventId) next = foldEvent(next, event);
+    if (event.id > snapshot.lastEventId) next = safeFold(next, event) ?? next;
   return { state: next, outcome: 'applied' };
 }
 

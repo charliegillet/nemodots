@@ -140,9 +140,7 @@ describe('G0.2 toolchain declarations (static)', () => {
     // Every non-link package carries an integrity hash (clean-install integrity).
     const noIntegrity = Object.entries(lock.packages).filter(
       ([name, entry]) =>
-        name !== '' &&
-        entry.resolved?.startsWith('http') &&
-        !entry.integrity,
+        name !== '' && entry.resolved?.startsWith('http') && !entry.integrity,
     );
     expect(noIntegrity.length, 'lock entries without integrity').toBe(0);
   });
@@ -204,9 +202,10 @@ describe('G0.3 upstream scripts (static)', () => {
           missing.push(`${name} -> ${token}`);
       }
     }
-    expect(missing, `scripts with missing targets: ${missing.join('; ')}`).toEqual(
-      [],
-    );
+    expect(
+      missing,
+      `scripts with missing targets: ${missing.join('; ')}`,
+    ).toEqual([]);
   });
 
   it('[G0.3] default npm test excludes suites that need the stack or credentials', () => {
@@ -242,9 +241,10 @@ describe('G0.6 licence, notices and pins (static)', () => {
 
   it('[G0.6] THIRD_PARTY_NOTICES.md names upstream sources and their pinned refs', () => {
     // BUILD_PROMPT Phase 6: preserve licences, add THIRD_PARTY_NOTICES.md.
-    const file = [app('THIRD_PARTY_NOTICES.md'), path.join(WORKTREE_ROOT, 'THIRD_PARTY_NOTICES.md')].find(
-      existsSync,
-    );
+    const file = [
+      app('THIRD_PARTY_NOTICES.md'),
+      path.join(WORKTREE_ROOT, 'THIRD_PARTY_NOTICES.md'),
+    ].find(existsSync);
     expect(
       file,
       'THIRD_PARTY_NOTICES.md missing (expected in NemoDots/ or the worktree root)',
@@ -263,8 +263,14 @@ describe('G0.6 licence, notices and pins (static)', () => {
     const refs = [...compose.matchAll(/OpenBot\.git#([^\s"']+)/g)].map(
       (m) => m[1],
     );
-    expect(refs.length, 'no OpenBot refs found in compose.computers.yml').toBeGreaterThan(0);
-    expect([...new Set(refs)], 'every OpenBot ref must be the pinned SHA').toEqual([OPENBOT]);
+    expect(
+      refs.length,
+      'no OpenBot refs found in compose.computers.yml',
+    ).toBeGreaterThan(0);
+    expect(
+      [...new Set(refs)],
+      'every OpenBot ref must be the pinned SHA',
+    ).toEqual([OPENBOT]);
     // The pin documented in deployment docs and build docs equals the code pin.
     expect(read('deployment/computers/README.md')).toContain(OPENBOT);
     expect(read('docs/nemodots/BUILD_PROMPT.md')).toContain(OPENBOT);
@@ -272,7 +278,12 @@ describe('G0.6 licence, notices and pins (static)', () => {
   });
 
   it('[G0.6] no floating git refs: every git dependency or build context is a full SHA', () => {
-    const files = ['Dockerfile', 'compose.yml', 'compose.computers.yml', 'compose.computers-app.yml'];
+    const files = [
+      'Dockerfile',
+      'compose.yml',
+      'compose.computers.yml',
+      'compose.computers-app.yml',
+    ];
     const floating: string[] = [];
     for (const f of files) {
       if (!existsSync(app(f))) continue;
@@ -284,7 +295,9 @@ describe('G0.6 licence, notices and pins (static)', () => {
     const gitDeps = Object.entries({ ...p.dependencies, ...p.devDependencies })
       .filter(([, v]) => /^(git|github:|https?:)/.test(v) || /\.git/.test(v))
       .filter(([, v]) => !/#[0-9a-f]{40}$/.test(v));
-    expect(gitDeps, 'git dependencies must be pinned to a full SHA').toEqual([]);
+    expect(gitDeps, 'git dependencies must be pinned to a full SHA').toEqual(
+      [],
+    );
   });
 
   it('[G0.6] the upstream OpenDots revision is cited consistently in the audit documents', () => {

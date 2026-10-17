@@ -96,8 +96,7 @@ export interface LiveCredentials {
 
 /** Crusoe credentials for live-mode runs, or the names that are missing. */
 export function liveCredentials():
-  | { ok: true; env: LiveCredentials }
-  | { ok: false; missing: string[] } {
+  { ok: true; env: LiveCredentials } | { ok: false; missing: string[] } {
   const found = readLocalSecrets([
     'OPENAI_API_KEY',
     'OPENAI_BASE_URL',
@@ -107,7 +106,8 @@ export function liveCredentials():
   const key = found.OPENAI_API_KEY ?? found.CRUSOE_API_KEY;
   const baseUrl =
     found.OPENAI_BASE_URL ?? 'https://api.inference.crusoecloud.com/v1';
-  const model = found.OPENAI_MODEL ?? 'nvidia/NVIDIA-Nemotron-3-Super-120B-A12B';
+  const model =
+    found.OPENAI_MODEL ?? 'nvidia/NVIDIA-Nemotron-3-Super-120B-A12B';
   const missing = key ? [] : ['OPENAI_API_KEY'];
   if (missing.length) return { ok: false, missing };
   return {
@@ -125,7 +125,8 @@ export const sleep = (ms: number) =>
 
 export async function until<T>(
   describe: string,
-  probe: () => Promise<T | null | undefined | false> | T | null | undefined | false,
+  probe: () =>
+    Promise<T | null | undefined | false> | T | null | undefined | false,
   options: { timeoutMs?: number; intervalMs?: number } = {},
 ): Promise<T> {
   const timeoutMs = options.timeoutMs ?? 30_000;

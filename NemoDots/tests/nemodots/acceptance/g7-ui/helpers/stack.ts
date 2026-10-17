@@ -16,14 +16,8 @@ import {
 } from 'node:fs';
 import { resolve } from 'node:path';
 import pg from 'pg';
-import {
-  stackRoleUrls,
-  withDatabase,
-} from '../../../helpers/test-db.js';
-import {
-  testRedisUrl,
-  unlinkByPrefix,
-} from '../../../helpers/test-redis.js';
+import { stackRoleUrls, withDatabase } from '../../../helpers/test-db.js';
+import { testRedisUrl, unlinkByPrefix } from '../../../helpers/test-redis.js';
 import { createClient } from 'redis';
 import {
   APP_PORT,
@@ -77,7 +71,9 @@ interface Managed {
 
 function tail(path: string, lines = 40) {
   try {
-    return redact(readFileSync(path, 'utf8').split('\n').slice(-lines).join('\n'));
+    return redact(
+      readFileSync(path, 'utf8').split('\n').slice(-lines).join('\n'),
+    );
   } catch {
     return '(no log)';
   }
@@ -150,7 +146,9 @@ export class Acc7Stack {
     this.db = db;
     this.redisPrefix = redisPrefix;
     this.adminUrl = adminUrl;
-    this.ownerToken = options.ownerToken ? randomBytes(18).toString('hex') : null;
+    this.ownerToken = options.ownerToken
+      ? randomBytes(18).toString('hex')
+      : null;
     registerSecret(this.ownerToken ?? undefined);
   }
 
@@ -173,7 +171,10 @@ export class Acc7Stack {
       await admin.end();
     }
     const urls = Object.fromEntries(
-      Object.entries(base).map(([role, url]) => [role, withDatabase(url, name)]),
+      Object.entries(base).map(([role, url]) => [
+        role,
+        withDatabase(url, name),
+      ]),
     ) as ReturnType<typeof stackRoleUrls>;
     for (const url of Object.values(urls)) registerSecret(url);
     const probeSecret = randomBytes(24).toString('hex');
@@ -230,20 +231,25 @@ export class Acc7Stack {
   ): Managed {
     const logPath = resolve(this.runDir, `${name}.log`);
     const fd = openSync(logPath, 'a');
-    const proc = spawn(
-      process.execPath,
-      ['--import', 'tsx', entry, ...args],
-      { cwd: APP_ROOT, env, stdio: ['ignore', fd, fd] },
-    );
+    const proc = spawn(process.execPath, ['--import', 'tsx', entry, ...args], {
+      cwd: APP_ROOT,
+      env,
+      stdio: ['ignore', fd, fd],
+    });
     closeSync(fd);
     const managed = { name, proc, logPath };
     this.managed.push(managed);
     return managed;
   }
 
-  private async runOnce(name: string, entry: string, env: Record<string, string>) {
+  private async runOnce(
+    name: string,
+    entry: string,
+    env: Record<string, string>,
+  ) {
     const abs = resolve(APP_ROOT, entry);
-    if (!existsSync(abs)) throw new EntryPointMissing(entry, 'file does not exist');
+    if (!existsSync(abs))
+      throw new EntryPointMissing(entry, 'file does not exist');
     const managed = this.spawnManaged(name, abs, env);
     const code = await new Promise<number | null>((done) =>
       managed.proc.once('exit', (c) => done(c)),
@@ -263,7 +269,11 @@ export class Acc7Stack {
     const wantCheckout = options.checkout ?? options.mode !== 'blocked';
     if (wantCheckout) {
       if (options.seed ?? true)
-        await this.runOnce('seed', 'src/server/nemodots/sandbox/seed.ts', this.baseEnv());
+        await this.runOnce(
+          'seed',
+          'src/server/nemodots/sandbox/seed.ts',
+          this.baseEnv(),
+        );
       const checkoutEntry = resolve(
         APP_ROOT,
         'src/server/nemodots/sandbox/checkout-main.ts',
@@ -284,12 +294,18 @@ export class Acc7Stack {
         LC_ALL: 'C',
         PATH: env.PATH!,
       };
-      const checkout = this.spawnManaged('checkout', checkoutEntry, checkoutEnv);
+      const checkout = this.spawnManaged(
+        'checkout',
+        checkoutEntry,
+        checkoutEnv,
+      );
       await until(
         `checkout API on ${CHECKOUT_URL}`,
         async () => {
           if (checkout.proc.exitCode !== null)
-            throw new Error(`checkout exited. Log tail:\n${tail(checkout.logPath)}`);
+            throw new Error(
+              `checkout exited. Log tail:\n${tail(checkout.logPath)}`,
+            );
           const res = await fetch(`${CHECKOUT_URL}/health`).catch(() => null);
           return res !== null;
         },
@@ -346,7 +362,10 @@ export class Acc7Stack {
             : {},
         }).catch(() => null);
         if (!res) return false;
-        if (res.status === 404 || !(res.headers.get('content-type') ?? '').includes('json'))
+        if (
+          res.status === 404 ||
+          !(res.headers.get('content-type') ?? '').includes('json')
+        )
           throw new EntryPointMissing(
             'GET /api/nemodots/health',
             `app answered ${res.status} ${res.headers.get('content-type')}; /api/nemodots is not mounted`,
@@ -358,7 +377,9 @@ export class Acc7Stack {
   }
 
   get authHeaders(): Record<string, string> {
-    return this.ownerToken ? { Authorization: `Bearer ${this.ownerToken}` } : {};
+    return this.ownerToken
+      ? { Authorization: `Bearer ${this.ownerToken}` }
+      : {};
   }
 
   logTail(name: 'app' | 'checkout' | 'seed') {
@@ -386,7 +407,9 @@ export class Acc7Stack {
     try {
       await admin.connect();
       if (new RegExp(`^${DB_PREFIX}[0-9a-f]+$`).test(this.db.name))
-        await admin.query(`DROP DATABASE IF EXISTS ${this.db.name} WITH (FORCE)`);
+        await admin.query(
+          `DROP DATABASE IF EXISTS ${this.db.name} WITH (FORCE)`,
+        );
     } finally {
       await admin.end().catch(() => undefined);
     }

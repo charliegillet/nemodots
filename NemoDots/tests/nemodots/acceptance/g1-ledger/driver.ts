@@ -38,6 +38,10 @@ export const KNOWN_ERRORS = [
   'stale_pending_observation',
   'receipt_not_supported',
   'evidence_too_old',
+  'closure_cap_exceeded',
+  'scheduling_cycle',
+  'edge_order',
+  'edge_cycle',
 ] as const;
 
 export const OWNER_ID = 'acc1-owner';
@@ -228,14 +232,16 @@ export class World {
     if (!(await this.schema.exists(CFG)) || !(await this.schema.exists(COLL))) {
       throw new Error(`ENTRY POINT MISSING: migration 0004_checkout (${CFG}, ${COLL}) is not present in the migrated database`);
     }
+    // Setup, not behaviour under test: plain SQL as the table owner, mirroring the
+    // authority's own rules (a new key bumps the membership collection once).
     const hasCollection = (await this.admin.query(`SELECT 1 FROM ${COLL} LIMIT 1`)).rowCount;
-    if (!hasCollection) await insertRow(this.admin, this.schema, COLL, {});
+    if (!hasCollection) await insertRow(this.admin, this.schema, COLL, { version: 1 });
     const existing = await this.configVersion(key);
     if (existing === null) {
-      await this.admin.query(`INSERT INTO ${CFG} (key, value, version) VALUES ($1, $2::jsonb, 1)`, [key, JSON.stringify(value)]);
+      await this.admin.query(`INSERT INTO ${CFG} (key, value, version, caused_by_actor) VALUES ($1, $2::jsonb, 1, 'seed')`, [key, JSON.stringify(value)]);
       await this.admin.query(`UPDATE ${COLL} SET version = version + 1`);
     } else {
-      await this.admin.query(`UPDATE ${CFG} SET value = $2::jsonb, version = version + 1 WHERE key = $1`, [key, JSON.stringify(value)]);
+      await this.admin.query(`UPDATE ${CFG} SET value = $2::jsonb, version = version + 1, caused_by_actor = 'seed' WHERE key = $1`, [key, JSON.stringify(value)]);
     }
   }
 
@@ -280,11 +286,10 @@ export class World {
         // BIND: advanceConfig signature (see header).
         await advanceConfig(client, {
           key: op.key,
-          value: op.value,
+          // The authority refuses a value or insertIfMissing together with deleteKey.
+          ...(op.deleteKey ? { deleteKey: true } : { value: op.value, ...(op.insertIfMissing ? { insertIfMissing: true } : {}) }),
           expectedVersion: current,
           causedBy: { actor: op.actor, actionId: null },
-          insertIfMissing: op.insertIfMissing ?? false,
-          deleteKey: op.deleteKey ?? false,
         });
         await client.query('COMMIT');
       } catch (error) {

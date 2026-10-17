@@ -34,6 +34,7 @@ export async function createAccDb(): Promise<AccDb> {
   } catch (error) {
     throw new Error(
       `NemoDots PostgreSQL on 55432 is not reachable as nemodots_admin (${(error as Error).message.replace(/postgres(ql)?:\/\/\S+/g, '[url]')}); start it with \`npm run nemodots:stack -- start\`.`,
+      { cause: error },
     );
   }
   try {

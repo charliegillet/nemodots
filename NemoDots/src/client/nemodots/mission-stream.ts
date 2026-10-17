@@ -1,3 +1,4 @@
+import { EVENT_KINDS } from './mission-events';
 import type { MissionEvent } from '../../server/nemodots/contracts/index.js';
 import { authHeaders } from '../api';
 
@@ -82,6 +83,7 @@ export function isMissionEvent(value: unknown): value is MissionEvent {
     record.id > 0 &&
     typeof record.missionId === 'string' &&
     typeof record.kind === 'string' &&
+    EVENT_KINDS.has(record.kind) &&
     typeof record.at === 'string' &&
     typeof payload === 'object' &&
     payload !== null &&
@@ -162,6 +164,11 @@ export function openMissionStream(
       throw new Error(message);
     }
     if (!response.body) throw new Error('Event stream has no body.');
+    // A 200 that is not an event stream (an SPA fallback page, a proxy error
+    // page) must not count as a connection: retry with growing backoff.
+    const contentType = response.headers?.get('content-type') ?? '';
+    if (!/^\s*text\/event-stream/i.test(contentType))
+      throw new Error('Event stream answered with a non-SSE content type.');
     status('open');
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -178,13 +185,15 @@ export function openMissionStream(
         return;
       }
       lastEventId = Math.max(lastEventId, parsed.id);
+      // Backoff resets only once a valid event arrived, so a stream that
+      // sends bytes and closes cannot keep the client at the base delay.
+      attempt = 0;
       options.onEvent(parsed);
     });
     try {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
-        attempt = 0;
         parser.push(decoder.decode(value, { stream: true }));
       }
       parser.push(decoder.decode());

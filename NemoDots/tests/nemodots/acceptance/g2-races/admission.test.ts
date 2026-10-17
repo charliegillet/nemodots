@@ -4,15 +4,30 @@
 import { describe, expect, it } from 'vitest';
 import { SETUP_CONFIG } from '../oracle/admission.js';
 import {
-  NS, POOL, TIMEOUT, authSummary, errText, isSettled, withTimeout, withWorld,
+  POOL,
+  TIMEOUT,
+  authSummary,
+  errText,
+  isSettled,
+  withTimeout,
+  withWorld,
   type World,
 } from './harness.js';
 
 const SETUP_POOL = SETUP_CONFIG['db.pool_max'];
 const fence = (i: { dispatch: { fence: number } | null }) => i.dispatch!.fence;
-const blocked = (reason: string) => ({ stage: expect.any(String), decision: 'blocked', blockReason: reason });
+const blocked = (reason: string) => ({
+  stage: expect.any(String),
+  decision: 'blocked',
+  blockReason: reason,
+});
 
-async function expectUntouched(w: World, key: string, v: number, value: unknown) {
+async function expectUntouched(
+  w: World,
+  key: string,
+  v: number,
+  value: unknown,
+) {
   const c = await w.cfg(key);
   expect(c.version).toBe(v);
   expect(c.value).toEqual(value);
@@ -29,7 +44,13 @@ describe('G2 admission and races: cases 1-8', () => {
       const row = await w.intent(i.id);
       expect(row.status).toBe('blocked');
       expect(row.block_reason).toBe('stale_version');
-      expect(await authSummary(w, i.id)).toEqual([{ stage: 'admission', decision: 'blocked', blockReason: 'stale_version' }]);
+      expect(await authSummary(w, i.id)).toEqual([
+        {
+          stage: 'admission',
+          decision: 'blocked',
+          blockReason: 'stale_version',
+        },
+      ]);
       expect((await w.resultReceipts(i.id)).length).toBe(0);
       await expectUntouched(w, POOL, v1 + 1, 4);
     });
@@ -61,8 +82,13 @@ describe('G2 admission and races: cases 1-8', () => {
       const row = await w.intent(i.id);
       expect(row.status).toBe('blocked');
       expect(row.block_reason).toBe('stale_version');
-      expect((await authSummary(w, i.id)).map((a) => a.decision)).toEqual(['admitted', 'blocked']);
-      expect((await authSummary(w, i.id))[1]).toMatchObject(blocked('stale_version'));
+      expect((await authSummary(w, i.id)).map((a) => a.decision)).toEqual([
+        'admitted',
+        'blocked',
+      ]);
+      expect((await authSummary(w, i.id))[1]).toMatchObject(
+        blocked('stale_version'),
+      );
       expect((await w.resultReceipts(i.id)).length).toBe(0);
       await expectUntouched(w, POOL, v1 + 1, 4);
       expect((await w.history(POOL)).at(-1)?.caused_by_actor).toBe('injector');
@@ -76,9 +102,10 @@ describe('G2 admission and races: cases 1-8', () => {
       const parked = w.park('after_lock_before_commit');
       const commit = w.actions.commit(i.id, fence(i));
       await parked.reached;
-      const injector = w
-        .advance(POOL, 4, { expectedVersion: v1 })
-        .then(() => 'ok', (e) => errText(e));
+      const injector = w.advance(POOL, 4, { expectedVersion: v1 }).then(
+        () => 'ok',
+        (e) => errText(e),
+      );
       expect(await isSettled(injector)).toBe(false); // blocked on the action's row lock
       parked.release();
       await commit;
@@ -89,8 +116,15 @@ describe('G2 admission and races: cases 1-8', () => {
       const c = await w.cfg(POOL);
       expect(c).toMatchObject({ version: v1 + 1, value: 12, causedBy: i.id });
       const h = await w.history(POOL);
-      expect(h.filter((r) => Number(r.version) > v1).map((r) => r.caused_by_action_id ?? r.caused_by_actor)).toEqual([i.id]);
-      expect((await authSummary(w, i.id)).map((a) => a.decision)).toEqual(['admitted', 'committed']);
+      expect(
+        h
+          .filter((r) => Number(r.version) > v1)
+          .map((r) => r.caused_by_action_id ?? r.caused_by_actor),
+      ).toEqual([i.id]);
+      expect((await authSummary(w, i.id)).map((a) => a.decision)).toEqual([
+        'admitted',
+        'committed',
+      ]);
       expect((await w.resultReceipts(i.id)).length).toBe(1);
       expect(await w.actionRows()).toBe(1);
     });
@@ -110,7 +144,11 @@ describe('G2 admission and races: cases 1-8', () => {
       expect(row.block_reason).toBe('stale_version');
       await expectUntouched(w, POOL, v1 + 1, 4);
       expect((await w.resultReceipts(i.id)).length).toBe(0);
-      expect((await w.history(POOL)).filter((r) => Number(r.version) > v1).map((r) => r.caused_by_actor)).toEqual(['injector']);
+      expect(
+        (await w.history(POOL))
+          .filter((r) => Number(r.version) > v1)
+          .map((r) => r.caused_by_actor),
+      ).toEqual(['injector']);
     });
   });
 
@@ -123,7 +161,10 @@ describe('G2 admission and races: cases 1-8', () => {
       const row = await w.intent(i.id);
       expect(row.status).toBe('blocked');
       expect(row.block_reason).toBe('stale_version');
-      expect((await authSummary(w, i.id)).map((a) => a.decision)).toEqual(['admitted', 'blocked']);
+      expect((await authSummary(w, i.id)).map((a) => a.decision)).toEqual([
+        'admitted',
+        'blocked',
+      ]);
       await expectUntouched(w, POOL, v1 + 1, 4);
     });
   });
@@ -135,10 +176,16 @@ describe('G2 admission and races: cases 1-8', () => {
         const a = await w.propose(w.poolSpec('tc-1', 12));
         const again = await w.propose(w.poolSpec('tc-1', 12));
         expect(again.id).toBe(a.id);
-        const tampered = await w
-          .propose(w.poolSpec('tc-1', 13))
-          .then((x) => x, (e) => e);
-        const rows = (await w.admin.query('SELECT id, status, block_reason FROM coordinator.action_intents WHERE tool_call_id=$1', ['tc-1'])).rows;
+        const tampered = await w.propose(w.poolSpec('tc-1', 13)).then(
+          (x) => x,
+          (e) => e,
+        );
+        const rows = (
+          await w.admin.query(
+            'SELECT id, status, block_reason FROM coordinator.action_intents WHERE tool_call_id=$1',
+            ['tc-1'],
+          )
+        ).rows;
         const conflict = rows.find((r) => r.id !== a.id);
         if (conflict) {
           expect(conflict.status).toBe('blocked');
@@ -161,7 +208,11 @@ describe('G2 admission and races: cases 1-8', () => {
         const i2 = await w.proposeAdmit(w.poolSpec('tc-2', 12));
         await w.actions.commit(i2.id, fence(i2));
         expect((await w.intent(i2.id)).status).toBe('committed');
-        expect(await w.cfg(POOL)).toMatchObject({ version: v1 + 2, value: 12, causedBy: i2.id });
+        expect(await w.cfg(POOL)).toMatchObject({
+          version: v1 + 2,
+          value: 12,
+          causedBy: i2.id,
+        });
         expect(await w.actionRows()).toBe(1);
         expect((await w.resultReceipts(i2.id)).length).toBe(1);
       });
@@ -169,27 +220,45 @@ describe('G2 admission and races: cases 1-8', () => {
 
     it('G2-05c payload, dependency vector, policy or target changed after admission cannot commit without fresh authorization', async () => {
       await withWorld(async (w) => {
-        const v1 = (await w.cfg(POOL)).version;
         const t1 = (await w.cfg(TIMEOUT)).version;
         const cases = [
-          { name: 'payload_value', sql: `UPDATE coordinator.action_intents SET payload = jsonb_set(payload,'{value}','13') WHERE id=$1` },
-          { name: 'vector', sql: `UPDATE coordinator.action_intents SET dependency_vector='[]'::jsonb WHERE id=$1` },
-          { name: 'policy', sql: `UPDATE coordinator.action_intents SET policy_version='policy-v0' WHERE id=$1` },
-          { name: 'target', sql: `UPDATE coordinator.action_intents SET target = jsonb_set(target,'{sourceKey}','"checkout.config/${TIMEOUT}"') WHERE id=$1` },
+          {
+            name: 'payload_value',
+            sql: `UPDATE coordinator.action_intents SET payload = jsonb_set(payload,'{value}','13') WHERE id=$1`,
+          },
+          {
+            name: 'vector',
+            sql: `UPDATE coordinator.action_intents SET dependency_vector='[]'::jsonb WHERE id=$1`,
+          },
+          {
+            name: 'policy',
+            sql: `UPDATE coordinator.action_intents SET policy_version='policy-v0' WHERE id=$1`,
+          },
+          {
+            name: 'target',
+            sql: `UPDATE coordinator.action_intents SET target = jsonb_set(target,'{sourceKey}','"checkout.config/${TIMEOUT}"') WHERE id=$1`,
+          },
         ];
         let n = 0;
-        let timeoutKeyTouched = false;
-        void timeoutKeyTouched;
         for (const c of cases) {
           n += 1;
           const i = await w.proposeAdmit(w.poolSpec(`tc-bind-${n}`));
           // tampering through the admin role: either the row is immutable (the
           // statement throws) or the commit must refuse the changed intent.
-          const tamper = await w.admin.query(c.sql, [i.id]).then(() => 'changed', (e) => `immutable:${errText(e)}`);
+          const tamper = await w.admin.query(c.sql, [i.id]).then(
+            () => 'changed',
+            (e) => `immutable:${errText(e)}`,
+          );
           if (tamper === 'changed') {
-            const result = await w.actions.commit(i.id, fence(i)).then(() => 'returned', (e) => `threw:${errText(e)}`);
+            const result = await w.actions.commit(i.id, fence(i)).then(
+              () => 'returned',
+              (e) => `threw:${errText(e)}`,
+            );
             const row = await w.intent(i.id);
-            expect(row.status, `${c.name}: tampered intent must not commit (${result})`).not.toBe('committed');
+            expect(
+              row.status,
+              `${c.name}: tampered intent must not commit (${result})`,
+            ).not.toBe('committed');
             expect(['admitted', 'blocked']).toContain(row.status);
           } else {
             // sealed row: the statement itself was refused, nothing to commit under a different binding
@@ -201,7 +270,6 @@ describe('G2 admission and races: cases 1-8', () => {
         expect(c.version).toBe(t1);
         const p = await w.cfg(POOL);
         expect(p.value).not.toBe(13);
-        void v1;
       });
     });
   });
@@ -217,11 +285,19 @@ describe('G2 admission and races: cases 1-8', () => {
           const i = await w.propose(w.poolSpec('tc-1', 12, [...cites]));
           await w.actions.admit(i.id, 'd1').catch(() => {});
           const row = await w.intent(i.id);
-          if (row.status === 'blocked') expect(row.block_reason).toBe('missing_required_source');
+          if (row.status === 'blocked')
+            expect(row.block_reason).toBe('missing_required_source');
           else {
             expect(row.status).toBe('admitted');
-            const keys = (row.dependency_vector as { sourceKey: string }[]).map((e) => e.sourceKey);
-            expect(keys).toEqual(expect.arrayContaining([`checkout.config/${POOL}`, 'checkout.health']));
+            const keys = (row.dependency_vector as { sourceKey: string }[]).map(
+              (e) => e.sourceKey,
+            );
+            expect(keys).toEqual(
+              expect.arrayContaining([
+                `checkout.config/${POOL}`,
+                'checkout.health',
+              ]),
+            );
           }
           await expectUntouched(w, POOL, v1, SETUP_POOL);
         });
@@ -233,13 +309,40 @@ describe('G2 admission and races: cases 1-8', () => {
         const v1 = (await w.cfg(POOL)).version;
         const attempts: [string, () => Promise<unknown>][] = [
           ['domain', () => w.propose(w.poolSpec('tc-d', 50))],
-          ['kind', () => w.propose({ action: 'drop_table' as never, payload: { table: 'checkout.orders' }, cites: ['member:db.pool_max', 'health'], toolCallId: 'tc-k' })],
-          ['extra', () => w.propose({ ...w.poolSpec('tc-e'), payload: { key: POOL, value: 12, causedByActionId: 'forged' } })],
+          [
+            'kind',
+            () =>
+              w.propose({
+                action: 'drop_table' as never,
+                payload: { table: 'checkout.orders' },
+                cites: ['member:db.pool_max', 'health'],
+                toolCallId: 'tc-k',
+              }),
+          ],
+          [
+            'extra',
+            () =>
+              w.propose({
+                ...w.poolSpec('tc-e'),
+                payload: { key: POOL, value: 12, causedByActionId: 'forged' },
+              }),
+          ],
         ];
         for (const [name, run] of attempts) {
-          const out = await run().then(() => 'returned', (e) => errText(e));
-          const rows = (await w.admin.query('SELECT status, block_reason FROM coordinator.action_intents WHERE tool_call_id = ANY($1)', [['tc-d', 'tc-k', 'tc-e']])).rows;
-          const bad = rows.filter((r) => r.status !== 'blocked' || r.block_reason !== 'payload_invalid');
+          const out = await run().then(
+            () => 'returned',
+            (e) => errText(e),
+          );
+          const rows = (
+            await w.admin.query(
+              'SELECT status, block_reason FROM coordinator.action_intents WHERE tool_call_id = ANY($1)',
+              [['tc-d', 'tc-k', 'tc-e']],
+            )
+          ).rows;
+          const bad = rows.filter(
+            (r) =>
+              r.status !== 'blocked' || r.block_reason !== 'payload_invalid',
+          );
           expect(bad, `${name}: ${out}`).toEqual([]);
           if (out !== 'returned') expect(out).toContain('payload_invalid');
         }
@@ -250,10 +353,15 @@ describe('G2 admission and races: cases 1-8', () => {
     it('G2-06d an investigator cannot propose (capability)', async () => {
       await withWorld(async (w) => {
         const inv = await w.seedAttempt('investigator');
-        const out = await w.propose({ ...w.poolSpec('tc-1'), attempt: inv }).then(
-          async (i) => { await w.actions.admit(i.id, 'd1').catch(() => {}); return (await w.intent(i.id)); },
-          (e) => ({ thrown: errText(e) }),
-        );
+        const out = await w
+          .propose({ ...w.poolSpec('tc-1'), attempt: inv })
+          .then(
+            async (i) => {
+              await w.actions.admit(i.id, 'd1').catch(() => {});
+              return await w.intent(i.id);
+            },
+            (e) => ({ thrown: errText(e) }),
+          );
         if ('thrown' in out) expect(out.thrown).toMatch(/capability_denied/);
         else {
           expect(out.status).toBe('blocked');
@@ -273,11 +381,23 @@ describe('G2 admission and races: cases 1-8', () => {
       await w.actions.commit(i.id, fence(i));
       const row = await w.intent(i.id);
       expect(row.status).toBe('blocked');
-      expect(['stale_version', 'receipt_not_supported']).toContain(row.block_reason);
+      expect(['stale_version', 'receipt_not_supported']).toContain(
+        row.block_reason,
+      );
       await expectUntouched(w, POOL, v1, SETUP_POOL);
       // inherited-only premise: a member of another key in the emitting snapshot
-      const j = await w.proposeAdmit(w.poolSpec('tc-2', 12, ['member:db.pool_max', 'health', 'member:db.statement_timeout_ms']));
-      expect((await w.intent(j.id)).dependency_vector.map((e: { sourceKey: string }) => e.sourceKey)).toContain(`checkout.config/${TIMEOUT}`);
+      const j = await w.proposeAdmit(
+        w.poolSpec('tc-2', 12, [
+          'member:db.pool_max',
+          'health',
+          'member:db.statement_timeout_ms',
+        ]),
+      );
+      expect(
+        (await w.intent(j.id)).dependency_vector.map(
+          (e: { sourceKey: string }) => e.sourceKey,
+        ),
+      ).toContain(`checkout.config/${TIMEOUT}`);
       await w.advance(TIMEOUT, 120, { register: true });
       await w.actions.commit(j.id, fence(j));
       const jr = await w.intent(j.id);
@@ -293,19 +413,29 @@ describe('G2 admission and races: cases 1-8', () => {
       const vB = (await w.cfg(TIMEOUT)).version;
       const a = await w.proposeAdmit(w.poolSpec('tc-a', 12));
       const b = await w.proposeAdmit({
-        action: 'set_config', payload: { key: TIMEOUT, value: 120 },
-        cites: ['member:db.statement_timeout_ms', 'health'], toolCallId: 'tc-b',
+        action: 'set_config',
+        payload: { key: TIMEOUT, value: 120 },
+        cites: ['member:db.statement_timeout_ms', 'health'],
+        toolCallId: 'tc-b',
       });
       const hold = await w.holdRowLock(POOL, 4); // branch A's source is being changed, uncommitted
       const t0 = Date.now();
-      await withTimeout(w.actions.commit(b.id, fence(b)), 5000, 'branch B must not wait on branch A');
+      await withTimeout(
+        w.actions.commit(b.id, fence(b)),
+        5000,
+        'branch B must not wait on branch A',
+      );
       expect(Date.now() - t0).toBeLessThan(3000);
       await hold.commit();
       await w.registerMember(POOL);
       await w.actions.commit(a.id, fence(a));
       expect((await w.intent(b.id)).status).toBe('committed');
       expect((await w.intent(a.id)).status).toBe('blocked');
-      expect(await w.cfg(TIMEOUT)).toMatchObject({ version: vB + 1, value: 120, causedBy: b.id });
+      expect(await w.cfg(TIMEOUT)).toMatchObject({
+        version: vB + 1,
+        value: 120,
+        causedBy: b.id,
+      });
       expect(await w.cfg(POOL)).toMatchObject({ version: vA + 1, value: 4 });
       expect(await w.actionRows()).toBe(1);
       expect((await w.resultReceipts(b.id)).length).toBe(1);
@@ -313,5 +443,3 @@ describe('G2 admission and races: cases 1-8', () => {
     });
   });
 });
-
-void NS;

@@ -53,9 +53,29 @@ export function collectNeedles(rolesFiles: string[]): Needle[] {
 }
 
 const TEXT_EXT = new Set([
-  '.ts', '.tsx', '.js', '.mjs', '.cjs', '.json', '.md', '.yml', '.yaml', '.html',
-  '.css', '.txt', '.log', '.sh', '.sql', '.map', '.svg', '.example', '.out',
-  '.ndjson', '.jsonl', '.toml', '',
+  '.ts',
+  '.tsx',
+  '.js',
+  '.mjs',
+  '.cjs',
+  '.json',
+  '.md',
+  '.yml',
+  '.yaml',
+  '.html',
+  '.css',
+  '.txt',
+  '.log',
+  '.sh',
+  '.sql',
+  '.map',
+  '.svg',
+  '.example',
+  '.out',
+  '.ndjson',
+  '.jsonl',
+  '.toml',
+  '',
 ]);
 
 export interface ScanOptions {
@@ -77,7 +97,12 @@ export interface ScanReport {
 }
 
 const PATTERNS: { name: string; re: RegExp; ignore?: RegExp }[] = [
-  { name: 'openai-style key (sk-...)', re: /\bsk-[A-Za-z0-9_-]{24,}\b/g },
+  {
+    name: 'openai-style key (sk-...)',
+    re: /\bsk-[A-Za-z0-9_-]{24,}\b/g,
+    // Obvious placeholder fixtures (sk-test-..., sk-fake-...) are not secrets.
+    ignore: /sk-(test|fake|example|dummy|placeholder|xxx)/i,
+  },
   { name: 'private key block', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----/g },
   {
     name: 'url with embedded password',
@@ -102,7 +127,9 @@ function* walk(
   for (const name of entries) {
     const abs = path.join(dir, name);
     const relative = rel ? `${rel}/${name}` : name;
-    if (options.skipPaths?.some((p) => abs === p || abs.startsWith(p + path.sep)))
+    if (
+      options.skipPaths?.some((p) => abs === p || abs.startsWith(p + path.sep))
+    )
       continue;
     let st;
     try {

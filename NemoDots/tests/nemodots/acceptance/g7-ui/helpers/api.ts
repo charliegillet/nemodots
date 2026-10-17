@@ -41,7 +41,9 @@ export class NemoApi {
     try {
       value = JSON.parse(text);
     } catch {
-      throw new Error(`${res.url} returned non-JSON (${res.status}): ${text.slice(0, 200)}`);
+      throw new Error(
+        `${res.url} returned non-JSON (${res.status}): ${text.slice(0, 200)}`,
+      );
     }
     if (!res.ok)
       throw new HttpError(res.status, value, `${res.url} -> ${res.status}`);
@@ -49,7 +51,9 @@ export class NemoApi {
   }
 
   async health(): Promise<HealthStatus> {
-    return this.body(await this.raw('/health'), (v) => HealthStatusSchema.parse(v));
+    return this.body(await this.raw('/health'), (v) =>
+      HealthStatusSchema.parse(v),
+    );
   }
 
   async createMission(input: {
@@ -65,7 +69,9 @@ export class NemoApi {
   }
 
   async listMissions(): Promise<Mission[]> {
-    return this.body(await this.raw('/missions'), (v) => MissionSchema.array().parse(v));
+    return this.body(await this.raw('/missions'), (v) =>
+      MissionSchema.array().parse(v),
+    );
   }
 
   async snapshot(id: string): Promise<MissionSnapshot> {
@@ -74,7 +80,10 @@ export class NemoApi {
     );
   }
 
-  async lifecycle(id: string, action: MissionLifecycleAction): Promise<Mission> {
+  async lifecycle(
+    id: string,
+    action: MissionLifecycleAction,
+  ): Promise<Mission> {
     return this.body(
       await this.raw(`/missions/${id}/${action}`, { method: 'POST', json: {} }),
       (v) => MissionSchema.parse(v),
@@ -110,7 +119,11 @@ export class NemoApi {
   /** Reads the durable SSE stream until `stopWhen` or the idle/timeout budget. */
   async events(
     id: string,
-    options: { lastEventId?: number; maxMs?: number; stopWhen?: (e: MissionEvent[]) => boolean } = {},
+    options: {
+      lastEventId?: number;
+      maxMs?: number;
+      stopWhen?: (e: MissionEvent[]) => boolean;
+    } = {},
   ): Promise<MissionEvent[]> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), options.maxMs ?? 4000);
@@ -143,7 +156,9 @@ export class NemoApi {
           if (!data) continue;
           const parsed = MissionEventSchema.safeParse(JSON.parse(data));
           if (!parsed.success)
-            throw new Error(`event failed MissionEventSchema: ${parsed.error.message}`);
+            throw new Error(
+              `event failed MissionEventSchema: ${parsed.error.message}`,
+            );
           out.push(parsed.data);
           if (options.stopWhen?.(out)) {
             controller.abort();
