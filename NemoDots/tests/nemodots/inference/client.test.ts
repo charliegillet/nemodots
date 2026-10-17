@@ -814,6 +814,47 @@ describe('errors, retries and backoff (stub-verified)', () => {
     });
   });
 
+  it('keepalive comments do not defeat the overall deadline (slots are freed)', async () => {
+    stub = await startStub((_req, res, _s, i) => {
+      if (i > 0) return textStream(res, ['ok']);
+      sse(res);
+      const drip = setInterval(() => res.write(': keepalive\n\n'), 20);
+      res.on('close', () => clearInterval(drip));
+    });
+    const { client: c } = client(stub, {
+      timeoutMs: 300,
+      deadlineMs: 200,
+      maxInFlight: 1,
+      retry: { maxRetries: 0 },
+    });
+    const started = Date.now();
+    const result = await c.complete(request(), ctx());
+    expect(Date.now() - started).toBeLessThan(1500);
+    expect(result.outcome).toBe('failed');
+    expect(result.attempts[0].error).toMatchObject({
+      class: 'timeout',
+      code: 'client_deadline',
+    });
+    // the single slot is free again: a second call is not stuck behind it
+    const next = await c.complete(request(), ctx());
+    expect(next.outcome).toBe('completed');
+  });
+
+  it('a trickle of tokens is bounded by the overall deadline too', async () => {
+    stub = await startStub((_req, res) => {
+      sse(res);
+      const drip = setInterval(() => res.write(chunk({ content: 'x' })), 20);
+      res.on('close', () => clearInterval(drip));
+    });
+    const { client: c } = client(stub, {
+      timeoutMs: 300,
+      deadlineMs: 200,
+      retry: { maxRetries: 0 },
+    });
+    const result = await c.complete(request(), ctx());
+    expect(result.attempts[0].error).toMatchObject({ code: 'client_deadline' });
+  });
+
   it('a dropped connection is a retryable network error', async () => {
     stub = await startStub((req, res, _s, i) => {
       if (i === 0) return void req.socket.destroy();

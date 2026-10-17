@@ -1,4 +1,12 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+} from 'vitest';
 import {
   TEAM_TOOL_INPUTS,
   toolSchemas,
@@ -8,7 +16,9 @@ import type { StampedChatResult } from '../../../../src/server/nemodots/inferenc
 import {
   LIGHTNING,
   SUPER,
-  allChecks,
+  beginTest,
+  endTest,
+  suiteFailed,
   callContext,
   chat,
   describeResult,
@@ -35,8 +45,15 @@ beforeAll(() => {
 
 afterAll(() => {
   if (!env) return; // BLOCKED: requireLive already wrote the results file
-  const failed = allChecks().some((c) => c.status === 'FAIL');
-  writeResults({ status: failed ? 'FAIL' : 'PASS' });
+  writeResults({ status: suiteFailed() ? 'FAIL' : 'PASS' });
+});
+
+beforeEach(() => {
+  beginTest();
+});
+
+afterEach((context) => {
+  endTest(context.task.name, context.task.result?.state);
 });
 
 async function check<T>(
@@ -125,7 +142,7 @@ describe('Crusoe live (adapter)', () => {
       {
         role: 'system',
         content:
-          'You are a checkout incident analyst. Use the observe_source tool to read sources; never guess their values.',
+          'You are a checkout incident analyst. Use the observe_source tool to read a source; never guess its value. Once you have a tool result, answer the question in one sentence from that result and do not call any tool again.',
       },
       {
         role: 'user',

@@ -11,16 +11,18 @@ import type { MissionSnapshot } from '../../../../src/server/nemodots/contracts/
  * point fails every test that needs it with the same explicit message (a
  * failing beforeAll would leave the tests unreported instead of failed).
  */
-export function lazySystem(options: {
+export interface LazySystemOptions {
   model?: string;
   script?: ProviderScript;
   upstream?: { baseUrl: string; apiKey: string };
   system?: Omit<SystemOptions, 'providerUrl' | 'providerModel'>;
   providerPort: number;
-}) {
+}
+export function lazySystem(input: LazySystemOptions | (() => LazySystemOptions)) {
   let starting: Promise<{ system: System; provider: Provider }> | null = null;
   const get = () => {
     starting ??= (async () => {
+      const options = typeof input === 'function' ? input() : input;
       const model = options.model ?? 'acc4-scripted-model';
       const provider = await startProvider({
         port: options.providerPort,

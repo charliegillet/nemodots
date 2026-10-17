@@ -5,7 +5,7 @@
 //
 // PRODUCTION SIGNATURES THIS DRIVER ASSUMES (the verifier's dependency list;
 // each is a single call site below, marked BIND):
-//   ledger/receipts.ts#registerObservation(db: pg.Pool, input) -> Promise<unknown>
+//   ledger/receipts.ts#registerObservation(client in an open txn, input) -> Promise<RegisterResult>
 //        input = { scope: Scope, sourceKey, normalizedValue?, claimedRevision?,
 //                  claimedDigest?, provenance: { kind:'watcher', toolCallId:null,
 //                  modelCallId:null, attemptId:null, causedByActionId:null,
@@ -309,8 +309,78 @@ export class World {
     return op.normalizedValue;
   }
 
+  /** SourceRef for a source key (CONTRACTS 1): the type follows the key family. */
+  sourceRef(key: string, env: Env) {
+    const family = key === 'checkout.config' ? 'collection' : key.startsWith('checkout.config/') ? 'member' : key;
+    const sourceType =
+      family === 'collection'
+        ? 'controlled_collection'
+        : family === 'member'
+          ? 'controlled_config'
+          : key === 'redis.stats'
+            ? 'observed_store'
+            : key === 'checkout.acceptance'
+              ? 'probe'
+              : key.startsWith('runbook/')
+                ? 'runbook'
+                : key.startsWith('opendots.page/')
+                  ? 'page_snapshot'
+                  : key.startsWith('opendots.memory/')
+                    ? 'memory_snapshot'
+                    : 'observed_endpoint';
+    const authority = sourceType.startsWith('controlled') ? 'controlled' : 'observed';
+    return { key, sourceType, authority, scope: this.scope(env) };
+  }
+
+  /** The value a watcher reads from the controlled authority (ARCHITECTURE 9.4): member {key,value,version}, collection {keys,collectionVersion}. */
+  async controlledValue(key: string): Promise<unknown> {
+    if (key === 'checkout.config') {
+      const keys = await this.admin.query(`SELECT key FROM ${CFG} ORDER BY key`);
+      return { keys: keys.rows.map((r) => r.key), collectionVersion: await this.collectionVersion() };
+    }
+    const member = key.slice('checkout.config/'.length);
+    const version = await this.configVersion(member);
+    if (version === null) return { key: member, value: null, version: 0 };
+    return { key: member, value: await this.configValue(member), version };
+  }
+
+  /** Runs fn on a connection inside a transaction owned here (the ledger requires the caller's). */
+  async inTx<T>(fn: (client: pg.PoolClient) => Promise<T>, via: pg.Pool = this.app): Promise<T> {
+    const client = await via.connect();
+    try {
+      await client.query('BEGIN');
+      try {
+        const out = await fn(client);
+        await client.query('COMMIT');
+        return out;
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw error;
+      }
+    } finally {
+      client.release();
+    }
+  }
+
+  async registerInput(op: Extract<LedgerOp, { op: 'register' }>): Promise<Record<string, unknown>> {
+    const env = op.environment ?? 'test';
+    const controlled = this.isControlled(op.sourceKey);
+    const base = controlled ? this.baseOf(op.sourceKey) : 0;
+    const input: Record<string, unknown> = {
+      source: this.sourceRef(op.sourceKey, env),
+      normalizedValue: controlled ? await this.controlledValue(op.sourceKey) : (this.payloadFor(op) ?? {}),
+      provenance: { kind: 'watcher' },
+    };
+    const claimed: Record<string, unknown> = {};
+    if (op.claimRevision !== undefined) claimed.sourceRevision = base + op.claimRevision;
+    if (op.claimDigestMismatch) claimed.contentDigest = 'f'.repeat(64);
+    if (Object.keys(claimed).length) input.claimed = claimed;
+    return input;
+  }
+
   async register(op: Extract<LedgerOp, { op: 'register' }>): Promise<OpResult> {
-    const registerObservation = await entry<(db: pg.Pool, input: Record<string, unknown>) => Promise<unknown>>(
+    // BIND: registerObservation(client in an open transaction, { source, normalizedValue, provenance, claimed? }).
+    const registerObservation = await entry<(client: pg.PoolClient, input: Record<string, unknown>, options?: Record<string, unknown>) => Promise<unknown>>(
       'ledger/receipts.ts',
       ['registerObservation'],
     );
@@ -319,19 +389,10 @@ export class World {
     const beforeCur = await this.currentOf(env, op.sourceKey);
     const confBefore = beforeCur ? await this.confirmationCount(beforeCur.id) : 0;
     const controlled = this.isControlled(op.sourceKey);
-    const base = controlled ? this.baseOf(op.sourceKey) : 0;
-    const input: Record<string, unknown> = {
-      scope: this.scope(env),
-      sourceKey: op.sourceKey,
-      provenance: { kind: 'watcher', toolCallId: null, modelCallId: null, attemptId: null, causedByActionId: null, selfWrite: 'none' },
-    };
-    const value = this.payloadFor(op);
-    if (!controlled) input.normalizedValue = value ?? {};
-    if (op.claimRevision !== undefined) input.claimedRevision = base + op.claimRevision;
-    if (op.claimDigestMismatch) input.claimedDigest = 'f'.repeat(64);
-    const result: OpResult = { ok: true, baseRevision: base };
+    const result: OpResult = { ok: true, baseRevision: controlled ? this.baseOf(op.sourceKey) : 0 };
     try {
-      await registerObservation(this.app, input); // BIND: registerObservation signature (see header).
+      const input = await this.registerInput(op);
+      await this.inTx((client) => registerObservation(client, input));
     } catch (error) {
       result.ok = false;
       result.error = errorCode(error);
@@ -349,25 +410,21 @@ export class World {
   }
 
   async registerConcurrent(op: Extract<LedgerOp, { op: 'register_concurrent' }>): Promise<OpResult> {
-    const registerObservation = await entry<(db: pg.Pool, input: Record<string, unknown>) => Promise<unknown>>(
-      'ledger/receipts.ts',
-      ['registerObservation'],
-    );
+    const registerObservation = await entry<(client: pg.PoolClient, input: Record<string, unknown>) => Promise<unknown>>('ledger/receipts.ts', ['registerObservation']);
     const before = await this.receiptsOf('test', op.sourceKey);
-    const mk = () => ({
-      scope: this.scope('test'),
-      sourceKey: op.sourceKey,
-      normalizedValue: op.normalizedValue,
-      provenance: { kind: 'watcher', toolCallId: null, modelCallId: null, attemptId: null, causedByActionId: null, selfWrite: 'none' },
-    });
-    const settled = await Promise.allSettled([registerObservation(this.app, mk()), registerObservation(this.app, mk())]);
-    const failed = settled.filter((s) => s.status === 'rejected') as PromiseRejectedResult[];
+    const input = await this.registerInput({ op: 'register', label: op.labels[0], sourceKey: op.sourceKey, normalizedValue: op.normalizedValue });
+    const settled = await Promise.allSettled([
+      this.inTx((c) => registerObservation(c, structuredClone(input))),
+      this.inTx((c) => registerObservation(c, structuredClone(input))),
+    ]);
+    const failed = settled.filter((x) => x.status === 'rejected') as PromiseRejectedResult[];
     const cur = await this.currentOf('test', op.sourceKey);
     const after = await this.receiptsOf('test', op.sourceKey);
-    if (cur) for (const label of op.labels) {
-      this.labels.set(label, cur.id);
-      this.labelEnv.set(label, { env: 'test', key: op.sourceKey });
-    }
+    if (cur)
+      for (const label of op.labels) {
+        this.labels.set(label, cur.id);
+        this.labelEnv.set(label, { env: 'test', key: op.sourceKey });
+      }
     return {
       ok: failed.length === 0,
       error: failed.length ? errorCode(failed[0].reason) : undefined,
@@ -457,24 +514,10 @@ export class World {
   async transition(op: Extract<LedgerOp, { op: 'transition' }>) {
     const id = this.labels.get(op.label);
     if (!id) throw new Error(`label ${op.label} unknown`);
-    // Prefer the production transition function when one is exported.
-    const file = 'ledger/receipts.ts';
-    let fn: ((db: pg.Pool, input: Record<string, unknown>) => Promise<unknown>) | null = null;
-    try {
-      fn = await entry(file, ['transitionReceipt', 'transitionStatus']);
-    } catch {
-      fn = null;
-    }
-    if (fn) {
-      await fn(this.app, { receiptId: id, to: op.to, reason: op.to === 'expired' ? 'ttl_elapsed' : op.to === 'retracted' ? 'owner_retraction' : 'conflicting_observation' });
-      return;
-    }
-    // DOCUMENTED FALLBACK: status change as the app role (transition row + CAS per ARCHITECTURE 5.2).
-    const sv = await this.schema.pick(REC, ['status_version']);
-    await this.app.query(
-      `UPDATE ${REC} SET status = $2${sv ? `, "${sv}" = "${sv}" + 1` : ''} WHERE id = $1 AND status = 'supported'`,
-      [id, op.to],
-    );
+    const transitionReceipt = await entry<(client: pg.PoolClient, input: Record<string, unknown>) => Promise<unknown>>('ledger/receipts.ts', ['transitionReceipt']);
+    const reason = op.to === 'expired' ? 'ttl_elapsed' : op.to === 'retracted' ? 'owner_retraction' : 'conflicting_observation';
+    // BIND: transitionReceipt(client in an open transaction, { receiptId, to, reason }).
+    await this.inTx((client) => transitionReceipt(client, { receiptId: id, to: op.to, reason }));
   }
 
   /** Mission, task and running attempt rows for publication calls (seeded by introspection). */

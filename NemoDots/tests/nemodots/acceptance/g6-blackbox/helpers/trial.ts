@@ -55,7 +55,7 @@ const PROGRESS_KINDS = new Set([
   'recovery.recorded',
 ]);
 
-async function surface(sku: string): Promise<CheckoutProbeSurface> {
+export async function surface(sku: string): Promise<CheckoutProbeSurface> {
   const get = async (path: string) => {
     try {
       return await checkoutRequest('GET', path);
@@ -113,7 +113,7 @@ interface VersionAuthority {
   ) => Promise<unknown>;
 }
 
-class StepApplier {
+export class StepApplier {
   private injector: pg.Client | null = null;
   constructor(
     private readonly sut: Sut,
@@ -708,7 +708,7 @@ async function readSnapshot(
   return parsed.data;
 }
 
-async function verifierProbe(
+export async function verifierProbe(
   db: VerifierDb,
   quantity: number,
 ): Promise<ProbeRecord> {

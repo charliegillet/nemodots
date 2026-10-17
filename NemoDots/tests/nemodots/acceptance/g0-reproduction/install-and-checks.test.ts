@@ -64,6 +64,30 @@ async function step(
   return result;
 }
 
+/** File paths named as failing in a tool log (paths only, relative to the copy). */
+function failingFiles(
+  kind: 'tsc' | 'eslint' | 'prettier' | 'vitest',
+  log: string,
+) {
+  const files = new Set<string>();
+  const rel = (f: string) =>
+    f.startsWith(COPY) ? f.slice(COPY.length + 1) : f.replace(/^\.\//, '');
+  for (const line of log.split('\n')) {
+    let m: RegExpExecArray | null;
+    if (kind === 'tsc') m = /^(\S+?)\(\d+,\d+\): error/.exec(line);
+    else if (kind === 'eslint') m = /^(\/\S+\.(?:ts|tsx|js|mjs))$/.exec(line);
+    else if (kind === 'prettier') m = /^\[warn\] (\S+)$/.exec(line);
+    else m = /^\s*FAIL\s+(\S+\.test\.ts)/.exec(line);
+    if (m) files.add(rel(m[1]));
+  }
+  return [...files].sort();
+}
+
+const readLog = (name: string) => {
+  const r = results.get(name);
+  return r && existsSync(r.logFile) ? readFileSync(r.logFile, 'utf8') : '';
+};
+
 const failureText = (name: string, r: RunResult) =>
   `${name} exit ${r.code}${r.timedOut ? ' (timed out)' : ''} after ${r.ms} ms; log ${path.relative(APP_ROOT, r.logFile)}; tail:\n${r.tail.slice(-1500)}`;
 
@@ -182,9 +206,43 @@ describe('G0.3 upstream verification commands on the clean install', () => {
   it('[G0.3] npm run check-format exits 0 (covers every changed file)', () =>
     gate('check-format', 'check-format', 300_000));
 
+  it('[G0.3] typecheck, lint and format failures are not in production or builder-owned files', () => {
+    // Attribution only: acceptance suites written concurrently by the
+    // verifier are excluded here, but they still fail the exit-code cases above.
+    const owned = (f: string) => !f.startsWith('tests/nemodots/acceptance/');
+    const offenders = [
+      ...failingFiles('tsc', readLog('typecheck'))
+        .filter(owned)
+        .map((f) => `tsc ${f}`),
+      ...failingFiles('eslint', readLog('lint'))
+        .filter(owned)
+        .map((f) => `eslint ${f}`),
+      ...failingFiles('prettier', readLog('check-format'))
+        .filter(owned)
+        .map((f) => `prettier ${f}`),
+    ];
+    expect(results.get('typecheck'), 'typecheck did not run').toBeDefined();
+    expect(
+      offenders,
+      `failing non-acceptance files: ${offenders.join(', ')}`,
+    ).toEqual([]);
+  });
+
+  it('[G0.3] unit test failures are named (and not caused by the checkout path length)', () => {
+    const files = failingFiles('vitest', readLog('test'));
+    const log = readLog('test');
+    const pathLength = /would exceed the 103-byte limit/.test(log);
+    expect(
+      files,
+      `failing test files: ${files.join(', ')}${pathLength ? ' (stack-cli.test.ts depends on the checkout path being <=60 bytes: a clone in a deeper directory cannot pass npm test)' : ''}`,
+    ).toEqual([]);
+  });
+
   it('[G0.3] build output exists: frontend bundle and compiled server', () => {
     expect(results.get('build')?.code, 'build did not succeed').toBe(0);
-    expect(existsSync(path.join(COPY, 'dist', 'index.html'))).toBe(true);
+    expect(existsSync(path.join(COPY, 'dist', 'client', 'index.html'))).toBe(
+      true,
+    );
     expect(
       existsSync(path.join(COPY, 'dist', 'server', 'server', 'index.js')),
     ).toBe(true);
@@ -221,7 +279,12 @@ describe('G0.3 upstream verification commands on the clean install', () => {
 
 describe('G0.6 built assets carry no secrets', () => {
   it('[G0.6] dist/ of the clean build has zero secret-value matches', () => {
-    expect(results.get('build')?.code, 'build did not succeed').toBe(0);
+    // `vite build` runs before `tsc`, so the bundle exists even when the
+    // server compile fails; scan it regardless and let the build case fail.
+    expect(
+      existsSync(path.join(COPY, 'dist', 'client', 'assets')),
+      'build produced no frontend bundle to scan',
+    ).toBe(true);
     const needles = collectNeedles(rolesFiles);
     expect(
       needles.length,
@@ -234,7 +297,7 @@ describe('G0.6 built assets carry no secrets', () => {
     expect(report.filesScanned).toBeGreaterThan(10);
     expect(summarize(report)).toBe('no matches');
     // Extra pins: the Crusoe key and the PG role URLs never reach the browser bundle.
-    const bundle = path.join(COPY, 'dist', 'assets');
+    const bundle = path.join(COPY, 'dist', 'client', 'assets');
     expect(existsSync(bundle) && statSync(bundle).isDirectory()).toBe(true);
     const assetReport = scan(needles, {
       roots: [bundle],

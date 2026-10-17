@@ -39,8 +39,10 @@ export interface InferenceClientOptions {
   apiKey: string;
   /** Per-model concurrent requests; NEMODOTS_INFERENCE_MAX_IN_FLIGHT. */
   maxInFlight?: number;
-  /** Bounds time to response headers and every gap between body chunks. */
+  /** Idle bound: time to response headers and every gap between body chunks. */
   timeoutMs?: number;
+  /** Overall per-attempt deadline (default 60 s), so keepalive comments or a token trickle cannot hold a slot forever. */
+  deadlineMs?: number;
   retry?: { baseMs?: number; capMs?: number; maxRetries?: number };
   /** Test seams. */
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
@@ -306,6 +308,7 @@ export class CrusoeInferenceClient implements InferenceAdapter {
   private readonly hostName: string;
   private readonly maxInFlight: number;
   private readonly timeoutMs: number;
+  private readonly deadlineMs: number;
   private readonly retry: { baseMs: number; capMs: number; maxRetries: number };
   private readonly sleep: (ms: number, signal: AbortSignal) => Promise<void>;
   private readonly random: () => number;
@@ -340,6 +343,7 @@ export class CrusoeInferenceClient implements InferenceAdapter {
     this.maxInFlight = options.maxInFlight ?? DEFAULT_MAX_IN_FLIGHT;
     new Semaphore(this.maxInFlight); // validates the limit
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.deadlineMs = options.deadlineMs ?? DEFAULT_TIMEOUT_MS;
     this.retry = {
       baseMs: options.retry?.baseMs ?? INFERENCE_RETRY.baseMs,
       capMs: options.retry?.capMs ?? INFERENCE_RETRY.capMs,
@@ -503,6 +507,7 @@ export class CrusoeInferenceClient implements InferenceAdapter {
 
     const controller = new AbortController();
     let timedOut = false;
+    let deadlineHit = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const arm = () => {
       clearTimeout(timer);
@@ -511,6 +516,11 @@ export class CrusoeInferenceClient implements InferenceAdapter {
         controller.abort();
       }, this.timeoutMs);
     };
+    const deadline = setTimeout(() => {
+      timedOut = true;
+      deadlineHit = true;
+      controller.abort();
+    }, this.deadlineMs);
     const onAbort = () => controller.abort();
     ctx.signal.addEventListener('abort', onAbort, { once: true });
     const accumulator = new Accumulator(() => this.iso(), ctx.onDelta);
@@ -575,12 +585,17 @@ export class CrusoeInferenceClient implements InferenceAdapter {
         return this.errored(attempt, error.failure);
       return this.errored(attempt, {
         class: timedOut ? 'timeout' : 'network',
-        code: timedOut ? 'client_timeout' : networkCode(error),
+        code: deadlineHit
+          ? 'client_deadline'
+          : timedOut
+            ? 'client_timeout'
+            : networkCode(error),
         errorId: null,
         retryAfterMs: null,
       });
     } finally {
       clearTimeout(timer);
+      clearTimeout(deadline);
       ctx.signal.removeEventListener('abort', onAbort);
       controller.abort(); // frees the socket if the body was not fully read
       release();

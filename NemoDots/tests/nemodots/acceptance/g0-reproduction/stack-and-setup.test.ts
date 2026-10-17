@@ -8,7 +8,7 @@
 // Everything this file starts (checkout 4600, app 4601, a stub provider on an
 // ephemeral port) is stopped in afterAll.
 import { createServer, type Server } from 'node:http';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, readdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { createClient } from 'redis';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -116,8 +116,9 @@ afterAll(async () => {
     /* redis already down: nothing of ours to clean */
   }
   await db?.drop().catch(() => undefined);
-  for (const f of ['app-blocked', 'app-fixture', 'app-partial', 'app-live'])
-    rmSync(path.join(SCRATCH, `${f}.sqlite`), { force: true });
+  for (const f of readdirSync(SCRATCH))
+    if (/^app-.*\.sqlite(-shm|-wal)?$/.test(f))
+      rmSync(path.join(SCRATCH, f), { force: true });
 }, 120_000);
 
 // ------------------------------------------------------------------ G0.4d

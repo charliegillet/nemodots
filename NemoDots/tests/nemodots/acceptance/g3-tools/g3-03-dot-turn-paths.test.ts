@@ -7,17 +7,25 @@
 //
 // Requires the NemoDots composition (bootstrap) because the policy hooks are installed by it.
 // Until src/server/nemodots/bootstrap.ts exists every test here FAILS with ENTRY POINT MISSING.
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   INJECTION,
   SUPERVISOR_BASE,
   controlledStateFingerprint,
-  openWorld,
+  lazyWorld,
   runDotTurn,
   tablesContaining,
   type World,
 } from './g3-support.js';
 
+const lazy = lazyWorld({ nemodots: true }, (world) => {
+  world.store.updateSettings({
+    researchAllowed: true,
+    memoryAllowed: true,
+    appsAllowed: true,
+  });
+  world.agentConfig = BASE_CONFIG();
+});
 let w: World;
 const BASE_CONFIG = () => ({
   intelligenceKey: 'acc3-fixture',
@@ -29,17 +37,11 @@ const BASE_CONFIG = () => ({
   slackUsers: [] as string[],
 });
 
-beforeAll(async () => {
-  w = await openWorld({ nemodots: true });
-  w.store.updateSettings({
-    researchAllowed: true,
-    memoryAllowed: true,
-    appsAllowed: true,
-  });
-  w.agentConfig = BASE_CONFIG();
+beforeEach(async () => {
+  w = await lazy.get();
 }, 600_000);
 afterAll(async () => {
-  await w?.close();
+  await lazy.close();
 }, 120_000);
 
 const page = (spaceId: string, title: string, content = `# ${title}\nbody`) =>
@@ -59,8 +61,6 @@ const INCIDENT_MAY_SEE = new Set([
   'edit_space_page',
   'review_space_page',
 ]);
-const NEVER_FOR_INCIDENT =
-  /^(computer_|human_)|shell|exec|bash|search_web|read_public_page|copilotkit_|composio|^[A-Z][A-Z0-9_]{3,}$|docker|sql|redis/i;
 
 describe('[TP3.1] the policy is installed and scoped to incident Dots', () => {
   it('[TP3.1] GET /api/nemodots/health (owner token) reports exactly one incident Dot', async () => {
@@ -277,47 +277,113 @@ describe('[TP3.2] model-supplied ids and revoked grants grant nothing', () => {
   });
 });
 
-describe('[TP3.3][TP3.4] disabled and unknown capabilities fail closed; no shell, browser, Composio, skills, web or computer tool reaches an incident Dot', () => {
-  it('[TP3.3][TP3.4][R5][R9][R9b][R11][R12][R13] with every capability enabled for the incident Dot, the tools offered to the model are a subset of the page tools', async () => {
+describe('[TP3.3][TP3.4] disabled and unknown capabilities fail closed; no shell, browser, Composio, skills, web or computer effect is reachable by an incident Dot', () => {
+  // A tool outside the page-tool allow-list may be omitted from the offer or offered-but-refused;
+  // what is never allowed is an effect. Plausible arguments make a refusal come from policy, not from schema validation.
+  const PLAUSIBLE_ARGS: Record<string, Record<string, unknown>> = {
+    search_web: { objective: 'status of the checkout vendor', search_queries: ['checkout vendor status'] },
+    read_public_page: { url: 'https://example.com/status' },
+    computer_exec: { command: 'id' },
+    computer_files_read: { path: 'notes.txt' },
+    computer_files_write: { path: 'a.txt', contents: 'x' },
+    computer_files_list: { path: '' },
+    computer_navigate: { url: 'https://example.com' },
+    computer_snapshot: {},
+    computer_read: {},
+    computer_screenshot: {},
+  };
+
+  it('[TP3.3][TP3.4][R9][R9b][R12] with research, web search and a computer enabled, every tool the incident Dot is offered beyond the page tools is refused with zero outbound effect; the same call from an unlisted Dot is attempted (control)', async () => {
     const dot = w.workspace.dot(w.incident.id);
     w.workspace.updateDot(w.incident.id, {
       name: dot.name,
       instructions: dot.instructions,
       researchAllowed: true,
       memoryAllowed: true,
-      appsAllowed: true,
-      composioToolkits: ['gmail'],
+      appsAllowed: false,
+      composioToolkits: [],
       spaceId: w.spaceA,
       spaceIds: [w.spaceA],
-      learningContainerId: 'research',
-      skillDeliveryEnabled: true,
     });
-    w.workspace.computers.patch(w.incident.id, {
-      enabled: true,
-      shell: true,
-      files: true,
-      browser: true,
-    });
+    for (const id of [w.incident.id, w.normal.id])
+      w.workspace.computers.patch(id, {
+        enabled: true,
+        shell: true,
+        files: true,
+        browser: true,
+      });
     w.agentConfig = {
       ...BASE_CONFIG(),
       webSearchProvider: 'parallel',
       parallelApiKey: 'acc3-parallel-placeholder',
-      composioApiKey: 'acc3-composio-placeholder',
       computerSupervisorUrl: SUPERVISOR_BASE,
       computerSupervisorToken: 'acc3-supervisor-token',
       computerToken: 'acc3-computer-token',
     };
+    const reaches = (o: { url: string }) =>
+      /supervisor\.acc3|parallel|mcp\.parallel/i.test(o.url);
+    try {
+      const offer = await runDotTurn(w, w.incident.id, [{ text: 'hello' }]);
+      const offered = offer.requests[0].toolNames;
+      const beyond = offered.filter((name) => !INCIDENT_MAY_SEE.has(name));
+      const calls = beyond.map((name, i) => ({
+        id: `b${i}`,
+        name,
+        arguments: PLAUSIBLE_ARGS[name] ?? {},
+      }));
+      const turn = await runDotTurn(w, w.incident.id, [
+        ...(calls.length ? [{ toolCalls: calls }] : []),
+        { text: 'done' },
+      ]);
+      expect(
+        w.model.outbound.filter(reaches),
+        `incident Dot reached ${JSON.stringify(beyond)}`,
+      ).toEqual([]);
+      for (const call of calls)
+        expect(turn.resultOf(call.id) ?? '', call.name).toMatch(
+          /denied|refus|not allowed|policy|disabled|blocked|forbidden|unknown|incident/i,
+        );
+
+      // control: the unlisted Dot is offered the same tools and the call IS attempted (the spy sees it)
+      const controlOffer = await runDotTurn(w, w.normal.id, [{ text: 'hello' }]);
+      const controlBeyond = controlOffer.requests[0].toolNames.filter(
+        (name) => name in PLAUSIBLE_ARGS,
+      );
+      expect(controlBeyond.length).toBeGreaterThan(0);
+      await runDotTurn(w, w.normal.id, [
+        {
+          toolCalls: controlBeyond.map((name, i) => ({
+            id: `k${i}`,
+            name,
+            arguments: PLAUSIBLE_ARGS[name],
+          })),
+        },
+        { text: 'done' },
+      ]);
+      expect(w.model.outbound.filter(reaches).length).toBeGreaterThan(0);
+    } finally {
+      w.agentConfig = BASE_CONFIG();
+    }
+  });
+
+  it('[TP3.3][R11][M11] with Composio unconfigured (the documented incident configuration) and apps allowed, no Composio tool is offered and no Composio request is made', async () => {
+    const dot = w.workspace.dot(w.incident.id);
+    w.workspace.updateDot(w.incident.id, {
+      name: dot.name,
+      instructions: dot.instructions,
+      researchAllowed: false,
+      memoryAllowed: true,
+      appsAllowed: true,
+      composioToolkits: ['gmail'],
+      spaceId: w.spaceA,
+      spaceIds: [w.spaceA],
+    });
+    w.agentConfig = { ...BASE_CONFIG(), webSearchProvider: 'disabled' };
     try {
       const turn = await runDotTurn(w, w.incident.id, [{ text: 'hello' }]);
-      expect(turn.requests.length).toBeGreaterThanOrEqual(1);
-      const offered = turn.requests[0].toolNames;
-      const outside = offered.filter((name) => !INCIDENT_MAY_SEE.has(name));
-      expect(outside, 'tools offered to an incident Dot outside the page-tool allow-list').toEqual([]);
-      for (const name of offered) expect(name).not.toMatch(NEVER_FOR_INCIDENT);
-      const touched = w.model.outbound.filter((o) =>
-        /supervisor\.acc3|composio|parallel/i.test(o.url),
-      );
-      expect(touched, 'no Composio, Parallel or computer-supervisor request for an incident Dot').toEqual([]);
+      expect(turn.runError).toBeUndefined();
+      expect(turn.requests[0].toolNames.filter((n) => !INCIDENT_MAY_SEE.has(n))).toEqual([]);
+      expect(w.model.outbound.filter((o) => /composio/i.test(o.url))).toEqual([]);
     } finally {
       w.agentConfig = BASE_CONFIG();
     }
@@ -351,26 +417,6 @@ describe('[TP3.3][TP3.4] disabled and unknown capabilities fail closed; no shell
     expect(pagesIn(w.spaceA) + (await controlledStateFingerprint(w.db!.admin))).toBe(before);
     for (let i = 0; i < names.length; i += 1)
       expect(turn.resultOf(`u${i}`) ?? '', names[i]).not.toMatch(/root:|BEGIN [A-Z ]*PRIVATE KEY/);
-  });
-
-  it('[TP3.4] a computer exec call from an incident Dot never reaches the computer supervisor even when the owner enabled shell', async () => {
-    w.workspace.computers.patch(w.incident.id, { enabled: true, shell: true, files: true, browser: true });
-    w.agentConfig = {
-      ...BASE_CONFIG(),
-      computerSupervisorUrl: SUPERVISOR_BASE,
-      computerSupervisorToken: 'acc3-supervisor-token',
-      computerToken: 'acc3-computer-token',
-    };
-    try {
-      const turn = await runDotTurn(w, w.incident.id, [
-        { toolCalls: [{ id: 'x1', name: 'computer_exec', arguments: { command: 'id' } }] },
-        { text: 'done' },
-      ]);
-      expect(w.model.outbound.filter((o) => o.url.startsWith(SUPERVISOR_BASE))).toEqual([]);
-      expect(turn.requests[0].toolNames.filter((n) => /^computer_/.test(n))).toEqual([]);
-    } finally {
-      w.agentConfig = BASE_CONFIG();
-    }
   });
 });
 

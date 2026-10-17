@@ -29,6 +29,8 @@ export interface TxCtx {
 const TERMINAL: readonly TaskStatus[] = ['succeeded', 'failed', 'cancelled'];
 
 export interface NewTask {
+  /** Pre-assigned id (plans reference tasks of the same plan before they exist). */
+  id?: string;
   missionId: MissionId;
   parentId: TaskId | null;
   depth: number;
@@ -53,7 +55,7 @@ export interface NewTask {
  * task.created. Promote it with promoteRunnable.
  */
 export async function insertTask(tx: TxCtx, task: NewTask): Promise<TaskRow> {
-  const id = randomUUID();
+  const id = task.id ?? randomUUID();
   const { rows } = await tx.client.query<TaskRow>(
     `INSERT INTO coordinator.tasks (
        id, mission_id, parent_id, depth, ordinal, title, question, role,
@@ -108,6 +110,8 @@ export interface TaskTransitionOptions {
   /** undefined = leave unchanged, null = clear */
   repair?: TaskRepair | null;
   bumpFence?: boolean;
+  /** Count this claim in attempt_count (claim only). */
+  chargeAttempt?: boolean;
   outputId?: string;
 }
 
@@ -136,6 +140,7 @@ export async function transitionTask(
     sets.push(`repair = $${values.length}::jsonb`);
   }
   if (options.bumpFence) sets.push('fence_seq = fence_seq + 1');
+  if (options.chargeAttempt) sets.push('attempt_count = attempt_count + 1');
   if (options.outputId) {
     values.push(options.outputId);
     sets.push(`output_id = $${values.length}`);

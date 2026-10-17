@@ -104,6 +104,8 @@ export interface SutOptions {
   providerBaseUrl?: string;
   /** Run the mission worker as a separate killable process (worker-crash trials). */
   separateWorker: boolean;
+  /** default live; deterministic adapter scenarios use blocked so no inference is spent */
+  inferenceMode?: 'live' | 'blocked';
 }
 
 export class Sut {
@@ -196,7 +198,7 @@ export class Sut {
       PORT: String(G6.appPort),
       OWNER_TOKEN: this.options.ownerToken,
       DATABASE_PATH: resolve(this.dir, 'opendots.sqlite'),
-      NEMODOTS_INFERENCE_MODE: 'live',
+      NEMODOTS_INFERENCE_MODE: this.options.inferenceMode ?? 'live',
       WEB_SEARCH_PROVIDER: 'disabled',
       ...(this.options.providerBaseUrl
         ? { OPENAI_BASE_URL: this.options.providerBaseUrl }

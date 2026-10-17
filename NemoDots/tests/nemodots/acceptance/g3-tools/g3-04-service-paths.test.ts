@@ -5,11 +5,11 @@
 // (owner semantics) and proves the harness would observe an effect (controls). It can pass today.
 // Part B runs WITH the composition and an incident Dot: every model-reachable path must refuse before the
 // effect (MCP handler / computer supervisor), regardless of tool names or readOnlyHint.
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   SUPERVISOR_BASE,
   mcpTransportFactory,
-  openWorld,
+  lazyWorld,
   runDotTurn,
   type McpCalls,
   type World,
@@ -53,13 +53,17 @@ const CALLS: [string, Record<string, unknown>, keyof McpCalls][] = [
   ['read_and_delete', { id: 'm1' }, 'readyDelete'],
 ];
 
+let connectionSeq = 0;
 function connectionWith(w: World, dotId: string, calls: McpCalls) {
   void calls;
-  return w.workspace.connections.create(
+  // one fresh connection (unique name) per test so tool names never collide across tests
+  connectionSeq += 1;
+  const created = w.workspace.connections.create(
     dotId,
-    { name: 'mail', url: MAIL_URL },
+    { name: `mail${connectionSeq}`, url: MAIL_URL },
     TOOLS,
   );
+  return created;
 }
 
 async function serviceFor(w: World) {
@@ -99,12 +103,13 @@ const auditOf = (w: World, dotId: string) =>
   w.workspace.computers.audit(dotId) as { action: string; actor: string; outcome: string }[];
 
 describe('Part A: upstream behaviour preserved, harness controls (no NemoDots composition)', () => {
+  const lazy = lazyWorld({ nemodots: false });
   let w: World;
-  beforeAll(async () => {
-    w = await openWorld({ nemodots: false });
+  beforeEach(async () => {
+    w = await lazy.get();
   }, 120_000);
   afterAll(async () => {
-    await w?.close();
+    await lazy.close();
   });
 
   it('[TP3.1][M8] control: an MCP direct call for an ordinary Dot reaches the server and returns its result', async () => {
@@ -128,7 +133,12 @@ describe('Part A: upstream behaviour preserved, harness controls (no NemoDots co
   it('[TP3.2][M8] a tool the owner disables is no longer resolvable (permission revocation)', async () => {
     const { service, calls } = await serviceFor(w);
     const connection = connectionWith(w, w.normal.id, calls);
-    const name = service.tools(w.normal.id).find((t: { tool: { name: string } }) => t.tool.name === 'send_mail')!.name;
+    const name = service
+      .tools(w.normal.id)
+      .find(
+        (t: { tool: { name: string }; connection: { id: string } }) =>
+          t.tool.name === 'send_mail' && t.connection.id === connection.id,
+      )!.name;
     expect(() => service.resolve(w.normal.id, name)).not.toThrow();
     service.setTool(connection.id, 'send_mail', { enabled: false });
     expect(() => service.resolve(w.normal.id, name)).toThrow();
@@ -178,12 +188,13 @@ describe('Part A: upstream behaviour preserved, harness controls (no NemoDots co
 });
 
 describe('Part B: incident Dot (policy installed by the NemoDots composition)', () => {
+  const lazy = lazyWorld({ nemodots: true });
   let w: World;
-  beforeAll(async () => {
-    w = await openWorld({ nemodots: true });
+  beforeEach(async () => {
+    w = await lazy.get();
   }, 600_000);
   afterAll(async () => {
-    await w?.close();
+    await lazy.close();
   }, 120_000);
 
   it.each(CALLS.map(([name, args, bucket]) => [name, args, bucket] as const))(

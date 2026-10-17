@@ -1,0 +1,40 @@
+{
+  "id": "stale_replica",
+  "version": 1,
+  "class": "repairable_checkout_fault",
+  "description": "Inventory reads are routed to a replica that stopped replicating (F4). Orders still succeed and /health stays ok, but stock is oversold.",
+  "steps": [
+    {
+      "kind": "set_config",
+      "key": "routing.inventory_source",
+      "value": "replica_stale",
+      "trigger": {
+        "type": "immediate"
+      }
+    }
+  ],
+  "oracle": {
+    "faultClass": "F4",
+    "expectation": "repair_required",
+    "symptoms": [
+      "checkout.inventory/<sku>: authority and API view disagree (consistent: false)",
+      "the acceptance probe fails inventory_view_consistent",
+      "oversold SKUs go negative in the authority"
+    ],
+    "acceptableRepairs": [
+      {
+        "action": "set_config",
+        "key": "routing.inventory_source",
+        "values": ["primary"]
+      }
+    ],
+    "mustNotChange": [
+      "cache.namespace",
+      "cache.schema_version",
+      "db.pool_max",
+      "db.statement_timeout_ms",
+      "orders.write_enabled",
+      "ui.banner_text"
+    ]
+  }
+}

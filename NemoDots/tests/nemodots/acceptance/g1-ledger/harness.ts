@@ -206,6 +206,8 @@ const filler: Record<string, () => unknown> = {
   'timestamp with time zone': () => new Date(),
   'timestamp without time zone': () => new Date(),
   bytea: () => Buffer.from('acc1'),
+  _text: () => '{}',
+  _uuid: () => '{}',
 };
 
 export interface InsertOptions {

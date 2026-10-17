@@ -4,9 +4,10 @@
 // other node by direct inserts into the coordinator/ledger tables resolved by
 // introspection (SCHEMA BINDING errors name any column that is missing).
 import { randomUUID } from 'node:crypto';
+import type pg from 'pg';
 import type { ClosureCase, GraphEdge, GraphNode, AffectedSets } from '../oracle/types.js';
 import { World, errorCode, type Env } from './driver.js';
-import { fillRow, insertRow, insertValues } from './harness.js';
+import { entry, fillRow, insertRow, insertValues } from './harness.js';
 
 export const T = {
   missions: 'coordinator.missions',
@@ -183,37 +184,37 @@ export async function seedGraph(
     ids.set(n.id, id);
   }
 
-  const kindOf = new Map(nodes.map((n) => [n.id, n]));
-  for (const e of edges) {
-    await addEdgeRow(w, e, ids, kindOf, missions);
-  }
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const ref = (id: string) => {
+    const n = byId.get(id)!;
+    const real = ids.get(id)!;
+    if (n.kind === 'receipt') return { kind: 'receipt', id: real };
+    return {
+      kind: n.kind,
+      id: real,
+      missionId: missions.get(n.missionId),
+      taskId: n.kind === 'task' ? real : (n.taskId ? ids.get(n.taskId) : null),
+    };
+  };
+  const { addEdges, ensureNode } = await edgeApi();
+  await w.inTx(async (client) => {
+    for (const n of rows) if (n.kind !== 'receipt') await ensureNode(client, ref(n.id));
+  });
+  for (const e of edges) await w.inTx((client) => addEdges(client, [{ kind: e.kind, from: ref(e.from), to: ref(e.to) }]));
   const reverse = new Map<string, string>();
   for (const [oracle, real] of ids) if (!reverse.has(real)) reverse.set(real, oracle);
   return { ids, missions, reverse };
 }
 
-async function addEdgeRow(
-  w: World,
-  e: GraphEdge,
-  ids: Map<string, string>,
-  nodes: Map<string, GraphNode>,
-  missions: Map<string, string>,
-) {
-  const from = nodes.get(e.from)!;
-  const to = nodes.get(e.to)!;
-  const mission = missions.get(to.missionId !== 'shared' ? to.missionId : from.missionId);
-  await insertRow(
-    w.admin, w.schema, T.edges,
-    await mapped(w, T.edges, [
-      [['mission_id'], mission, true],
-      [['kind', 'edge_kind'], e.kind, true],
-      [['from_kind'], from.kind, true],
-      [['from_id'], ids.get(e.from), true],
-      [['to_kind'], to.kind, true],
-      [['to_id'], ids.get(e.to), true],
-    ]),
-    { parents: { [T.missions]: mission } },
-  );
+type EdgeApi = {
+  addEdges: (client: pg.PoolClient, edges: unknown[]) => Promise<unknown>;
+  ensureNode: (client: pg.PoolClient, node: unknown) => Promise<unknown>;
+};
+/** BIND: ledger/edges.ts#addEdges(client in txn, [{kind, from: NodeRef, to: NodeRef}]) and #ensureNode(client, NodeRef). */
+export async function edgeApi(): Promise<EdgeApi> {
+  const addEdges = await entry<EdgeApi['addEdges']>('ledger/edges.ts', ['addEdges']);
+  const ensureNode = await entry<EdgeApi['ensureNode']>('ledger/edges.ts', ['ensureNode']);
+  return { addEdges, ensureNode };
 }
 
 /** Moves the controlled authority for one change (no-op for observed sources). */

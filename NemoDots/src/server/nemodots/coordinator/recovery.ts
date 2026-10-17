@@ -417,3 +417,605 @@ export async function scheduleReplan(
   return true;
 }
 
+
+/**
+ * The open (non-terminal) postcondition task of the mission, or a new one.
+ * System-created after a verified self-write; at most one is open per mission.
+ */
+export async function ensurePostconditionTask(
+  tx: TxCtx,
+  deps: Pick<RecoveryDeps, 'config'>,
+  mission: MissionRow,
+  key: string,
+  sourceKey: string,
+): Promise<{ task: TaskRow; created: boolean }> {
+  const open = (
+    await tx.client.query<TaskRow>(
+      `SELECT * FROM coordinator.tasks
+        WHERE mission_id = $1 AND role = 'postcondition'
+          AND status NOT IN ('succeeded', 'failed', 'cancelled')
+        ORDER BY ordinal LIMIT 1 FOR UPDATE`,
+      [mission.id],
+    )
+  ).rows[0];
+  if (open) return { task: open, created: false };
+  const done = (
+    await tx.client.query<TaskRow>(
+      `SELECT * FROM coordinator.tasks WHERE mission_id = $1 AND dedupe_key = $2`,
+      [mission.id, key],
+    )
+  ).rows[0];
+  if (done) return { task: done, created: false };
+  const defaults = deps.config.taskDefaults;
+  const inserted = await insertTask(tx, {
+    missionId: mission.id as MissionId,
+    parentId: null,
+    depth: 0,
+    title: 'Verify state after a verified change',
+    question: `A controlled change to ${sourceKey} was applied and verified. Observe the current state of the sources it affects and report what you observe.`,
+    role: 'postcondition',
+    capabilities: ['observe', 'publish_finding'],
+    prerequisites: [],
+    generation: mission.generation,
+    budget: {
+      maxIterations: defaults.maxIterations,
+      maxTokens: defaults.maxTokens,
+      maxChildren: 0,
+    },
+    maxAttempts: defaults.maxAttempts,
+    createdByModelCallId: null,
+    justification: null,
+    repair: {
+      kind: 'postcondition',
+      repairOf: null,
+      reason: `verified self-write on ${sourceKey}`,
+    },
+    dedupeKey: key,
+  });
+  await promoteRunnable(tx, mission.id);
+  const task = (
+    await tx.client.query<TaskRow>(
+      `SELECT * FROM coordinator.tasks WHERE id = $1`,
+      [inserted.id],
+    )
+  ).rows[0];
+  return { task, created: true };
+}
+
+/**
+ * Releases repairs that were coalesced behind a postcondition task once that
+ * task is terminal: invalidated -> repairing -> runnable.
+ */
+export async function releaseGate(
+  tx: TxCtx,
+  missionId: MissionId | string,
+  gateTaskId: string,
+): Promise<number> {
+  const held = (
+    await tx.client.query<TaskRow>(
+      `SELECT t.* FROM coordinator.tasks t
+        WHERE t.mission_id = $1 AND t.status = 'invalidated' AND t.repair IS NOT NULL
+          AND (t.repair -> 'repairOf' ->> 'invalidationEventId') IN (
+            SELECT event_id FROM coordinator.invalidations
+             WHERE mission_id = $1 AND gate_task_id = $2)
+        ORDER BY t.id FOR UPDATE`,
+      [missionId, gateTaskId],
+    )
+  ).rows;
+  for (const task of held) {
+    await requeueTask(tx, task, { reason: 'postcondition_verified' });
+    await recordRecovery(tx, {
+      invalidationEventId: task.repair!.repairOf!.invalidationEventId,
+      missionId: missionId as string,
+      kind: 'repair_scheduled',
+      taskId: task.id,
+      attemptId: task.repair!.repairOf!.attemptId,
+      detail: 'repair released after postcondition verification',
+    });
+  }
+  if (held.length > 0) await enqueueMissionEvaluate(tx.client, missionId);
+  return held.length;
+}
+
+const ACTIVE_FOR_REPAIR = new Set(['leased', 'running', 'waiting', 'succeeded', 'invalidated']);
+
+/** The recovery transaction body for one mission's copy of an event. */
+export async function processInvalidation(
+  tx: TxCtx,
+  deps: Pick<RecoveryDeps, 'config' | 'intents'>,
+  options: RecoveryOptions,
+  mission: MissionRow,
+  row: InvalidationRow,
+): Promise<void> {
+  const missionId = mission.id as MissionId;
+  const event = row.event as StoredEvent;
+  const eventId = row.event_id;
+  const affected = event.affected;
+  const entry = event.perMission[0];
+
+  if (['cancelled', 'failed', 'succeeded'].includes(mission.status)) {
+    await tx.client.query(
+      `UPDATE coordinator.invalidations
+          SET processed_at = COALESCE(processed_at, now()), resolved_at = COALESCE(resolved_at, now())
+        WHERE event_id = $1 AND mission_id = $2`,
+      [eventId, missionId],
+    );
+    return;
+  }
+
+  // 1. Status first: abort affected attempts that are still running.
+  const listed = await lockAttempts(tx.client, affected.attemptIds, missionId);
+  const taskIds = [
+    ...new Set([...affected.taskIds, ...listed.map((attempt) => attempt.task_id)]),
+  ];
+  const extra = taskIds.length
+    ? (
+        await tx.client.query<AttemptRow>(
+          `SELECT * FROM coordinator.task_attempts
+            WHERE task_id = ANY ($1::uuid[]) AND status = 'running'
+              AND NOT (id = ANY ($2::uuid[]))
+            ORDER BY id FOR UPDATE`,
+          [taskIds, listed.map((attempt) => attempt.id)],
+        )
+      ).rows
+    : [];
+  const touchedAttempts = [...listed, ...extra];
+  for (const attempt of touchedAttempts) {
+    if (attempt.status !== 'running') continue;
+    await finishAttempt(tx, attempt, 'aborted', {
+      abortReason: 'readset_invalidated',
+    });
+    await recordRecovery(tx, {
+      invalidationEventId: eventId,
+      missionId,
+      kind: 'attempt_aborted',
+      taskId: attempt.task_id,
+      attemptId: attempt.id,
+      detail: `readset invalidated: ${event.sourceKey} (${event.reason})`,
+    });
+  }
+
+  // 2. Affected outputs and findings are no longer usable.
+  const reason = `invalidated:${eventId.slice(0, 16)}`;
+  await tx.client.query(
+    `UPDATE coordinator.task_outputs SET usable = false, unusable_reason = $4
+      WHERE mission_id = $1 AND usable
+        AND (id = ANY ($2::uuid[]) OR task_id = ANY ($3::uuid[]))`,
+    [missionId, affected.outputIds, taskIds, reason],
+  );
+  await tx.client.query(
+    `UPDATE coordinator.findings SET usable = false
+      WHERE mission_id = $1 AND usable
+        AND (attempt_id = ANY ($2::uuid[]) OR task_id = ANY ($3::uuid[]))`,
+    [missionId, touchedAttempts.map((attempt) => attempt.id), taskIds],
+  );
+
+  // 3. Repairs.
+  const tasks = await lockTasks(tx.client, taskIds);
+  const latest = new Map<string, string>(
+    taskIds.length
+      ? (
+          await tx.client.query<{ task_id: string; id: string }>(
+            `SELECT DISTINCT ON (task_id) task_id, id FROM coordinator.task_attempts
+              WHERE task_id = ANY ($1::uuid[]) ORDER BY task_id, n DESC`,
+            [taskIds],
+          )
+        ).rows.map((item) => [item.task_id, item.id] as [string, string])
+      : [],
+  );
+  const eligible = tasks.filter(
+    (task) =>
+      latest.has(task.id) &&
+      (ACTIVE_FOR_REPAIR.has(task.status) ||
+        task.status === 'runnable' ||
+        task.status === 'repairing'),
+  );
+
+  let gate: TaskRow | null = null;
+  const needsGate =
+    event.selfWrite === 'verified' &&
+    eligible.some((task) => task.role !== 'postcondition');
+  if (needsGate) {
+    const ensured = await ensurePostconditionTask(
+      tx,
+      deps,
+      mission,
+      `invalidation:${eventId}`,
+      event.sourceKey,
+    );
+    gate = ensured.task;
+    await tx.client.query(
+      `UPDATE coordinator.invalidations SET gate_task_id = $3
+        WHERE event_id = $1 AND mission_id = $2`,
+      [eventId, missionId, gate.id],
+    );
+    if (ensured.created)
+      await recordRecovery(tx, {
+        invalidationEventId: eventId,
+        missionId,
+        kind: 'postcondition_scheduled',
+        taskId: gate.id,
+        detail: `verified self-write on ${event.sourceKey}`,
+      });
+  }
+
+  let scheduledAny = false;
+  for (const task of eligible) {
+    if (gate && task.id === gate.id) continue;
+    const attemptId = latest.get(task.id)!;
+    let held = false;
+    const spec: TaskRepair = {
+      kind: task.role === 'planner' ? 'replan' : 'repair',
+      repairOf: { attemptId, invalidationEventId: eventId },
+      reason: `evidence ${event.sourceKey} changed (${event.reason})`,
+    };
+    if (task.status === 'runnable' || task.status === 'repairing') {
+      if (task.repair) {
+        await recordRecovery(tx, {
+          invalidationEventId: eventId,
+          missionId,
+          kind: 'repair_coalesced',
+          taskId: task.id,
+          attemptId,
+          detail: 'a repair attempt is already scheduled for this task',
+        });
+        continue;
+      }
+      await tx.client.query(
+        `UPDATE coordinator.tasks SET repair = $2::jsonb WHERE id = $1`,
+        [task.id, JSON.stringify(spec)],
+      );
+    } else {
+      held = gate !== null && task.role !== 'postcondition';
+      await requeueTask(tx, task, {
+        reason: spec.reason,
+        repair: spec,
+        holdInvalidated: held,
+      });
+    }
+    scheduledAny = true;
+    await recordRecovery(tx, {
+      invalidationEventId: eventId,
+      missionId,
+      kind: held ? 'repair_coalesced' : 'repair_scheduled',
+      taskId: task.id,
+      attemptId,
+      detail: held
+        ? `repair held behind postcondition task ${gate!.id}`
+        : spec.reason,
+    });
+  }
+
+  // 4. A root task invalidation re-invokes the planner (bounded).
+  const rootAffected = eligible.some(
+    (task) =>
+      task.parent_id === null &&
+      task.role !== 'planner' &&
+      task.role !== 'postcondition',
+  );
+  if (
+    rootAffected &&
+    options.replanOnRootInvalidation !== false &&
+    event.reason !== 'publication_rejected'
+  ) {
+    if (
+      await scheduleReplan(
+        tx,
+        deps,
+        mission,
+        eventId,
+        `root task invalidated by ${event.sourceKey}`,
+      )
+    )
+      scheduledAny = true;
+  }
+
+  // 5. Branches that are not affected keep running untouched.
+  for (const taskId of entry.preserved.taskIds)
+    await recordRecovery(tx, {
+      invalidationEventId: eventId,
+      missionId,
+      kind: 'branch_preserved',
+      taskId,
+      detail: `no evidence path from ${event.sourceKey}`,
+    });
+
+  // 6. Intents the actions package already closed for this invalidation.
+  await recordClosedIntents(tx, deps, missionId, eventId, affected.actionIds);
+
+  await tx.client.query(
+    `UPDATE coordinator.invalidations SET processed_at = now()
+      WHERE event_id = $1 AND mission_id = $2 AND processed_at IS NULL`,
+    [eventId, missionId],
+  );
+  if (scheduledAny) await enqueueMissionEvaluate(tx.client, missionId);
+  await resolveClosedInvalidations(tx, deps, missionId);
+}
+
+async function recordClosedIntents(
+  tx: TxCtx,
+  deps: Pick<RecoveryDeps, 'intents'>,
+  missionId: string,
+  eventId: string,
+  actionIds: readonly string[],
+) {
+  if (actionIds.length === 0) return;
+  for (const intent of await deps.intents.statuses(tx.client, actionIds))
+    if (intent.status === 'blocked')
+      await recordRecovery(tx, {
+        invalidationEventId: eventId,
+        missionId,
+        kind: 'intent_blocked',
+        actionId: intent.id,
+        detail: 'intent blocked after its evidence was invalidated',
+      });
+}
+
+/**
+ * Publication rejected by the SupportValidator (finding C13): the attempt is
+ * `invalidated` (not failed) with abortReason publication_rejected, a synthetic
+ * InvalidationEvent (reason publication_rejected) is written and a repair is
+ * scheduled so the next attempt re-reads instead of blindly retrying. Runs in
+ * its own transaction after the rejected publication rolled back.
+ */
+export async function recordPublicationRejection(
+  tx: TxCtx,
+  deps: Pick<RecoveryDeps, 'config' | 'intents'>,
+  options: RecoveryOptions,
+  fenced: { mission: MissionRow; attempt: AttemptRow; task: TaskRow },
+  vector: DependencyVector,
+  error: SupportErrorShape,
+  now: Date,
+): Promise<void> {
+  const entry =
+    vector.find((item) => item.receiptId === error.receiptId) ?? vector[0];
+  if (!entry)
+    throw new Error('a publication without receipts cannot be support-rejected');
+  const missionId = fenced.mission.id as MissionId;
+  await finishAttempt(tx, fenced.attempt, 'invalidated', {
+    abortReason: 'publication_rejected',
+    failureReason: error.reason,
+  });
+  const affected: Affected = {
+    modelCallIds: [],
+    attemptIds: [fenced.attempt.id as AttemptId],
+    outputIds: [],
+    actionIds: [],
+    taskIds: [fenced.task.id as TaskId],
+  };
+  const id = invalidationEventId(
+    entry.sourceKey as SourceKey,
+    entry.receiptId as ReceiptId,
+    null,
+    'publication_rejected',
+  );
+  const event: StoredEvent = {
+    id,
+    missionIds: [missionId],
+    sourceKey: entry.sourceKey,
+    oldReceiptId: entry.receiptId,
+    newReceiptId: null,
+    reason: 'publication_rejected',
+    selfWrite: 'none',
+    graphVersion: 0,
+    affected,
+    perMission: [{ missionId, affected, preserved: { taskIds: [] } }],
+    closure: { depth: 0, nodes: 1, capped: false },
+    resolvedAt: null,
+    createdAt: iso(now),
+  };
+  const row = await upsertInvalidation(tx, missionId, event);
+  tx.events.add(missionId, {
+    kind: 'invalidation.recorded',
+    invalidationEventId: id,
+    sourceKey: entry.sourceKey,
+    oldReceiptId: entry.receiptId,
+    newReceiptId: null,
+    reason: 'publication_rejected',
+    selfWrite: 'none',
+    affected,
+    preserved: { taskIds: [] },
+    closure: event.closure,
+  });
+  await processInvalidation(tx, deps, options, fenced.mission, row);
+}
+
+// ------------------------------------------------------------------ factory
+
+export interface Recovery extends RecoveryPort {
+  /** Process invalidations that were recorded but not yet processed, then re-evaluate open ones. */
+  sweep(): Promise<number>;
+  /** Re-evaluate one mission's open invalidations (an intent settled, a repair published). */
+  reevaluate(missionId: MissionId): Promise<string[]>;
+  /** Event ids of invalidations that are still open for the mission (D9). */
+  openInvalidations(
+    client: pg.PoolClient,
+    missionId: MissionId | string,
+  ): Promise<string[]>;
+}
+
+export class IntentNotFoundError extends Error {
+  constructor(readonly actionId: string) {
+    super(`action intent ${actionId} is not known to the coordinator`);
+    this.name = 'IntentNotFoundError';
+  }
+}
+
+export function createRecovery(
+  deps: RecoveryDeps,
+  options: RecoveryOptions = {},
+): Recovery {
+  const txCtx = (client: pg.PoolClient): TxCtx => ({
+    client,
+    events: new EventBuffer(deps.events),
+  });
+
+  async function lockMissionShared(client: pg.PoolClient, missionId: string) {
+    const { rows } = await client.query<MissionRow>(
+      `SELECT * FROM coordinator.missions WHERE id = $1 FOR SHARE`,
+      [missionId],
+    );
+    return rows[0] ?? null;
+  }
+
+  async function processOne(missionId: string, eventId: string) {
+    await withTransaction(deps.pool, async (client) => {
+      const tx = txCtx(client);
+      const mission = await lockMissionShared(client, missionId);
+      if (!mission) return;
+      const row = (
+        await client.query<InvalidationRow>(
+          `SELECT * FROM coordinator.invalidations
+            WHERE event_id = $1 AND mission_id = $2 FOR UPDATE`,
+          [eventId, missionId],
+        )
+      ).rows[0];
+      if (!row || row.processed_at !== null) return;
+      await processInvalidation(tx, deps, options, mission, row);
+      await tx.events.flush(client);
+    });
+  }
+
+  async function onInvalidation(event: InvalidationEvent) {
+    // Phase 1: make the intent durable (also wakes the sweeper via NOTIFY).
+    const missions: string[] = [];
+    for (const entry of event.perMission) {
+      const scoped = scopeInvalidationEvent(event, entry.missionId);
+      if (!scoped) continue;
+      const known = await withTransaction(deps.pool, async (client) => {
+        const tx = txCtx(client);
+        const mission = await lockMissionShared(client, entry.missionId);
+        if (!mission) return false;
+        await upsertInvalidation(tx, entry.missionId, scoped);
+        await tx.events.flush(client);
+        return true;
+      });
+      if (known) missions.push(entry.missionId);
+    }
+    // Phase 2: act on it. A crash between the phases is repaired by sweep().
+    for (const missionId of missions) await processOne(missionId, event.id);
+  }
+
+  async function reevaluate(missionId: MissionId) {
+    return withTransaction(deps.pool, async (client) => {
+      const tx = txCtx(client);
+      const mission = await lockMissionShared(client, missionId);
+      if (!mission) return [];
+      const rows = (
+        await client.query<InvalidationRow>(
+          `SELECT * FROM coordinator.invalidations
+            WHERE mission_id = $1 AND resolved_at IS NULL AND processed_at IS NOT NULL
+            ORDER BY created_at, event_id FOR UPDATE`,
+          [missionId],
+        )
+      ).rows;
+      for (const row of rows)
+        await recordClosedIntents(
+          tx,
+          deps,
+          missionId,
+          row.event_id,
+          row.event.affected.actionIds,
+        );
+      const resolved = await resolveClosedInvalidations(tx, deps, missionId);
+      if (resolved.length > 0) await enqueueMissionEvaluate(client, missionId);
+      await tx.events.flush(client);
+      return resolved;
+    });
+  }
+
+  async function sweep() {
+    const pending = await deps.pool.query<{ event_id: string; mission_id: string }>(
+      `SELECT event_id, mission_id FROM coordinator.invalidations
+        WHERE processed_at IS NULL ORDER BY created_at LIMIT 50`,
+    );
+    for (const item of pending.rows)
+      await processOne(item.mission_id, item.event_id);
+    const unresolved = await deps.pool.query<{ mission_id: string }>(
+      `SELECT DISTINCT mission_id FROM coordinator.invalidations
+        WHERE processed_at IS NOT NULL AND resolved_at IS NULL`,
+    );
+    for (const item of unresolved.rows)
+      await reevaluate(item.mission_id as MissionId);
+    return pending.rows.length;
+  }
+
+  async function onSelfWriteSettled(
+    actionId: ActionId,
+    outcome: 'verified' | 'failed',
+  ) {
+    const intent = await deps.intents.find(deps.pool, actionId);
+    if (!intent) throw new IntentNotFoundError(actionId);
+    const marker = digest([`self-write-${outcome}-v1`, actionId]);
+    await withTransaction(deps.pool, async (client) => {
+      const tx = txCtx(client);
+      const mission = await lockMissionShared(client, intent.missionId);
+      if (!mission || isTerminalMission(mission.status)) return;
+      if (outcome === 'verified') {
+        // The acting lineage keeps its output. A postcondition attempt with
+        // fresh scoped reads verifies the changed source (one per mission at a
+        // time); other branches' repairs are coalesced behind it.
+        const ensured = await ensurePostconditionTask(
+          tx,
+          deps,
+          mission,
+          `action:${actionId}`,
+          'the changed source',
+        );
+        if (ensured.created) {
+          await recordRecovery(tx, {
+            invalidationEventId: marker,
+            missionId: mission.id,
+            kind: 'postcondition_scheduled',
+            taskId: ensured.task.id,
+            actionId,
+            detail: 'verified self-write: postcondition attempt scheduled',
+          });
+          await enqueueMissionEvaluate(client, mission.id);
+        }
+      } else {
+        // postcondition_mismatch: the proposing task's output rests on a change
+        // that did not take effect as expected; repair it unless the closure
+        // already did.
+        const task = (await lockTasks(client, [intent.taskId]))[0];
+        if (task && task.status === 'succeeded') {
+          const attemptId = intent.attemptId;
+          const spec: TaskRepair = {
+            kind: 'repair',
+            repairOf: { attemptId, invalidationEventId: marker },
+            reason: 'self-write postcondition failed',
+          };
+          await requeueTask(tx, task, { reason: spec.reason, repair: spec });
+          await recordRecovery(tx, {
+            invalidationEventId: marker,
+            missionId: mission.id,
+            kind: 'repair_scheduled',
+            taskId: task.id,
+            attemptId,
+            actionId,
+            detail: spec.reason,
+          });
+          await enqueueMissionEvaluate(client, mission.id);
+        }
+      }
+      await tx.events.flush(client);
+    });
+  }
+
+  return {
+    onInvalidation,
+    onSelfWriteSettled,
+    sweep,
+    reevaluate,
+    async openInvalidations(client, missionId) {
+      const evaluation = await evaluateOpen(client, deps, missionId);
+      return evaluation.open.map((item) => item.row.event_id);
+    },
+  };
+}
+
+const isTerminalMission = (status: string) =>
+  status === 'succeeded' || status === 'failed' || status === 'cancelled';
+
+// Re-exported for publish/leases (terminal task check).
+export { isTerminalTask, transitionTask };

@@ -105,8 +105,44 @@ export interface Check {
 }
 
 const checks: Check[] = [];
+let currentTest: Check[] = [];
+let failedTests = 0;
+
+/** Checks are provisional until their whole test (including every assertion after the call) has finished. */
 export function record(check: Check) {
   checks.push(check);
+  currentTest.push(check);
+}
+
+export function beginTest() {
+  currentTest = [];
+}
+
+/** Called from afterEach with the test's final state; a failed test can never leave a PASS check behind. */
+export function endTest(testName: string, state: string | undefined) {
+  if (state === 'fail') {
+    failedTests += 1;
+    if (currentTest.length === 0)
+      checks.push({ name: testName, status: 'FAIL', note: 'test failed' });
+    for (const check of currentTest) {
+      check.status = 'FAIL';
+      check.note ??=
+        'test failed after the call returned (assertion or timeout)';
+    }
+  } else if (state !== 'pass') {
+    // skipped, interrupted or never finished: not a pass
+    failedTests += 1;
+    checks.push({
+      name: testName,
+      status: 'FAIL',
+      note: `test ended in state ${state ?? 'unknown'}`,
+    });
+  }
+  currentTest = [];
+}
+
+export function suiteFailed() {
+  return failedTests > 0 || checks.some((c) => c.status === 'FAIL');
 }
 
 /** Digest and size of model text, never the text. */

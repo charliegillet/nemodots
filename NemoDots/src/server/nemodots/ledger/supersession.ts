@@ -456,7 +456,7 @@ export async function supersedeAndInvalidate(
     selfWrite: receipt.provenance.selfWrite,
     graphVersion: closure.graphVersion,
     affected: closure.affected,
-    perMission: closure.perMission,
+    perMission: closure.perMission as unknown as InvalidationEvent['perMission'],
     closure: { depth: closure.depth, nodes: closure.nodes, capped: false },
   });
   return { receipt, supersededReceiptId: prior.id, event, marks };
@@ -571,7 +571,7 @@ export async function invalidateRetired(
     selfWrite: 'none',
     graphVersion: closure.graphVersion,
     affected: closure.affected,
-    perMission: closure.perMission,
+    perMission: closure.perMission as unknown as InvalidationEvent['perMission'],
     closure: { depth: closure.depth, nodes: closure.nodes, capped: false },
   });
   return { event, marks };

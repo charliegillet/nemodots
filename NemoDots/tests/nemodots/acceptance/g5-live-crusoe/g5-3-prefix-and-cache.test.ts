@@ -272,15 +272,35 @@ describe('G5.6b the wire carries what the snapshot claims (live, through the ada
           ],
         }),
       );
+      // Wire identity is checked with the full tool set. The model may
+      // answer or reach for a tool; either is a real completion here.
       const ra = await viaProxy.complete(toRequest(a), ctx('worker'));
       const rb = await viaProxy.complete(toRequest(b), ctx('worker'));
-      expect(ra.outcome).toBe('completed');
-      expect(rb.outcome).toBe('completed');
-      expect(ra.content).toContain('zebra');
-      expect(rb.content).toContain('walrus');
-      expect(rb.content).not.toContain('zebra');
+      expect(['completed', 'tool_calls']).toContain(ra.outcome);
+      expect(['completed', 'tool_calls']).toContain(rb.outcome);
+      // Evidence use is checked with the same system text and no tools, so the
+      // model must answer in text: the changed evidence is what it quotes.
+      const ta = await viaProxy.complete(
+        toRequest(a, { tools: [], toolSchemaHash: null }),
+        ctx('worker'),
+      );
+      const tb = await viaProxy.complete(
+        toRequest(b, { tools: [], toolSchemaHash: null }),
+        ctx('worker'),
+      );
+      expect(ta.outcome).toBe('completed');
+      expect(tb.outcome).toBe('completed');
+      expect(ta.content).toContain('zebra');
+      expect(tb.content).toContain('walrus');
+      expect(tb.content).not.toContain('zebra');
 
-      const [wa, wb] = proxy.seen.map(
+      const wires = proxy.seen.filter((x) =>
+        x.url.endsWith('/chat/completions'),
+      );
+      const idxB = wires.findIndex((x) =>
+        JSON.stringify(x.body).includes('walrus'),
+      );
+      const [wa, wb] = [wires[0], wires[idxB]].map(
         (s) =>
           s.body as {
             tools: unknown[];
@@ -323,7 +343,7 @@ describe('G5.6c cached-token honesty: null = unavailable, 0 only if the provider
       for (let i = 0; i < 2; i++) {
         raw = undefined;
         const r = await viaProxy.complete(toRequest(c), ctx('worker'));
-        expect(r.outcome).toBe('completed');
+        expect(['completed', 'tool_calls']).toContain(r.outcome);
         const details = (
           raw as
             | { prompt_tokens_details?: { cached_tokens?: unknown } | null }
@@ -415,6 +435,7 @@ describe('G5.6c cached-token honesty: null = unavailable, 0 only if the provider
             ctx('worker'),
           );
           expect(r.outcome).toBe('completed');
+          if (r.usage.cachedTokens !== expected) console.log('DBG', JSON.stringify({a: r.attempts.map(x=>({s:x.httpStatus,u:x.usage})), u:r.usage}));
           expect(r.usage.cachedTokens).toBe(expected);
           expect(r.attempts[0].usage.cachedTokens).toBe(expected);
           // the other counters are unaffected and still numeric

@@ -10,6 +10,8 @@ import {
   type LiveEnv,
 } from './support.js';
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { INFERENCE_RETRY } from '../../../../src/server/nemodots/contracts/index.js';
+
 import { join } from 'node:path';
 
 // Opt-in (NEMODOTS_LIVE_BURST=1): 6 concurrent small requests on Lightning,
@@ -21,6 +23,9 @@ import { join } from 'node:path';
 const enabled = process.env.NEMODOTS_LIVE_BURST === '1';
 let env: LiveEnv;
 
+// A NOT_RUN note goes to its own file so it can never overwrite a real burst
+// result; real results are kept per run (timestamped) and the newest is also
+// copied to inference-burst.json.
 if (!enabled) {
   const message =
     'NOT_RUN: NEMODOTS_LIVE_BURST=1 not set (429 burst test is opt-in)';
@@ -28,10 +33,13 @@ if (!enabled) {
   const dir = resultsDir();
   mkdirSync(dir, { recursive: true });
   writeFileSync(
-    join(dir, 'inference-burst.json'),
+    join(dir, 'inference-burst.notrun.json'),
     `${JSON.stringify({ suite: 'inference-live-burst', status: 'NOT_RUN', reason: message, at: new Date().toISOString() }, null, 2)}\n`,
   );
 }
+
+const MAX_RETRIES = INFERENCE_RETRY.maxRetries;
+const RETRYABLE = new Set(['rate_limited', 'provider_unavailable']);
 
 describe.skipIf(!enabled)('Crusoe live burst (429 path)', () => {
   beforeAll(() => {
@@ -71,16 +79,29 @@ describe.skipIf(!enabled)('Crusoe live burst (429 path)', () => {
     console.log(
       `burst: ${report} (${rateLimited.length} rate-limited attempts)`,
     );
+    // A failed request is acceptable only after exhausting retries on a
+    // retryable class; any other failure (provider_error, invalid_*) fails.
+    const unacceptable = results.filter(
+      (r) =>
+        r.outcome !== 'completed' &&
+        !(
+          r.outcome === 'failed' &&
+          r.attempts.length >= 1 + MAX_RETRIES &&
+          RETRYABLE.has(r.attempts.at(-1)?.error?.class ?? '')
+        ),
+    );
+    const status = unacceptable.length === 0 ? 'PASS' : 'FAIL';
     const dir = resultsDir();
     mkdirSync(dir, { recursive: true });
+    const at = new Date().toISOString();
+    const text = `${JSON.stringify({ suite: 'inference-live-burst', status, report, observed, unacceptableOutcomes: unacceptable.map((r) => ({ outcome: r.outcome, error: r.attempts.at(-1)?.error ?? null, attempts: r.attempts.length })), at }, null, 2)}\n`;
     writeFileSync(
-      join(dir, 'inference-burst.json'),
-      `${JSON.stringify({ suite: 'inference-live-burst', status: 'PASS', report, observed, at: new Date().toISOString() }, null, 2)}\n`,
+      join(dir, `inference-burst-${at.replace(/[:.]/g, '-')}.json`),
+      text,
     );
-    record({ name: 'burst', status: 'PASS', observed });
-    // every request must end in a defined outcome; failures only after exhausting retries
-    for (const r of results)
-      expect(['completed', 'failed']).toContain(r.outcome);
+    writeFileSync(join(dir, 'inference-burst.json'), text);
+    record({ name: 'burst', status, observed });
+    expect(unacceptable).toEqual([]);
     if (rateLimited.length > 0)
       expect(
         results.filter((r) => r.outcome === 'completed').length,

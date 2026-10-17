@@ -53,7 +53,7 @@ export interface ReceiptRow {
   expiresAt: Date | null;
 }
 
-interface ReceiptDbRow {
+export interface ReceiptDbRow {
   id: ReceiptId;
   source_id: string;
   owner_id: string;

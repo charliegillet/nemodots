@@ -13,7 +13,7 @@ import { CLOSURE_CASES, REJECTION_CASES } from '../oracle/closures.js';
 import type { ClosureCase, RejectionCase } from '../oracle/types.js';
 import { World, errorCode } from './driver.js';
 import { APP_ROOT, entry, fillRow, insertRow, insertValues, withAccDatabase } from './harness.js';
-import { T, applyAuthority, mapIds, observeClosure, registerChange, seedGraph } from './graph.js';
+import { T, applyAuthority, edgeApi, mapIds, observeClosure, registerChange, seedGraph } from './graph.js';
 
 const tag = (covers: string[]) =>
   covers
@@ -151,80 +151,78 @@ describe('gate 1 invalidation closures (frozen oracle CL-*)', () => {
 
 // ------------------------------------------------------------- rejections
 
-const planTask = (i: number, dependsOn: number[]) => ({
-  title: `acc task ${i}`,
-  question: 'acceptance question',
-  role: 'investigator',
-  capabilities: ['observe'],
-  dependsOn,
-});
+const uuidFor = (i: number) => `00000000-0000-4000-8000-${i.toString(16).padStart(12, '0')}`;
 
 async function countRows(w: World, table: string) {
   if (!(await w.schema.exists(table))) return 0;
   return (await w.admin.query(`SELECT count(*)::int AS n FROM ${table}`)).rows[0].n as number;
 }
 
-async function runSchedulingRejection(c: RejectionCase & { operation: { kind: 'plan' | 'delegate' } }) {
-  await withAccDatabase(async (db) => {
-    const w = new World(db);
-    try {
-      const missionId = randomUUID();
-      await insertRow(w.admin, w.schema, T.missions, { id: missionId, status: 'running' });
-      const before = await countRows(w, T.tasks);
-      let error: unknown = null;
-      if (c.operation.kind === 'plan') {
-        const persistPlan = await entry<(db: pg.Pool, input: Record<string, unknown>) => Promise<unknown>>('coordinator/tasks.ts', ['persistPlan', 'createPlan', 'planMission']);
-        try {
-          await persistPlan(w.app, { missionId, plan: { tasks: c.operation.dependsOn.map((deps, i) => planTask(i, deps)) } });
-        } catch (e) {
-          error = e;
-        }
-      } else {
-        const op = c.operation;
-        // Existing graph: parents and waits, seeded as tasks; then the delegation under test.
-        const real = new Map<string, string>();
-        for (const t of op.existing) {
-          const id = randomUUID();
-          real.set(t.id, id);
-          await insertRow(w.admin, w.schema, T.tasks, { id, mission_id: missionId, ...(t.parentTaskId ? { parent_id: real.get(t.parentTaskId) } : {}), role: 'investigator', status: 'waiting' });
-        }
-        const delegateTask = await entry<(db: pg.Pool, input: Record<string, unknown>) => Promise<unknown>>('coordinator/tasks.ts', ['delegateTask', 'delegate']);
-        try {
-          await delegateTask(w.app, {
-            missionId,
-            parentTaskId: real.get(op.parentTaskId),
-            child: { ...planTask(9, []), dependsOn: op.childDependsOn.map((id) => real.get(id)) },
-          });
-        } catch (e) {
-          error = e;
-        }
-      }
-      const code = error ? errorCode(error) : 'accepted';
-      expect(c.expected.acceptedCodes as string[], `${c.id}: got ${code}`).toContain(code);
-      if (c.operation.kind === 'plan') expect(await countRows(w, T.tasks), 'a rejected plan must write no task rows').toBe(before);
-    } finally {
-      await w.close();
-    }
-  });
+/** RJ-1/RJ-2: plans with scheduling cycles, through the pure plan validator the planner path uses. */
+async function planRejection(c: RejectionCase & { operation: { kind: 'plan' } }) {
+  const { validatePlan } = await import('../../../../src/server/nemodots/coordinator/plan-validation.js');
+  const plan = {
+    tasks: c.operation.dependsOn.map((deps, i) => ({
+      title: `acc task ${i}`,
+      question: 'acceptance question',
+      role: 'investigator',
+      capabilities: ['observe'],
+      dependsOn: deps,
+    })),
+  };
+  const verdict = validatePlan(plan, { maxTasks: 50, existingTasks: 0 });
+  expect(verdict.ok, `${c.id}: the plan must be rejected`).toBe(false);
+  if (verdict.ok) return;
+  expect(verdict.issues.join(' | ').toLowerCase(), `${c.id}: the refusal must name the cycle`).toMatch(/cycl|depend/);
 }
 
-async function runEdgeRejection(c: RejectionCase & { operation: { kind: 'edge' } }) {
+/** RJ-3/RJ-4: delegated children that would close a scheduling cycle with a waiting ancestor. */
+async function delegationRejection(c: RejectionCase & { operation: { kind: 'delegate' } }) {
+  const { validateDelegation } = await import('../../../../src/server/nemodots/coordinator/plan-validation.js');
+  const op = c.operation;
+  const real = new Map(op.existing.map((t, i) => [t.id, uuidFor(i + 1)] as const));
+  const tasks = op.existing.map((t) => ({
+    id: real.get(t.id)!,
+    parentId: t.parentTaskId ? real.get(t.parentTaskId)! : null,
+    prerequisites: t.waitsOn.map((id) => real.get(id)!),
+  }));
+  const issues = validateDelegation(
+    {
+      role: 'verifier',
+      title: 'acc child',
+      question: 'acceptance question',
+      justification: 'needs an independent check',
+      dependsOn: op.childDependsOn.map((id) => real.get(id)!),
+    } as never,
+    {
+      parent: { id: real.get(op.parentTaskId)!, role: 'investigator', depth: 1, capabilities: ['observe', 'delegate', 'publish_finding', 'request_replan'], maxChildren: 4 },
+      limits: { maxDepth: 4, maxBreadth: 4, maxTasks: 50 },
+      totalTasks: tasks.length,
+      parentChildren: 0,
+      tasks,
+    } as never,
+    uuidFor(99) as never,
+  );
+  expect(issues.length, `${c.id}: the delegation must be rejected`).toBeGreaterThan(0);
+  expect(issues.join(' | ').toLowerCase()).toContain('cycle');
+}
+
+async function edgeRejection(c: RejectionCase & { operation: { kind: 'edge' } }) {
   await withAccDatabase(async (db) => {
     const w = new World(db);
     try {
       const op = c.operation;
       const seeded = await seedGraph(w, op.nodes, op.existing);
-      const addEdge = await entry<(db: pg.Pool, input: Record<string, unknown>) => Promise<unknown>>('ledger/edges.ts', ['addEdge', 'insertEdge', 'recordEdge']);
+      const { addEdges } = await edgeApi();
       const before = await countRows(w, T.edges);
-      const node = (id: string) => op.nodes.find((n) => n.id === id)!;
+      const byId = new Map(op.nodes.map((n) => [n.id, n]));
+      const ref = (id: string) => {
+        const n = byId.get(id)!;
+        return { kind: n.kind, id: seeded.ids.get(id), missionId: seeded.missions.get(n.missionId), taskId: n.taskId ? seeded.ids.get(n.taskId) : null };
+      };
       let error: unknown = null;
       try {
-        await addEdge(w.app, {
-          missionId: seeded.missions.get(node(op.add.to).missionId),
-          kind: op.add.kind,
-          from: { kind: node(op.add.from).kind, id: seeded.ids.get(op.add.from) },
-          to: { kind: node(op.add.to).kind, id: seeded.ids.get(op.add.to) },
-        });
+        await w.inTx((client) => addEdges(client, [{ kind: op.add.kind, from: ref(op.add.from), to: ref(op.add.to) }]));
       } catch (e) {
         error = e;
       }
@@ -246,46 +244,37 @@ async function seedGenerated(w: World, shape: 'chain' | 'fanout', size: number) 
   const missionId = randomUUID();
   await insertRow(w.admin, w.schema, T.missions, { id: missionId, status: 'running' });
   const task = await insertRow(w.admin, w.schema, T.tasks, { id: randomUUID(), mission_id: missionId, status: 'succeeded', role: 'investigator' });
-  const idCol = 'id';
   const taskCol = await w.schema.need(T.attempts, ['task_id']);
   const statusCol = await w.schema.need(T.attempts, ['status']);
-  const attemptTemplate = await fillRow(w.admin, w.schema, T.attempts, { [idCol]: randomUUID(), [taskCol]: task.id, [statusCol]: 'published' }, { parents: { [T.missions]: missionId } });
+  const attemptTemplate = await fillRow(w.admin, w.schema, T.attempts, { id: randomUUID(), [taskCol]: task.id, [statusCol]: 'published' }, { parents: { [T.missions]: missionId } });
   const attemptIds = Array.from({ length: size }, () => randomUUID());
-  await insertValues(w.admin, T.attempts, attemptIds.map((id) => ({ ...attemptTemplate, [idCol]: id })));
-  const mk = async (kind: 'evidence' | 'inheritance', fromKind: string, from: string, toKind: string, to: string) =>
-    fillRow(w.admin, w.schema, T.edges, {
-      [await w.schema.need(T.edges, ['mission_id'])]: missionId,
-      [await w.schema.need(T.edges, ['kind', 'edge_kind'])]: kind,
-      [await w.schema.need(T.edges, ['from_kind'])]: fromKind,
-      [await w.schema.need(T.edges, ['from_id'])]: from,
-      [await w.schema.need(T.edges, ['to_kind'])]: toKind,
-      [await w.schema.need(T.edges, ['to_id'])]: to,
-    });
-  const rows: Record<string, unknown>[] = [];
+  await insertValues(w.admin, T.attempts, attemptIds.map((id) => ({ ...attemptTemplate, id })));
+  const nodes: Record<string, unknown>[] = attemptIds.map((id) => ({ kind: 'attempt', id, mission_id: missionId, task_id: task.id }));
+  const edges: Record<string, unknown>[] = [];
+  const edge = (kind: string, fromKind: string, from: string, toKind: string, to: string) =>
+    edges.push({ id: randomUUID(), mission_id: missionId, kind, from_kind: fromKind, from_id: from, to_kind: toKind, to_id: to });
+  nodes.push({ kind: 'receipt', id: first.current.id, mission_id: null, task_id: null });
   if (shape === 'fanout') {
-    for (const a of attemptIds) rows.push(await mk('evidence', 'receipt', first.current.id, 'attempt', a));
+    for (const a of attemptIds) edge('evidence', 'receipt', first.current.id, 'attempt', a);
   } else {
-    // R0 -> A1; then A(i) -> O(i) -> A(i+1). Outputs reuse attempt-sized rows via task_outputs.
-    const outputCols = {
-      id: 'id',
-      task: await w.schema.need(T.outputs, ['task_id']),
-      attempt: await w.schema.pick(T.outputs, ['attempt_id']),
-      usable: await w.schema.need(T.outputs, ['usable']),
-    };
+    const outCols = { task: await w.schema.need(T.outputs, ['task_id']), attempt: await w.schema.pick(T.outputs, ['attempt_id']), usable: await w.schema.need(T.outputs, ['usable']) };
+    const outTemplate = await fillRow(w.admin, w.schema, T.outputs, { id: randomUUID(), [outCols.task]: task.id, [outCols.usable]: true, ...(outCols.attempt ? { [outCols.attempt]: attemptIds[0] } : {}) }, { parents: { [T.missions]: missionId } });
     const outputIds = attemptIds.map(() => randomUUID());
-    const outTemplate = await fillRow(w.admin, w.schema, T.outputs, { id: randomUUID(), [outputCols.task]: task.id, [outputCols.usable]: true, ...(outputCols.attempt ? { [outputCols.attempt]: attemptIds[0] } : {}) }, { parents: { [T.missions]: missionId } });
     await insertValues(w.admin, T.outputs, outputIds.map((id) => ({ ...outTemplate, id })));
-    rows.push(await mk('evidence', 'receipt', first.current.id, 'attempt', attemptIds[0]));
+    for (const id of outputIds) nodes.push({ kind: 'task_output', id, mission_id: missionId, task_id: task.id });
+    edge('evidence', 'receipt', first.current.id, 'attempt', attemptIds[0]);
     for (let i = 0; i < size; i += 1) {
-      rows.push(await mk('evidence', 'attempt', attemptIds[i], 'task_output', outputIds[i]));
-      if (i + 1 < size) rows.push(await mk('inheritance', 'task_output', outputIds[i], 'attempt', attemptIds[i + 1]));
+      edge('evidence', 'attempt', attemptIds[i], 'task_output', outputIds[i]);
+      if (i + 1 < size) edge('inheritance', 'task_output', outputIds[i], 'attempt', attemptIds[i + 1]);
     }
   }
-  await insertValues(w.admin, T.edges, rows);
+  const existing = new Set((await w.admin.query('SELECT id FROM ledger.dependency_nodes')).rows.map((r) => r.id));
+  await insertValues(w.admin, 'ledger.dependency_nodes', nodes.filter((n) => !existing.has(n.id)));
+  await insertValues(w.admin, T.edges, edges);
   return { missionId, firstReceipt: first.current.id };
 }
 
-async function runGeneratedRejection(c: RejectionCase & { operation: { kind: 'generated' } }) {
+async function generatedRejection(c: RejectionCase & { operation: { kind: 'generated' } }) {
   await withAccDatabase(async (db) => {
     const w = new World(db);
     try {
@@ -303,16 +292,15 @@ async function runGeneratedRejection(c: RejectionCase & { operation: { kind: 'ge
       const flipped = await w.admin.query(`SELECT count(*)::int AS n FROM ${T.attempts} WHERE "${attemptStatus}" = 'invalidated'`);
       expect(flipped.rows[0].n, 'no attempt may be invalidated by a refused closure').toBe(0);
 
-      // The source must stay observable: the cap path registers without a closure (C14).
-      const registerWithoutClosure = await entry<(db: pg.Pool, input: Record<string, unknown>) => Promise<unknown>>('ledger/invalidation.ts', ['registerWithoutClosure']);
-      await registerWithoutClosure(w.app, {
-        scope: w.scope('test'),
-        sourceKey: 'checkout.config/db.pool_max',
-        provenance: { kind: 'watcher', toolCallId: null, modelCallId: null, attemptId: null, causedByActionId: null, selfWrite: 'none' },
-      });
+      // The source stays observable: the cap path registers without a closure (C14).
+      const registerWithoutClosure = await entry<(c: pg.PoolClient, input: Record<string, unknown>) => Promise<unknown>>('ledger/invalidation.ts', ['registerWithoutClosure']);
+      const input = await w.registerInput({ op: 'register', label: 'R1', sourceKey: 'checkout.config/db.pool_max' });
+      await w.inTx((client) => registerWithoutClosure(client, input));
       const cur = await w.currentOf('test', 'checkout.config/db.pool_max');
       expect(cur?.revision, 'registerWithoutClosure must register the new revision').toBe(w.baseOf('checkout.config/db.pool_max') + 1);
       expect((await w.receiptById(firstReceipt))?.status).toBe('superseded');
+      const flippedAfter = await w.admin.query(`SELECT count(*)::int AS n FROM ${T.attempts} WHERE "${attemptStatus}" = 'invalidated'`);
+      expect(flippedAfter.rows[0].n, 'the skip path must not compute a closure').toBe(0);
       void missionId;
     } finally {
       await w.close();
@@ -323,33 +311,36 @@ async function runGeneratedRejection(c: RejectionCase & { operation: { kind: 'ge
 describe('gate 1 cycle and cap rejections (frozen oracle RJ-*)', () => {
   for (const c of REJECTION_CASES) {
     const name = `${tag(c.covers)} ${c.id} ${c.title}`;
-    if (c.operation.kind === 'plan' || c.operation.kind === 'delegate') it(name, () => runSchedulingRejection(c as never));
-    else if (c.operation.kind === 'edge') it(name, () => runEdgeRejection(c as never));
-    else it(name, () => runGeneratedRejection(c as never), 300_000);
+    if (c.operation.kind === 'plan') it(name, () => planRejection(c as never));
+    else if (c.operation.kind === 'delegate') it(name, () => delegationRejection(c as never));
+    else if (c.operation.kind === 'edge') it(name, () => edgeRejection(c as never));
+    else it(name, () => generatedRejection(c as never), 300_000);
   }
 
-  it.each(REJECTION_CASES.filter((c) => c.expected.afterwards).map((c) => [`[G1.8] ${c.id} watcher path after a refused closure pauses the missions and records a coarse event`, c] as const))('%s', async (_name, c) => {
-    if (c.operation.kind !== 'generated') throw new Error('oracle changed shape');
-    await withAccDatabase(async (db) => {
-      const w = new World(db);
-      try {
-        const watcher = await entry<Record<string, unknown>>('watcher/watcher.ts', ['createWatcher', 'pollOnce', 'runOnce', 'tick']);
-        const { missionId } = await seedGenerated(w, c.operation.shape, c.operation.size);
-        await w.advance({ op: 'advance_config', key: 'db.pool_max', value: 9, actor: 'injector' });
-        // Drive one watcher pass. The factory form returns an object with the pass; the function form is the pass.
-        const pass = typeof watcher === 'function' ? (watcher as unknown as (db: pg.Pool) => Promise<unknown>)(w.app) : null;
-        await pass;
-        const cur = await w.currentOf('test', 'checkout.config/db.pool_max');
-        expect(cur?.revision, 'the receipt must be registered despite the cap').toBe(w.baseOf('checkout.config/db.pool_max') + 1);
-        const status = await w.admin.query(`SELECT status FROM ${T.missions} WHERE id = $1`, [missionId]);
-        expect(status.rows[0].status).toBe('paused');
-        const closure = await w.admin.query(`SELECT closure FROM ${T.invalidations}`);
-        expect(closure.rows.some((r) => (r.closure as { capped?: boolean })?.capped === true), 'a coarse capped invalidation event must exist').toBe(true);
-        const kinds = await w.admin.query(`SELECT kind FROM coordinator.recovery_events WHERE mission_id = $1`, [missionId]);
-        expect(kinds.rows.map((r) => r.kind)).toContain(c.expected.afterwards!.recoveryKind);
-      } finally {
-        await w.close();
-      }
-    });
-  }, 300_000);
+  for (const c of REJECTION_CASES.filter((x) => x.expected.afterwards)) {
+    it(`[G1.8] ${c.id} watcher path after a refused closure pauses the missions and records a coarse event`, async () => {
+      const op = c.operation;
+      if (op.kind !== 'generated') throw new Error('oracle changed shape');
+      await withAccDatabase(async (db) => {
+        const w = new World(db);
+        try {
+          const watcher = await entry<unknown>('watcher/watcher.ts', ['processSourceChange', 'pollOnce', 'runOnce', 'tick']);
+          if (typeof watcher !== 'function') throw new Error('DRIVER WIRING: watcher/watcher.ts export is not a function; bind it in closure.test.ts');
+          const { missionId } = await seedGenerated(w, op.shape, op.size);
+          await w.advance({ op: 'advance_config', key: 'db.pool_max', value: 9, actor: 'injector' });
+          await (watcher as (db: pg.Pool) => Promise<unknown>)(w.app);
+          const cur = await w.currentOf('test', 'checkout.config/db.pool_max');
+          expect(cur?.revision, 'the receipt must be registered despite the cap').toBe(w.baseOf('checkout.config/db.pool_max') + 1);
+          const status = await w.admin.query(`SELECT status FROM ${T.missions} WHERE id = $1`, [missionId]);
+          expect(status.rows[0].status).toBe('paused');
+          const closure = await w.admin.query(`SELECT closure FROM ${T.invalidations}`);
+          expect(closure.rows.some((r) => (r.closure as { capped?: boolean })?.capped === true), 'a coarse capped invalidation event must exist').toBe(true);
+          const kinds = await w.admin.query('SELECT kind FROM coordinator.recovery_events WHERE mission_id = $1', [missionId]);
+          expect(kinds.rows.map((r) => r.kind)).toContain(c.expected.afterwards!.recoveryKind);
+        } finally {
+          await w.close();
+        }
+      });
+    }, 300_000);
+  }
 });

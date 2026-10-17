@@ -153,6 +153,7 @@ export class Acc7Stack {
   }
 
   static async start(options: StartOptions): Promise<Acc7Stack> {
+    assertClientBuilt();
     mkdirSync(SCRATCH, { recursive: true });
     const base = stackRoleUrls();
     const name = `${DB_PREFIX}${randomBytes(6).toString('hex')}`;
@@ -348,7 +349,6 @@ export class Acc7Stack {
     // mode blocked: no OPENAI_*, no inference mode -> the server must report
     // blocked with the missing names.
 
-    assertClientBuilt();
     const entry = resolve(APP_ROOT, 'src/server/index.ts');
     const app = this.spawnManaged('app', entry, appEnv);
     await until(

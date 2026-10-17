@@ -1,0 +1,59 @@
+{
+  "id": "second_change_during_repair",
+  "version": 1,
+  "class": "second_change_during_repair",
+  "description": "A cache schema fault (F2) and, a few seconds later, an independent pool fault (F3) while the first is being repaired.",
+  "prerequisites": [
+    "The catalog cache holds entries stored under the baseline schema."
+  ],
+  "steps": [
+    {
+      "kind": "set_config",
+      "key": "cache.schema_version",
+      "valueChoices": [2, 3],
+      "trigger": {
+        "type": "immediate"
+      }
+    },
+    {
+      "kind": "set_config",
+      "key": "db.pool_max",
+      "value": 1,
+      "trigger": {
+        "type": "delay",
+        "delayMsRange": [2500, 4000]
+      },
+      "after": [0]
+    }
+  ],
+  "oracle": {
+    "faultClass": "multi",
+    "expectation": "repair_required",
+    "symptoms": [
+      "500 cache_decode_error",
+      "later: 503 pool_timeout under concurrency and a degraded health with pool_exhausted"
+    ],
+    "acceptableRepairs": [
+      {
+        "action": "set_config",
+        "key": "cache.schema_version",
+        "values": [1]
+      },
+      {
+        "action": "flush_cache_namespace",
+        "key": "cache.namespace"
+      },
+      {
+        "action": "set_config",
+        "key": "db.pool_max"
+      }
+    ],
+    "mustNotChange": [
+      "db.statement_timeout_ms",
+      "routing.inventory_source",
+      "orders.write_enabled",
+      "ui.banner_text"
+    ],
+    "notes": "Both faults must be repaired for the acceptance probe to pass."
+  }
+}
