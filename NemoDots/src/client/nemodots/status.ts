@@ -63,7 +63,7 @@ export interface IntelligenceBadgeView {
   description: string;
 }
 
-/** Intelligence (OpenDots conversations) is reported separately from the mission mode. */
+/** Intelligence (NemoDots conversations) is reported separately from the mission mode. */
 export function deriveIntelligenceBadge(
   health: HealthStatus | null,
 ): IntelligenceBadgeView {
@@ -77,13 +77,13 @@ export function deriveIntelligenceBadge(
     ? {
         kind: 'configured',
         label: 'Intelligence configured',
-        description: 'OpenDots conversations are available.',
+        description: 'NemoDots conversations are available.',
       }
     : {
         kind: 'blocked',
         label: 'Intelligence blocked',
         description:
-          'OpenDots conversations are unavailable. Mission control does not depend on them.',
+          'NemoDots conversations are unavailable. Mission control does not depend on them.',
       };
 }
 
