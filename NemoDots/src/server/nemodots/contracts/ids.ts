@@ -57,8 +57,8 @@ export const ScopeSchema = z
   .strict();
 export type Scope = z.infer<typeof ScopeSchema>;
 
-// Source keys (registry-validated). Member keys and path segments never
-// contain '/', '.' sequences beyond the documented pattern, or '..'.
+// Source keys (registry-validated). Path segments are single segments: no
+// '/', no '.', so a key can never address a path.
 export const CONFIG_MEMBER_KEY_PATTERN = /^[a-z][a-z0-9_.]{0,60}$/;
 const segment = '[A-Za-z0-9][A-Za-z0-9_-]{0,127}';
 export const SOURCE_KEY_PATTERNS = {
@@ -82,11 +82,17 @@ export function sourceKeyFamily(key: string): SourceKeyFamily | null {
   return null;
 }
 
+/** One anchored pattern matching every family (also emitted into tool JSON Schemas). */
+export const SOURCE_KEY_PATTERN = new RegExp(
+  `^(?:${Object.values(SOURCE_KEY_PATTERNS)
+    .map((pattern) => pattern.source.slice(1, -1))
+    .join('|')})$`,
+);
+
 export const SourceKeySchema = z
   .string()
-  .refine((key) => sourceKeyFamily(key) !== null, {
-    message: 'unknown source key',
-  })
+  .max(256)
+  .regex(SOURCE_KEY_PATTERN, 'unknown source key')
   .brand<'SourceKey'>();
 export type SourceKey = z.infer<typeof SourceKeySchema>;
 
