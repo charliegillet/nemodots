@@ -13,7 +13,7 @@ function freezeTable<S extends string>(table: Record<S, readonly S[]>): Table<S>
   return Object.freeze(table);
 }
 
-export const MISSION_TRANSITIONS: Table<MissionStatus> = freezeTable({
+export const MISSION_TRANSITIONS: Table<MissionStatus> = freezeTable<MissionStatus>({
   created: ['running', 'blocked_provider', 'cancelled'],
   // running -> blocked_provider: ARCHITECTURE 10 ("If the provider becomes
   // unreachable, in-flight attempts fail ... the mission moves to blocked_provider").
@@ -26,7 +26,7 @@ export const MISSION_TRANSITIONS: Table<MissionStatus> = freezeTable({
   cancelled: [],
 });
 
-export const TASK_TRANSITIONS: Table<TaskStatus> = freezeTable({
+export const TASK_TRANSITIONS: Table<TaskStatus> = freezeTable<TaskStatus>({
   pending: ['runnable', 'cancelled'],
   runnable: ['leased', 'cancelled'],
   leased: ['running', 'runnable', 'cancelled'],
@@ -41,7 +41,7 @@ export const TASK_TRANSITIONS: Table<TaskStatus> = freezeTable({
   cancelled: [],
 });
 
-export const ATTEMPT_TRANSITIONS: Table<AttemptStatus> = freezeTable({
+export const ATTEMPT_TRANSITIONS: Table<AttemptStatus> = freezeTable<AttemptStatus>({
   running: ['published', 'failed', 'aborted', 'expired', 'invalidated'],
   published: [],
   failed: [],
@@ -50,7 +50,7 @@ export const ATTEMPT_TRANSITIONS: Table<AttemptStatus> = freezeTable({
   invalidated: [],
 });
 
-export const ACTION_TRANSITIONS: Table<ActionStatus> = freezeTable({
+export const ACTION_TRANSITIONS: Table<ActionStatus> = freezeTable<ActionStatus>({
   proposed: ['admitted', 'blocked', 'cancelled', 'failed'],
   admitted: ['committed', 'blocked', 'failed', 'cancelled'],
   committed: ['dispatched', 'verified', 'outcome_unknown', 'failed'],
@@ -63,7 +63,7 @@ export const ACTION_TRANSITIONS: Table<ActionStatus> = freezeTable({
   cancelled: [],
 });
 
-export const RECEIPT_TRANSITIONS: Table<ReceiptStatus> = freezeTable({
+export const RECEIPT_TRANSITIONS: Table<ReceiptStatus> = freezeTable<ReceiptStatus>({
   supported: ['superseded', 'contested', 'retracted', 'expired'],
   contested: ['supported', 'retracted'],
   superseded: [],
@@ -97,9 +97,20 @@ export function canTransition<K extends TransitionKind>(
   return Object.hasOwn(table, from) && table[from].includes(to);
 }
 
+/**
+ * Terminal statuses as documented (ARCHITECTURE 7 / CONTRACTS 4). A succeeded
+ * task is terminal for scheduling even though invalidation may reopen it.
+ */
+export const TERMINAL_STATUSES = Object.freeze({
+  mission: Object.freeze(['succeeded', 'failed', 'cancelled']),
+  task: Object.freeze(['succeeded', 'failed', 'cancelled']),
+  attempt: Object.freeze(['published', 'failed', 'aborted', 'expired', 'invalidated']),
+  action: Object.freeze(['blocked', 'verified', 'failed', 'cancelled']),
+  receipt: Object.freeze(['superseded', 'retracted', 'expired']),
+} as const satisfies { [K in TransitionKind]: readonly StatusOf[K][] });
+
 export function isTerminal<K extends TransitionKind>(kind: K, status: StatusOf[K]): boolean {
-  const table = TRANSITION_TABLES[kind] as Table<string>;
-  return Object.hasOwn(table, status) && table[status].length === 0;
+  return (TERMINAL_STATUSES[kind] as readonly string[]).includes(status);
 }
 
 export class IllegalTransitionError extends Error {

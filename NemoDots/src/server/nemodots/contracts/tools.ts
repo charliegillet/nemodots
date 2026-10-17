@@ -1,5 +1,11 @@
 import { z } from 'zod';
-import { ProposeInputSchema } from './action.js';
+import {
+  ActionKindSchema,
+  FlushCachePayloadSchema,
+  ProposeInputSchema,
+  RATIONALE_MAX,
+  SetConfigPayloadSchema,
+} from './action.js';
 import { digest, type Digest } from './digest.js';
 import { FindingClaimSchema, FindingConfidenceSchema } from './finding.js';
 import { ReceiptIdSchema, SourceKeySchema, TaskIdSchema } from './ids.js';
@@ -15,6 +21,22 @@ import {
 // receipt ids are citations checked against scope, never authority.
 
 export const DELEGABLE_ROLES = TaskRoleSchema.exclude(['planner', 'postcondition']);
+
+/**
+ * propose_action exposes a top-level object (function parameters must be an
+ * object schema) and pipes into the discriminated ProposeInputSchema, so a
+ * payload that does not match its action is rejected at parse time.
+ */
+const ProposeToolInputSchema = z
+  .object({
+    action: ActionKindSchema,
+    payload: z.union([SetConfigPayloadSchema, FlushCachePayloadSchema]),
+    // unbranded here; the pipe re-validates and brands
+    supportingReceiptIds: z.array(z.uuid({ version: 'v4' })).max(32),
+    rationale: z.string().min(1).max(RATIONALE_MAX),
+  })
+  .strict()
+  .pipe(ProposeInputSchema);
 
 export const TEAM_TOOL_INPUTS = Object.freeze({
   observe_source: z.object({ sourceKey: SourceKeySchema }).strict(),
@@ -40,7 +62,7 @@ export const TEAM_TOOL_INPUTS = Object.freeze({
       confidence: FindingConfidenceSchema,
     })
     .strict(),
-  propose_action: ProposeInputSchema,
+  propose_action: ProposeToolInputSchema,
   request_replan: z.object({ reason: z.string().min(1).max(500) }).strict(),
 });
 
@@ -83,12 +105,13 @@ export type ToolSchema = {
 };
 
 function jsonSchema(schema: z.ZodType): Record<string, unknown> {
-  const { $schema: _ignored, ...rest } = z.toJSONSchema(schema, {
+  const generated = z.toJSONSchema(schema, {
     target: 'draft-2020-12',
     io: 'input',
     unrepresentable: 'throw',
   }) as Record<string, unknown>;
-  return rest;
+  delete generated.$schema;
+  return generated;
 }
 
 /** Ordered JSON Schemas for the nine team tools. Deterministic across calls. */
