@@ -18,15 +18,26 @@ const sources = readdirSync(dir)
 describe('[G1] coverage of TEST_PROMPT gate 1', () => {
   it('[G1] every item 1..13 is named by a test title', () => {
     // Titles of the oracle-driven runners are generated from the cases' own `covers`; include them.
-    const generated = new Set([...LEDGER_CASES, ...CLOSURE_CASES, ...REJECTION_CASES].flatMap((c) => c.covers).filter((c) => c.startsWith('gate1.')).map((c) => Number(c.slice(6))));
-    const missing = Array.from({ length: 13 }, (_, i) => i + 1).filter((n) => !generated.has(n) && !new RegExp(`\\[G1\\.${n}\\]`).test(sources));
+    const generated = new Set(
+      [...LEDGER_CASES, ...CLOSURE_CASES, ...REJECTION_CASES]
+        .flatMap((c) => c.covers)
+        .filter((c) => c.startsWith('gate1.'))
+        .map((c) => Number(c.slice(6))),
+    );
+    const missing = Array.from({ length: 13 }, (_, i) => i + 1).filter(
+      (n) => !generated.has(n) && !new RegExp(`\\[G1\\.${n}\\]`).test(sources),
+    );
     expect(missing).toEqual([]);
   });
 
   it('[G1] every item named by the oracle for gate 1 is a real item number', () => {
-    const covers = [...LEDGER_CASES, ...CLOSURE_CASES, ...REJECTION_CASES].flatMap((c) => c.covers).filter((c) => c.startsWith('gate1.'));
-    for (const c of covers) expect(Number(c.slice(6)), c).toBeGreaterThanOrEqual(1);
-    for (const c of covers) expect(Number(c.slice(6)), c).toBeLessThanOrEqual(13);
+    const covers = [...LEDGER_CASES, ...CLOSURE_CASES, ...REJECTION_CASES]
+      .flatMap((c) => c.covers)
+      .filter((c) => c.startsWith('gate1.'));
+    for (const c of covers)
+      expect(Number(c.slice(6)), c).toBeGreaterThanOrEqual(1);
+    for (const c of covers)
+      expect(Number(c.slice(6)), c).toBeLessThanOrEqual(13);
   });
 
   it('[G1] every oracle case is executed by this suite (runners iterate the full frozen lists)', () => {

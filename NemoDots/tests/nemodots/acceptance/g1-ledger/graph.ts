@@ -5,7 +5,12 @@
 // introspection (SCHEMA BINDING errors name any column that is missing).
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
-import type { ClosureCase, GraphEdge, GraphNode, AffectedSets } from '../oracle/types.js';
+import type {
+  ClosureCase,
+  GraphEdge,
+  GraphNode,
+  AffectedSets,
+} from '../oracle/types.js';
 import { World, errorCode, type Env } from './driver.js';
 import { entry, fillRow, insertRow, insertValues } from './harness.js';
 
@@ -21,13 +26,23 @@ export const T = {
   events: 'coordinator.events',
 } as const;
 
-const HEALTH_OK = { status: 'ok', checks: { postgres: true, redis: true, config_parse: true, writes: true }, errorClasses: [] };
+const HEALTH_OK = {
+  status: 'ok',
+  checks: { postgres: true, redis: true, config_parse: true, writes: true },
+  errorClasses: [],
+};
 
 /** Logical field -> first existing candidate column; value skipped when the table has none and it is optional. */
-async function mapped(w: World, table: string, fields: [candidates: string[], value: unknown, required?: boolean][]) {
+async function mapped(
+  w: World,
+  table: string,
+  fields: [candidates: string[], value: unknown, required?: boolean][],
+) {
   const given: Record<string, unknown> = {};
   for (const [candidates, value, required] of fields) {
-    const col = required ? await w.schema.need(table, candidates) : await w.schema.pick(table, candidates);
+    const col = required
+      ? await w.schema.need(table, candidates)
+      : await w.schema.pick(table, candidates);
     if (col) given[col] = value;
   }
   return given;
@@ -41,17 +56,23 @@ export interface Seeded {
   intentRowsMissing: number;
 }
 
-
 const defaultValueFor = (key: string): string | number | boolean => {
   const k = key.replace('checkout.config/', '');
   switch (k) {
-    case 'cache.namespace': return 'acc-ns';
-    case 'cache.schema_version': return 4;
-    case 'db.pool_max': return 3;
-    case 'db.statement_timeout_ms': return 5000;
-    case 'routing.inventory_source': return 'primary';
-    case 'orders.write_enabled': return true;
-    default: return 'acc';
+    case 'cache.namespace':
+      return 'acc-ns';
+    case 'cache.schema_version':
+      return 4;
+    case 'db.pool_max':
+      return 3;
+    case 'db.statement_timeout_ms':
+      return 5000;
+    case 'routing.inventory_source':
+      return 'primary';
+    case 'orders.write_enabled':
+      return true;
+    default:
+      return 'acc';
   }
 };
 
@@ -65,8 +86,19 @@ export async function seedGraph(
   const drawn = new Set(inputNodes.map((n) => n.id));
   const implicit: GraphNode[] = [];
   for (const n of inputNodes)
-    if (n.taskId && !drawn.has(n.taskId) && !implicit.some((s) => s.id === n.taskId))
-      implicit.push({ id: n.taskId, kind: 'task', missionId: n.missionId, seq: -1, role: 'investigator', parentTaskId: null });
+    if (
+      n.taskId &&
+      !drawn.has(n.taskId) &&
+      !implicit.some((s) => s.id === n.taskId)
+    )
+      implicit.push({
+        id: n.taskId,
+        kind: 'task',
+        missionId: n.missionId,
+        seq: -1,
+        role: 'investigator',
+        parentTaskId: null,
+      });
   const nodes: GraphNode[] = [...inputNodes, ...implicit];
   const ids = new Map<string, string>();
   const missions = new Map<string, string>();
@@ -83,7 +115,8 @@ export async function seedGraph(
   // Controlled authority rows needed by receipts, seeded before any registration.
   const seededKeys = new Set<string>();
   for (const n of rows) {
-    if (n.kind !== 'receipt' || !n.sourceKey?.startsWith('checkout.config/')) continue;
+    if (n.kind !== 'receipt' || !n.sourceKey?.startsWith('checkout.config/'))
+      continue;
     const key = n.sourceKey.slice('checkout.config/'.length);
     if (seededKeys.has(key)) continue;
     seededKeys.add(key);
@@ -105,9 +138,17 @@ export async function seedGraph(
         label: n.id,
         sourceKey: n.sourceKey!,
         environment: env,
-        ...(controlled ? {} : { normalizedValue: n.sourceKey === 'checkout.health' ? HEALTH_OK : { seed: n.id } }),
+        ...(controlled
+          ? {}
+          : {
+              normalizedValue:
+                n.sourceKey === 'checkout.health' ? HEALTH_OK : { seed: n.id },
+            }),
       });
-      if (!res.ok || !res.current) throw new Error(`could not register receipt node ${n.id} (${n.sourceKey}): ${res.error ?? 'no receipt'}`);
+      if (!res.ok || !res.current)
+        throw new Error(
+          `could not register receipt node ${n.id} (${n.sourceKey}): ${res.error ?? 'no receipt'}`,
+        );
       id = res.current.id;
       receiptByKey.set(cacheKey, id);
     }
@@ -116,7 +157,14 @@ export async function seedGraph(
 
   const taskOf = (n: GraphNode) => (n.taskId ? ids.get(n.taskId) : undefined);
   const attemptOfTask = (taskId: string | undefined) => {
-    for (const n of nodes) if (n.kind === 'attempt' && n.taskId && ids.get(n.taskId) === taskId && ids.has(n.id)) return ids.get(n.id);
+    for (const n of nodes)
+      if (
+        n.kind === 'attempt' &&
+        n.taskId &&
+        ids.get(n.taskId) === taskId &&
+        ids.has(n.id)
+      )
+        return ids.get(n.id);
     return undefined;
   };
 
@@ -124,10 +172,16 @@ export async function seedGraph(
   const attemptNs = new Map<string, number>();
   // Harness self-check ONLY (ACC1_SELFCHECK_INTENTS_STUB=1): validates this file's assertions while the
   // wave-3 actions migration is absent. A run with the stub is never reported as a production result.
-  if (process.env.ACC1_SELFCHECK_INTENTS_STUB === '1' && !(await w.schema.exists(T.intents))) {
-    await w.admin.query(`CREATE TABLE ${T.intents} (id uuid PRIMARY KEY, mission_id uuid, task_id uuid, attempt_id uuid, status text NOT NULL,
+  if (
+    process.env.ACC1_SELFCHECK_INTENTS_STUB === '1' &&
+    !(await w.schema.exists(T.intents))
+  ) {
+    await w.admin
+      .query(`CREATE TABLE ${T.intents} (id uuid PRIMARY KEY, mission_id uuid, task_id uuid, attempt_id uuid, status text NOT NULL,
       status_version integer NOT NULL DEFAULT 0, block_reason text, block_detail text)`);
-    await w.admin.query(`GRANT SELECT, INSERT, UPDATE ON ${T.intents} TO nemodots_app`);
+    await w.admin.query(
+      `GRANT SELECT, INSERT, UPDATE ON ${T.intents} TO nemodots_app`,
+    );
   }
   const intentsTable = await w.schema.exists(T.intents);
   const counts = { intentRowsMissing: 0 };
@@ -143,7 +197,15 @@ export async function seedGraph(
         await w.admin.query(
           `INSERT INTO ${T.tasks} (id, mission_id, parent_id, depth, ordinal, title, question, role, status, generation, justification, budget)
            VALUES ($1, $2, $3, $4, $5, 'acc', 'acc', $6, 'succeeded', 0, $7, '{"maxIterations":1,"maxTokens":1,"maxChildren":1}'::jsonb)`,
-          [id, mission, parent, parent ? 1 : 0, ordinal, n.role ?? 'investigator', parent ? 'acc' : null],
+          [
+            id,
+            mission,
+            parent,
+            parent ? 1 : 0,
+            ordinal,
+            n.role ?? 'investigator',
+            parent ? 'acc' : null,
+          ],
         );
         break;
       }
@@ -155,7 +217,14 @@ export async function seedGraph(
         await w.admin.query(
           `INSERT INTO ${T.attempts} (id, task_id, mission_id, n, kind, status, generation, lease_owner, fencing_token, lease_expires_at, lease_renewed_at, abort_reason)
            VALUES ($1, $2, $3, $4, 'initial', $5, 0, 'acc1', $4, now() + interval '1 hour', now(), $6)`,
-          [id, task, mission, k, status, status === 'aborted' ? 'lease_lost' : null],
+          [
+            id,
+            task,
+            mission,
+            k,
+            status,
+            status === 'aborted' ? 'lease_lost' : null,
+          ],
         );
         break;
       }
@@ -184,7 +253,9 @@ export async function seedGraph(
         // coordinator.action_intents arrives with the wave-3 actions migration.
         if (intentsTable) {
           await insertRow(
-            w.admin, w.schema, T.intents,
+            w.admin,
+            w.schema,
+            T.intents,
             await mapped(w, T.intents, [
               [['id'], id, true],
               [['mission_id'], mission, true],
@@ -209,17 +280,27 @@ export async function seedGraph(
       kind: n.kind,
       id: real,
       missionId: missions.get(n.missionId),
-      taskId: n.kind === 'task' ? real : (n.taskId ? ids.get(n.taskId) : null),
+      taskId: n.kind === 'task' ? real : n.taskId ? ids.get(n.taskId) : null,
     };
   };
   const { addEdges, ensureNode } = await edgeApi();
   await w.inTx(async (client) => {
-    for (const n of rows) if (n.kind !== 'receipt') await ensureNode(client, ref(n.id));
+    for (const n of rows)
+      if (n.kind !== 'receipt') await ensureNode(client, ref(n.id));
   });
-  for (const e of edges) await w.inTx((client) => addEdges(client, [{ kind: e.kind, from: ref(e.from), to: ref(e.to) }]));
+  for (const e of edges)
+    await w.inTx((client) =>
+      addEdges(client, [{ kind: e.kind, from: ref(e.from), to: ref(e.to) }]),
+    );
   const reverse = new Map<string, string>();
-  for (const [oracle, real] of ids) if (!reverse.has(real)) reverse.set(real, oracle);
-  return { ids, missions, reverse, intentRowsMissing: counts.intentRowsMissing };
+  for (const [oracle, real] of ids)
+    if (!reverse.has(real)) reverse.set(real, oracle);
+  return {
+    ids,
+    missions,
+    reverse,
+    intentRowsMissing: counts.intentRowsMissing,
+  };
 }
 
 type EdgeApi = {
@@ -228,8 +309,12 @@ type EdgeApi = {
 };
 /** BIND: ledger/edges.ts#addEdges(client in txn, [{kind, from: NodeRef, to: NodeRef}]) and #ensureNode(client, NodeRef). */
 export async function edgeApi(): Promise<EdgeApi> {
-  const addEdges = await entry<EdgeApi['addEdges']>('ledger/edges.ts', ['addEdges']);
-  const ensureNode = await entry<EdgeApi['ensureNode']>('ledger/edges.ts', ['ensureNode']);
+  const addEdges = await entry<EdgeApi['addEdges']>('ledger/edges.ts', [
+    'addEdges',
+  ]);
+  const ensureNode = await entry<EdgeApi['ensureNode']>('ledger/edges.ts', [
+    'ensureNode',
+  ]);
   return { addEdges, ensureNode };
 }
 
@@ -239,13 +324,39 @@ export async function applyAuthority(w: World, c: ClosureCase, index: number) {
   const node = c.nodes.find((n) => n.id === change.oldReceipt)!;
   const key = node.sourceKey!;
   if (!w.isControlled(key)) return;
-  const member = key.startsWith('checkout.config/') ? key.slice('checkout.config/'.length) : null;
-  if (change.via === 'collection_insert') await w.advance({ op: 'advance_config', key: `acc.new_key_${index}`, value: true, actor: 'injector', insertIfMissing: true });
-  else if (change.via === 'collection_delete') await w.advance({ op: 'advance_config', key: 'acc.extra_key', value: 'x', actor: 'injector', deleteKey: true });
+  const member = key.startsWith('checkout.config/')
+    ? key.slice('checkout.config/'.length)
+    : null;
+  if (change.via === 'collection_insert')
+    await w.advance({
+      op: 'advance_config',
+      key: `acc.new_key_${index}`,
+      value: true,
+      actor: 'injector',
+      insertIfMissing: true,
+    });
+  else if (change.via === 'collection_delete')
+    await w.advance({
+      op: 'advance_config',
+      key: 'acc.extra_key',
+      value: 'x',
+      actor: 'injector',
+      deleteKey: true,
+    });
   else if (member) {
     const current = await w.configValue(member);
-    const next = typeof current === 'number' ? current + 1 : typeof current === 'boolean' ? !current : `${String(current)}-changed`;
-    await w.advance({ op: 'advance_config', key: member, value: next as never, actor: 'injector' });
+    const next =
+      typeof current === 'number'
+        ? current + 1
+        : typeof current === 'boolean'
+          ? !current
+          : `${String(current)}-changed`;
+    await w.advance({
+      op: 'advance_config',
+      key: member,
+      value: next as never,
+      actor: 'injector',
+    });
   }
 }
 
@@ -261,7 +372,14 @@ export async function registerChange(w: World, c: ClosureCase, index: number) {
     label: `${change.oldReceipt}#new${index}`,
     sourceKey: key,
     environment: env,
-    ...(controlled ? {} : { normalizedValue: key === 'checkout.health' ? { ...HEALTH_OK, status: 'degraded', errorClasses: ['changed'] } : { changed: index + 1 } }),
+    ...(controlled
+      ? {}
+      : {
+          normalizedValue:
+            key === 'checkout.health'
+              ? { ...HEALTH_OK, status: 'degraded', errorClasses: ['changed'] }
+              : { changed: index + 1 },
+        }),
   });
 }
 
@@ -272,7 +390,8 @@ const lowerSnake = (s: string) => s.replace(/([A-Z])/g, '_$1').toLowerCase();
 export function affectedSets(obj: unknown): AffectedSets {
   const o = (obj ?? {}) as Record<string, unknown>;
   const pick = (name: string): string[] => {
-    for (const k of Object.keys(o)) if (lowerSnake(k) === lowerSnake(name)) return (o[k] as string[]) ?? [];
+    for (const k of Object.keys(o))
+      if (lowerSnake(k) === lowerSnake(name)) return (o[k] as string[]) ?? [];
     return [];
   };
   return {
@@ -299,27 +418,53 @@ export interface ClosureObserved {
 
 const uniq = (xs: string[]) => [...new Set(xs)].sort();
 
-export async function observeClosure(w: World, seeded: Seeded): Promise<ClosureObserved> {
+export async function observeClosure(
+  w: World,
+  seeded: Seeded,
+): Promise<ClosureObserved> {
   const aff = await w.schema.need(T.invalidations, ['affected']);
-  const per = await w.schema.pick(T.invalidations, ['per_mission', 'perMission']);
+  const per = await w.schema.pick(T.invalidations, [
+    'per_mission',
+    'perMission',
+  ]);
   const clo = await w.schema.pick(T.invalidations, ['closure']);
-  const ev = await w.admin.query(`SELECT "${aff}" AS affected, ${per ? `"${per}"` : 'NULL'} AS per, ${clo ? `"${clo}"` : 'NULL'} AS closure FROM ${T.invalidations}`);
-  const union: AffectedSets = { modelCallIds: [], attemptIds: [], outputIds: [], actionIds: [], taskIds: [] };
-  const perMission = new Map<string, { affected: AffectedSets; preserved: string[] }>();
+  const ev = await w.admin.query(
+    `SELECT "${aff}" AS affected, ${per ? `"${per}"` : 'NULL'} AS per, ${clo ? `"${clo}"` : 'NULL'} AS closure FROM ${T.invalidations}`,
+  );
+  const union: AffectedSets = {
+    modelCallIds: [],
+    attemptIds: [],
+    outputIds: [],
+    actionIds: [],
+    taskIds: [],
+  };
+  const perMission = new Map<
+    string,
+    { affected: AffectedSets; preserved: string[] }
+  >();
   const capped: boolean[] = [];
   for (const row of ev.rows) {
     const a = affectedSets(row.affected);
-    for (const k of Object.keys(union) as (keyof AffectedSets)[]) union[k] = uniq([...union[k], ...a[k]]);
-    for (const m of (row.per ?? []) as { missionId?: string; mission_id?: string; affected: unknown; preserved?: { taskIds?: string[] } }[]) {
+    for (const k of Object.keys(union) as (keyof AffectedSets)[])
+      union[k] = uniq([...union[k], ...a[k]]);
+    for (const m of (row.per ?? []) as {
+      missionId?: string;
+      mission_id?: string;
+      affected: unknown;
+      preserved?: { taskIds?: string[] };
+    }[]) {
       const mid = (m.missionId ?? m.mission_id)!;
       const seen = perMission.get(mid);
       const prev = seen ?? { affected: affectedSets({}), preserved: [] };
       const aa = affectedSets(m.affected);
-      for (const k of Object.keys(prev.affected) as (keyof AffectedSets)[]) prev.affected[k] = uniq([...prev.affected[k], ...aa[k]]);
+      for (const k of Object.keys(prev.affected) as (keyof AffectedSets)[])
+        prev.affected[k] = uniq([...prev.affected[k], ...aa[k]]);
       // Each event preserves "all tasks minus its own affected"; over several events a task is
       // preserved only if every event preserved it (intersection = all minus the union of affected).
       const mine = m.preserved?.taskIds ?? [];
-      prev.preserved = seen ? prev.preserved.filter((id) => mine.includes(id)) : uniq(mine);
+      prev.preserved = seen
+        ? prev.preserved.filter((id) => mine.includes(id))
+        : uniq(mine);
       perMission.set(mid, prev);
     }
     capped.push(Boolean((row.closure as { capped?: boolean } | null)?.capped));
@@ -327,19 +472,27 @@ export async function observeClosure(w: World, seeded: Seeded): Promise<ClosureO
 
   const status = async (table: string, idCol = 'id') => {
     const sc = await w.schema.need(table, ['status']);
-    const r = await w.admin.query(`SELECT "${idCol}" AS id, "${sc}" AS status FROM ${table}`);
+    const r = await w.admin.query(
+      `SELECT "${idCol}" AS id, "${sc}" AS status FROM ${table}`,
+    );
     return r.rows as { id: string; status: string }[];
   };
   const attempts = await status(T.attempts);
   const tasks = await status(T.tasks);
   const outCol = await w.schema.need(T.outputs, ['usable']);
-  const outs = (await w.admin.query(`SELECT id, "${outCol}" AS usable FROM ${T.outputs}`)).rows as { id: string; usable: boolean }[];
-  const intents = new Map<string, { status: string; blockReason: string | null }>();
+  const outs = (
+    await w.admin.query(`SELECT id, "${outCol}" AS usable FROM ${T.outputs}`)
+  ).rows as { id: string; usable: boolean }[];
+  const intents = new Map<
+    string,
+    { status: string; blockReason: string | null }
+  >();
   if (await w.schema.exists(T.intents)) {
     const intentRows = await w.admin.query(
       `SELECT id, status, ${(await w.schema.pick(T.intents, ['block_reason'])) ? 'block_reason' : 'NULL'} AS block_reason FROM ${T.intents}`,
     );
-    for (const r of intentRows.rows) intents.set(r.id, { status: r.status, blockReason: r.block_reason });
+    for (const r of intentRows.rows)
+      intents.set(r.id, { status: r.status, blockReason: r.block_reason });
   }
 
   const receiptStatus = new Map<string, string>();
@@ -350,11 +503,18 @@ export async function observeClosure(w: World, seeded: Seeded): Promise<ClosureO
 
   const coordinatorEventsByMission = new Map<string, number>();
   if (await w.schema.exists(T.events)) {
-    const typeCol = await w.schema.pick(T.events, ['type', 'kind', 'event_type']);
+    const typeCol = await w.schema.pick(T.events, [
+      'type',
+      'kind',
+      'event_type',
+    ]);
     const missionCol = await w.schema.pick(T.events, ['mission_id']);
     if (typeCol && missionCol) {
-      const r = await w.admin.query(`SELECT "${missionCol}" AS mission, count(*)::int AS n FROM ${T.events} WHERE "${typeCol}" = 'invalidation.recorded' GROUP BY 1`);
-      for (const row of r.rows) coordinatorEventsByMission.set(row.mission, row.n);
+      const r = await w.admin.query(
+        `SELECT "${missionCol}" AS mission, count(*)::int AS n FROM ${T.events} WHERE "${typeCol}" = 'invalidation.recorded' GROUP BY 1`,
+      );
+      for (const row of r.rows)
+        coordinatorEventsByMission.set(row.mission, row.n);
     }
   }
 
@@ -362,9 +522,18 @@ export async function observeClosure(w: World, seeded: Seeded): Promise<ClosureO
     eventRows: ev.rowCount ?? 0,
     union,
     perMission,
-    attemptsInvalidated: attempts.filter((a) => a.status === 'invalidated').map((a) => a.id).sort(),
-    outputsUnusable: outs.filter((o) => !o.usable).map((o) => o.id).sort(),
-    tasksInvalidated: tasks.filter((t) => t.status === 'invalidated').map((t) => t.id).sort(),
+    attemptsInvalidated: attempts
+      .filter((a) => a.status === 'invalidated')
+      .map((a) => a.id)
+      .sort(),
+    outputsUnusable: outs
+      .filter((o) => !o.usable)
+      .map((o) => o.id)
+      .sort(),
+    tasksInvalidated: tasks
+      .filter((t) => t.status === 'invalidated')
+      .map((t) => t.id)
+      .sort(),
     intents,
     receiptStatus,
     capped,
@@ -372,6 +541,7 @@ export async function observeClosure(w: World, seeded: Seeded): Promise<ClosureO
   };
 }
 
-export const mapIds = (seeded: Seeded, oracleIds: readonly string[]) => uniq(oracleIds.map((id) => seeded.ids.get(id) ?? `UNSEEDED:${id}`));
+export const mapIds = (seeded: Seeded, oracleIds: readonly string[]) =>
+  uniq(oracleIds.map((id) => seeded.ids.get(id) ?? `UNSEEDED:${id}`));
 
 export { errorCode, fillRow, insertValues };

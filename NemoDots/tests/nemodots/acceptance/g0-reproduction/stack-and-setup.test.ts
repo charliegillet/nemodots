@@ -7,12 +7,15 @@
 //         configuration; fixture vs live vs blocked are labelled honestly
 // Everything this file starts (checkout 4600, app 4601, a stub provider on an
 // ephemeral port) is stopped in afterAll.
-import { createServer, type Server } from 'node:http';
 import { existsSync, readdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { createClient } from 'redis';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createAccDb, query, type AccDb } from './helpers/acc-db.js';
+import {
+  startStubProvider,
+  type StubProvider,
+} from './helpers/stub-provider.js';
 import {
   APP_PORT,
   APP_ROOT,
@@ -21,6 +24,7 @@ import {
   REDIS_PREFIX,
   ROLES,
   SCRATCH,
+  appendManifest,
   cleanEnv,
   ensureScratch,
   makeRedactor,
@@ -29,6 +33,7 @@ import {
   sleep,
   startManaged,
   waitForHttp,
+  withDb,
   type ManagedProcess,
 } from './helpers/common.js';
 import { collectNeedles } from './helpers/secrets.js';
@@ -51,22 +56,22 @@ let db: AccDb;
 let redact: (t: string) => string;
 let needles: ReturnType<typeof collectNeedles>;
 const owned: ManagedProcess[] = [];
-let stubServer: Server | undefined;
+const stubs: StubProvider[] = [];
 
 const redisUrl = () =>
   `redis://127.0.0.1:${db.stack.redisPort}/${REDIS_DB_INDEX}`;
 
-function stackEnv(extra: Record<string, string> = {}) {
+function stackEnv(extra: Record<string, string> = {}, target: AccDb = db) {
   const env: Record<string, string> = {
-    NEMODOTS_INSTANCE: db.stack.name,
+    NEMODOTS_INSTANCE: target.stack.name,
     NEMODOTS_REDIS_URL: redisUrl(),
     NEMODOTS_REDIS_PREFIX: REDIS_PREFIX,
     NEMODOTS_CHECKOUT_URL: `http://127.0.0.1:${CHECKOUT_PORT}`,
     NEMODOTS_CHECKOUT_PORT: String(CHECKOUT_PORT),
-    NEMODOTS_PROBE_SECRET: db.stack.probeSecret,
+    NEMODOTS_PROBE_SECRET: target.stack.probeSecret,
   };
   for (const role of ROLES)
-    env[`NEMODOTS_PG_URL_${role.toUpperCase()}`] = db.urls[role];
+    env[`NEMODOTS_PG_URL_${role.toUpperCase()}`] = target.urls[role];
   return cleanEnv({ ...env, ...extra });
 }
 
@@ -98,9 +103,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   for (const proc of owned.reverse()) await proc.stop().catch(() => undefined);
-  await new Promise<void>((resolve) =>
-    stubServer ? stubServer.close(() => resolve()) : resolve(),
-  );
+  for (const stub of stubs) await stub.close().catch(() => undefined);
   try {
     const client = createClient({ url: redisUrl() });
     await client.connect();
@@ -154,43 +157,292 @@ describe('G0.4d isolated stack', () => {
       await client.quit();
     }
   });
+});
 
-  it("[G0.4] configuration refuses the user's own PostgreSQL (5432) and Redis (6379) without echoing URLs", async () => {
-    requireEntry(CONFIG, 'configuration schema');
-    const mod = (await import(/* @vite-ignore */ CONFIG)) as {
-      parseNemoDotsEnv(env: Record<string, string | undefined>): unknown;
+// Port refusal. Built at run time so this file never contains a
+// credential-shaped URL. Every case is the full valid baseline plus ONE
+// override, so a parser that throws on any input cannot pass.
+describe('G0.4d configuration refuses the user PostgreSQL (5432) and Redis (6379)', () => {
+  const marker = ['Echo', 'Marker', '0000'].join('-');
+  const scheme = ['postgres', ''].join(':') + '//';
+  const pgUrlFor = (role: string, host: string, port: string) =>
+    `${scheme}nemodots_${role}:${marker}@${host}${port ? `:${port}` : ''}/nemodots`;
+
+  const baseline = (): Record<string, string> => {
+    const env: Record<string, string> = {
+      NEMODOTS_INSTANCE: 'acc0',
+      NEMODOTS_REDIS_URL: 'redis://127.0.0.1:56379/1',
+      NEMODOTS_REDIS_PREFIX: 'acc0:g0',
+      NEMODOTS_CHECKOUT_PORT: '4600',
+      NEMODOTS_CHECKOUT_URL: 'http://127.0.0.1:4600',
+      NEMODOTS_PROBE_SECRET: `${marker}-probe-secret-value`,
     };
-    // Built at run time so this file never contains a credential-shaped URL.
-    const marker = ['Echo', 'Marker', '0000'].join('-');
-    const scheme = ['postgres', ''].join(':') + '//';
-    const secretUrl = `${scheme}nemodots_app:${marker}@127.0.0.1:5432/nemodots`;
-    const cases: Record<string, string>[] = [
-      { NEMODOTS_PG_PORT: '5432' },
-      { NEMODOTS_REDIS_PORT: '6379' },
-      { NEMODOTS_REDIS_URL: 'redis://127.0.0.1:6379/0' },
-      { NEMODOTS_REDIS_URL: 'redis://127.0.0.1/0' },
-      { NEMODOTS_PG_URL_APP: secretUrl },
-      {
-        NEMODOTS_PG_URL_APP: `${scheme}nemodots_app:${marker}@127.0.0.1/nemodots`,
-      },
-      {
-        NEMODOTS_PG_URL_APP: `${scheme}u:${marker}@127.0.0.1:55432/n?port=5432`,
-      },
-    ];
-    for (const env of cases) {
-      let message = '';
-      try {
-        mod.parseNemoDotsEnv(env);
-      } catch (error) {
-        message = (error as Error).message;
-      }
-      expect(message, `no refusal for ${Object.keys(env)[0]}`).not.toBe('');
-      expect(message).not.toContain(marker);
+    for (const role of ROLES)
+      env[`NEMODOTS_PG_URL_${role.toUpperCase()}`] = pgUrlFor(
+        role,
+        '127.0.0.1',
+        '55432',
+      );
+    return env;
+  };
+
+  const parser = async () => {
+    requireEntry(CONFIG, 'configuration schema');
+    return (await import(/* @vite-ignore */ CONFIG)) as {
+      parseNemoDotsEnv(env: Record<string, string | undefined>): {
+        pg: { port: number };
+      };
+    };
+  };
+
+  async function refusal(overrides: Record<string, string>) {
+    const mod = await parser();
+    let message = '';
+    try {
+      mod.parseNemoDotsEnv({ ...baseline(), ...overrides });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    return message;
+  }
+
+  it('[G0.4] positive control: the full baseline parses, and valid spellings (localhost, [::1]) on 55432 / 56379 are accepted', async () => {
+    const mod = await parser();
+    const config = mod.parseNemoDotsEnv(baseline());
+    expect(config.pg.port).toBe(55432);
+    for (const host of ['localhost', '[::1]']) {
+      const overrides: Record<string, string> = {
+        NEMODOTS_REDIS_URL: `redis://${host}:56379/1`,
+      };
+      for (const role of ROLES)
+        overrides[`NEMODOTS_PG_URL_${role.toUpperCase()}`] = pgUrlFor(
+          role,
+          host,
+          '55432',
+        );
+      expect(
+        () => mod.parseNemoDotsEnv({ ...baseline(), ...overrides }),
+        `${host} on the NemoDots ports must be accepted`,
+      ).not.toThrow();
     }
   });
+
+  it('[G0.4] every PostgreSQL role URL is refused on 5432, explicit or omitted, in every host spelling, and the message names the variable and never the URL', async () => {
+    const failures: string[] = [];
+    let cases = 0;
+    for (const role of ROLES) {
+      const name = `NEMODOTS_PG_URL_${role.toUpperCase()}`;
+      for (const host of ['127.0.0.1', 'localhost', '[::1]']) {
+        for (const port of ['5432', '']) {
+          cases += 1;
+          const message = await refusal({ [name]: pgUrlFor(role, host, port) });
+          if (!message)
+            failures.push(`${name} ${host}:${port || '(omitted)'} accepted`);
+          else {
+            if (!message.includes(name))
+              failures.push(
+                `${name} ${host}:${port || '(omitted)'}: message omits the variable`,
+              );
+            if (message.includes(marker))
+              failures.push(
+                `${name} ${host}:${port || '(omitted)'}: message echoes the URL`,
+              );
+          }
+        }
+      }
+      const viaQuery = await refusal({
+        [name]: `${pgUrlFor(role, '127.0.0.1', '55432')}?port=5432`,
+      });
+      cases += 1;
+      if (!viaQuery.includes(name))
+        failures.push(`${name} ?port=5432 override not refused by name`);
+    }
+    expect(cases).toBe(5 * 7);
+    expect(failures, failures.join('; ')).toEqual([]);
+  });
+
+  it('[G0.4] the explicit port variables, the Redis URL spellings and the checkout URL are refused on 5432 / 6379 and name the variable', async () => {
+    const cases: [string, Record<string, string>][] = [
+      ['NEMODOTS_PG_PORT', { NEMODOTS_PG_PORT: '5432' }],
+      ['NEMODOTS_PG_PORT', { NEMODOTS_PG_PORT: '6379' }],
+      ['NEMODOTS_REDIS_PORT', { NEMODOTS_REDIS_PORT: '6379' }],
+      ['NEMODOTS_REDIS_PORT', { NEMODOTS_REDIS_PORT: '5432' }],
+      ['NEMODOTS_CHECKOUT_PORT', { NEMODOTS_CHECKOUT_PORT: '5432' }],
+      ['NEMODOTS_CHECKOUT_PORT', { NEMODOTS_CHECKOUT_PORT: '6379' }],
+      [
+        'NEMODOTS_CHECKOUT_URL',
+        { NEMODOTS_CHECKOUT_URL: 'http://127.0.0.1:5432' },
+      ],
+      [
+        'NEMODOTS_CHECKOUT_URL',
+        { NEMODOTS_CHECKOUT_URL: 'http://localhost:6379' },
+      ],
+    ];
+    for (const host of ['127.0.0.1', 'localhost', '[::1]'])
+      for (const url of [
+        `redis://${host}:6379/0`,
+        `redis://${host}/0`,
+        `redis://:${marker}@${host}:6379/0`,
+      ])
+        cases.push(['NEMODOTS_REDIS_URL', { NEMODOTS_REDIS_URL: url }]);
+    const failures: string[] = [];
+    for (const [name, overrides] of cases) {
+      const message = await refusal(overrides);
+      if (!message)
+        failures.push(`${JSON.stringify(Object.keys(overrides))} accepted`);
+      else if (!message.includes(name))
+        failures.push(`${name}: message omits the variable`);
+      if (message.includes(marker))
+        failures.push(`${name}: message echoes a secret`);
+    }
+    expect(failures, failures.join('; ')).toEqual([]);
+  });
+
+  /** Runs a real entry point with a refused URL on 127.0.0.2 (no listener there). */
+  async function entryRefuses(
+    label: string,
+    args: string[],
+    env: Record<string, string>,
+  ) {
+    const r = await run('node', ['--import', 'tsx', ...args], {
+      cwd: APP_ROOT,
+      env,
+      logName: `g0-refuse-${label}.log`,
+      timeoutMs: 60_000,
+      redact: makeRedactor([marker]),
+    });
+    return r;
+  }
+
+  it('[G0.4] the migrate CLI refuses an ADMIN URL on 127.0.0.2:5432 (and with the port omitted) before connecting: non-zero exit with the refusal text, never a connection error', async () => {
+    for (const port of ['5432', '']) {
+      const url = pgUrlFor('admin', '127.0.0.2', port);
+      const r = await entryRefuses(
+        `migrate-${port || 'omitted'}`,
+        [MIGRATE],
+        cleanEnv({
+          NEMODOTS_PG_URL_ADMIN: url,
+        }),
+      );
+      expect(r.timedOut).toBe(false);
+      expect(r.code, r.tail).not.toBe(0);
+      expect(r.code, r.tail).not.toBeNull();
+      expect(r.tail).toContain('NEMODOTS_PG_URL_ADMIN');
+      expect(r.tail).toMatch(/5432|refuse/i);
+      expect(r.tail).not.toMatch(
+        /ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|ETIMEDOUT|timeout/i,
+      );
+      expect(r.tail).not.toContain(marker);
+    }
+  }, 180_000);
+
+  it('[G0.4] the seed CLI refuses the same URL before connecting', async () => {
+    requireEntry(SEED, 'seed script');
+    const r = await entryRefuses(
+      'seed',
+      [SEED],
+      stackEnv({
+        NEMODOTS_PG_URL_ADMIN: pgUrlFor('admin', '127.0.0.2', '5432'),
+      }),
+    );
+    expect(r.timedOut).toBe(false);
+    expect(r.code, r.tail).not.toBe(0);
+    expect(r.tail).toContain('NEMODOTS_PG_URL_ADMIN');
+    expect(r.tail).not.toMatch(
+      /ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|ETIMEDOUT|timeout/i,
+    );
+    expect(r.tail).not.toContain(marker);
+  }, 180_000);
+
+  it('[G0.4] checkout-main refuses a CHECKOUT URL on 127.0.0.2:5432 before listening or connecting', async () => {
+    requireEntry(CHECKOUT, 'checkout API entry');
+    const r = await entryRefuses(
+      'checkout-main',
+      [CHECKOUT],
+      cleanEnv({
+        NEMODOTS_PG_URL_CHECKOUT: pgUrlFor('checkout', '127.0.0.2', '5432'),
+        NEMODOTS_REDIS_URL: redisUrl(),
+        NEMODOTS_REDIS_PREFIX: REDIS_PREFIX,
+        NEMODOTS_CHECKOUT_PORT: String(CHECKOUT_PORT),
+        NEMODOTS_PROBE_SECRET: db.stack.probeSecret,
+      }),
+    );
+    expect(r.timedOut, 'checkout-main must exit, not keep running').toBe(false);
+    expect(r.code, r.tail).not.toBe(0);
+    expect(r.tail).toContain('NEMODOTS_PG_URL_CHECKOUT');
+    expect(r.tail).not.toMatch(
+      /ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|ETIMEDOUT|timeout/i,
+    );
+    expect(r.tail).not.toContain(marker);
+    expect(await portIsFree(CHECKOUT_PORT), 'port 4600 must not be bound').toBe(
+      true,
+    );
+  }, 180_000);
 });
 
 // ------------------------------------------------------------------ G0.4e
+
+interface TableDigest {
+  rows: number;
+  md5: string;
+}
+
+/**
+ * Digest of every table in the four schemas of `database`, read as the
+ * verifier role. Any query error THROWS: an unreadable table never counts as
+ * "unchanged".
+ */
+async function digestDatabase(database: string, only?: string[]) {
+  const url = withDb(db.stack.roleUrls.verifier, database);
+  const tables = await query<{ s: string; t: string }>(
+    url,
+    `SELECT schemaname AS s, tablename AS t FROM pg_tables
+      WHERE schemaname IN ('ledger','coordinator','checkout','control') ORDER BY 1, 2`,
+  );
+  const out: Record<string, TableDigest> = {};
+  for (const { s, t } of tables) {
+    if (only && !only.includes(s)) continue;
+    const r = await query<{ n: string; d: string }>(
+      url,
+      `SELECT count(*)::text AS n,
+              md5(coalesce(string_agg(x::text, '|' ORDER BY x::text), '')) AS d
+         FROM ${s}.${t} x`,
+    );
+    out[`${s}.${t}`] = { rows: Number(r[0].n), md5: r[0].d };
+  }
+  return out;
+}
+
+const nonEmptyTables = (d: Record<string, TableDigest>) =>
+  Object.values(d).filter((t) => t.rows > 0).length;
+
+/** Key names of every Redis database on 56379 (db N -> keys). */
+async function redisKeyNames(port: number) {
+  const out = new Set<string>();
+  for (let n = 0; n < 16; n += 1) {
+    const client = createClient({ url: `redis://127.0.0.1:${port}/${n}` });
+    await client.connect();
+    try {
+      for await (const key of client.scanIterator({ COUNT: 500 })) {
+        const list = Array.isArray(key) ? key : [key];
+        for (const k of list) out.add(`${n}:${k}`);
+      }
+    } finally {
+      await client.quit();
+    }
+  }
+  return out;
+}
+
+/** Keys added or removed outside the suite's own prefix and the shared test prefix. */
+function redisOutsideDiff(before: Set<string>, after: Set<string>) {
+  const mine = (k: string) =>
+    /^\d+:acc0:/.test(k) || /^\d+:nemodots:test:/.test(k);
+  return {
+    added: [...after].filter((k) => !before.has(k) && !mine(k)),
+    removed: [...before].filter((k) => !after.has(k) && !mine(k)),
+  };
+}
 
 describe('G0.4e seeded checkout API', () => {
   // Free port 4600 for the G0.5 cases that start their own checkout.
@@ -223,17 +475,75 @@ describe('G0.4e seeded checkout API', () => {
     return proc;
   }
 
-  it('[G0.4] seed populates the checkout schema with the documented data shape and is scoped to the test database', async () => {
-    requireEntry(SEED, 'seed script');
-    const mainBefore = await mainDbDigest();
-    const seed = await run('node', ['--import', 'tsx', SEED], {
+  const runSeed = (target: AccDb, logName: string) =>
+    run('node', ['--import', 'tsx', SEED], {
       cwd: APP_ROOT,
-      env: stackEnv(),
-      logName: 'g0-seed-1.log',
+      env: stackEnv({}, target),
+      logName,
       timeoutMs: 180_000,
       redact,
     });
+
+  /** Business hash: every checkout table (products, inventory, replica, orders, items, config) and every control table. */
+  const businessHash = async () => {
+    const d = await digestDatabase(db.name, ['checkout', 'control']);
+    return d;
+  };
+
+  let neighbour: AccDb;
+
+  it('[G0.4] a neighbouring acc0 database (migrated and seeded) is readable and non-empty before the target is seeded', async () => {
+    requireEntry(SEED, 'seed script');
+    neighbour = await createAccDb();
+    const m = await run('node', ['--import', 'tsx', MIGRATE], {
+      cwd: APP_ROOT,
+      env: cleanEnv({ NEMODOTS_PG_URL_ADMIN: neighbour.urls.admin }),
+      logName: 'g0-neighbour-migrate.log',
+      timeoutMs: 120_000,
+      redact,
+    });
+    expect(m.code, m.tail).toBe(0);
+    const seed = await runSeed(neighbour, 'g0-neighbour-seed.log');
+    expect(seed.code, `neighbour seed exit ${seed.code}: ${seed.tail}`).toBe(0);
+    const digest = await (async () => {
+      const url = withDb(db.stack.roleUrls.verifier, neighbour.name);
+      const tables = await query<{ n: string }>(
+        url,
+        "SELECT count(*)::text AS n FROM pg_tables WHERE schemaname IN ('ledger','coordinator','checkout','control')",
+      );
+      const d = await digestDatabase(neighbour.name);
+      expect(Object.keys(d).length, 'every table readable').toBe(
+        Number(tables[0].n),
+      );
+      return d;
+    })();
+    expect(nonEmptyTables(digest)).toBeGreaterThanOrEqual(5);
+    expect(digest['checkout.orders'].rows).toBeGreaterThan(0);
+    expect(digest['checkout.inventory'].rows).toBeGreaterThan(0);
+    appendManifest({
+      gate: 0,
+      step: 'seed-neighbour',
+      neighbour: neighbour.name,
+      tables: Object.keys(digest).length,
+      nonEmptyTables: nonEmptyTables(digest),
+    });
+  }, 400_000);
+
+  it('[G0.4] seed populates the target with the documented data shape; the neighbour database, the main database and every Redis key outside the acc0 prefix are untouched', async () => {
+    expect(neighbour, 'neighbour database was not created').toBeDefined();
+    const neighbourBefore = await digestDatabase(neighbour.name);
+    expect(nonEmptyTables(neighbourBefore)).toBeGreaterThanOrEqual(5);
+    let mainBefore: Record<string, TableDigest> | string;
+    try {
+      mainBefore = await digestDatabase('nemodots');
+    } catch (error) {
+      mainBefore = `unreadable: ${(error as Error).message.slice(0, 80)}`;
+    }
+    const redisBefore = await redisKeyNames(db.stack.redisPort);
+
+    const seed = await runSeed(db, 'g0-seed-1.log');
     expect(seed.code, `seed exit ${seed.code}: ${seed.tail}`).toBe(0);
+
     // Data shape the verifier introspects (ACCEPTANCE_CONTRACT section 6).
     const cols = await query<{ t: string; c: string }>(
       db.urls.verifier,
@@ -248,38 +558,84 @@ describe('G0.4e seeded checkout API', () => {
       expect(has('order_items', c), `checkout.order_items.${c}`).toBe(true);
     for (const c of ['sku', 'quantity'])
       expect(has('inventory', c), `checkout.inventory.${c}`).toBe(true);
-    const inv = await query<{ n: string }>(
-      db.urls.verifier,
-      'SELECT count(*)::text AS n FROM checkout.inventory',
-    );
-    expect(Number(inv[0].n)).toBeGreaterThan(0);
-    // Seeding this database must not touch the instance's main database.
-    expect(await mainDbDigest()).toEqual(mainBefore);
-  }, 300_000);
+    const target = await digestDatabase(db.name, ['checkout']);
+    expect(target['checkout.inventory'].rows).toBeGreaterThan(0);
+    expect(target['checkout.orders'].rows).toBeGreaterThan(0);
 
-  it('[G0.4] a second seed run keeps the business data size stable (reset is scoped, not additive)', async () => {
-    const count = async () =>
-      Number(
-        (
-          await query<{ n: string }>(
-            db.urls.verifier,
-            'SELECT count(*)::text AS n FROM checkout.inventory',
-          )
-        )[0].n,
-      );
-    const before = await count();
-    const seed = await run('node', ['--import', 'tsx', SEED], {
-      cwd: APP_ROOT,
-      env: stackEnv(),
-      logName: 'g0-seed-2.log',
-      timeoutMs: 180_000,
-      redact,
+    // Scoping: the neighbour is byte-for-byte unchanged and the digests were non-empty.
+    const neighbourAfter = await digestDatabase(neighbour.name);
+    expect(neighbourAfter).toEqual(neighbourBefore);
+    let mainAfter: Record<string, TableDigest> | string;
+    try {
+      mainAfter = await digestDatabase('nemodots');
+    } catch (error) {
+      mainAfter = `unreadable: ${(error as Error).message.slice(0, 80)}`;
+    }
+    expect(mainAfter).toEqual(mainBefore);
+    const redisAfter = await redisKeyNames(db.stack.redisPort);
+    const diff = redisOutsideDiff(redisBefore, redisAfter);
+    appendManifest({
+      gate: 0,
+      step: 'seed-scoping',
+      neighbourTablesNonEmpty: nonEmptyTables(neighbourBefore),
+      mainDatabase:
+        typeof mainBefore === 'string'
+          ? mainBefore
+          : `${Object.keys(mainBefore).length} tables, ${nonEmptyTables(mainBefore)} non-empty`,
+      redisKeysBefore: redisBefore.size,
+      redisKeysAfter: redisAfter.size,
+      redisOutsideAdded: diff.added.length,
+      redisOutsideRemoved: diff.removed.length,
     });
+    expect(
+      diff,
+      'seed changed Redis keys outside the acc0:g0 prefix (key names withheld)',
+    ).toEqual({ added: [], removed: [] });
+  }, 400_000);
+
+  it('[G0.4] positive control for the Redis scoping check: a key written outside the prefix is reported', async () => {
+    const before = await redisKeyNames(db.stack.redisPort);
+    const stray = `leakcontrol:${Date.now()}`;
+    const client = createClient({
+      url: `redis://127.0.0.1:${db.stack.redisPort}/3`,
+    });
+    await client.connect();
+    try {
+      await client.set(stray, '1', { EX: 60 });
+      const after = await redisKeyNames(db.stack.redisPort);
+      const diff = redisOutsideDiff(before, after);
+      expect(diff.added).toContain(`3:${stray}`);
+    } finally {
+      await client.unlink(stray);
+      await client.quit();
+    }
+  });
+
+  it('[G0.4] a second seed run leaves a business hash over EVERY checkout and control table unchanged (no duplicated orders, no changed config or fault state)', async () => {
+    const before = await businessHash();
+    expect(Object.keys(before)).toEqual(
+      expect.arrayContaining([
+        'checkout.orders',
+        'checkout.order_items',
+        'checkout.inventory',
+        'checkout.inventory_replica',
+        'checkout.products',
+        'checkout.config_entries',
+        'checkout.config_versions',
+        'checkout.config_collection',
+        'control.scenario_runs',
+        'control.fault_schedules',
+      ]),
+    );
+    expect(before['checkout.orders'].rows).toBeGreaterThan(0);
+    const seed = await runSeed(db, 'g0-seed-2.log');
     expect(seed.code, `second seed exit ${seed.code}: ${seed.tail}`).toBe(0);
-    expect(await count()).toBe(before);
+    const after = await businessHash();
+    expect(after).toEqual(before);
   }, 300_000);
 
-  it('[G0.4] the checkout API starts, reports ok on 4600, and its health is visible to an independent probe', async () => {
+  it('[G0.4] the checkout API starts, reports ok on 4600, serves cached catalog reads under the acc0 prefix only, and its health is visible to an independent probe', async () => {
+    const redisBefore = await redisKeyNames(db.stack.redisPort);
     const proc = await startCheckout('g0-checkout-1.log');
     const res = await waitForHttp(`${checkoutUrl}/health`, proc, 60_000);
     expect(res.status).toBe(200);
@@ -294,15 +650,45 @@ describe('G0.4e seeded checkout API', () => {
     // No raw credentials in the API response.
     const text = JSON.stringify(body);
     for (const n of needles) expect(text.includes(n.value)).toBe(false);
-  }, 120_000);
+    // A real Redis effect: the catalog is cache-aside, so reads leave keys under the prefix.
+    for (let i = 0; i < 2; i += 1) {
+      const products = await fetch(`${checkoutUrl}/products`, {
+        signal: AbortSignal.timeout(10_000),
+      });
+      expect(products.status).toBe(200);
+    }
+    const client = createClient({ url: redisUrl() });
+    await client.connect();
+    const mine: string[] = [];
+    try {
+      for await (const key of client.scanIterator({
+        MATCH: `${REDIS_PREFIX}*`,
+        COUNT: 200,
+      })) {
+        const list = Array.isArray(key) ? key : [key];
+        mine.push(...list);
+      }
+    } finally {
+      await client.quit();
+    }
+    expect(
+      mine.length,
+      'checkout wrote no cache key under acc0:g0',
+    ).toBeGreaterThan(0);
+    const diff = redisOutsideDiff(
+      redisBefore,
+      await redisKeyNames(db.stack.redisPort),
+    );
+    expect(diff, 'checkout wrote Redis keys outside its prefix').toEqual({
+      added: [],
+      removed: [],
+    });
+  }, 180_000);
 
   it('[G0.4] stop makes health unreachable (not stale ok); restart recovers with data intact', async () => {
     const proc = owned[owned.length - 1];
     expect(proc, 'checkout was not started by the previous case').toBeDefined();
-    const before = await query<{ n: string }>(
-      db.urls.verifier,
-      'SELECT count(*)::text AS n FROM checkout.inventory',
-    );
+    const before = await businessHash();
     await proc.stop();
     await expect(
       fetch(`${checkoutUrl}/health`, { signal: AbortSignal.timeout(2000) }),
@@ -310,34 +696,9 @@ describe('G0.4e seeded checkout API', () => {
     const again = await startCheckout('g0-checkout-2.log');
     const res = await waitForHttp(`${checkoutUrl}/health`, again, 60_000);
     expect(((await res.json()) as { status?: string }).status).toBe('ok');
-    const after = await query<{ n: string }>(
-      db.urls.verifier,
-      'SELECT count(*)::text AS n FROM checkout.inventory',
-    );
-    expect(after[0].n).toBe(before[0].n);
+    expect(await businessHash()).toEqual(before);
   }, 180_000);
 });
-
-async function mainDbDigest() {
-  const url = (await import('./helpers/common.js')).withDb(
-    db.stack.roleUrls.verifier,
-    'nemodots',
-  );
-  const tables = await query<{ s: string; t: string }>(
-    url,
-    `SELECT schemaname AS s, tablename AS t FROM pg_tables
-      WHERE schemaname IN ('ledger','coordinator','checkout','control') ORDER BY 1, 2`,
-  ).catch(() => []);
-  const out: Record<string, string> = {};
-  for (const { s, t } of tables) {
-    const r = await query<{ d: string }>(
-      url,
-      `SELECT md5(coalesce(string_agg(x::text, '|' ORDER BY x::text), '')) AS d FROM ${s}.${t} x`,
-    ).catch(() => [{ d: 'unreadable' }]);
-    out[`${s}.${t}`] = r[0].d;
-  }
-  return out;
-}
 
 // -------------------------------------------------------------------- G0.5
 
@@ -351,6 +712,7 @@ interface HealthJson {
     host: string | null;
     reachable: boolean;
     modelListed: boolean;
+    model: string | null;
   };
   checkout: { reachable: boolean; status: string | null };
 }
@@ -358,6 +720,7 @@ interface HealthJson {
 describe('G0.5 clean start and setup state without Crusoe or Intelligence configuration', () => {
   const base = `http://127.0.0.1:${APP_PORT}`;
   const ALL_THREE = ['OPENAI_API_KEY', 'OPENAI_BASE_URL', 'OPENAI_MODEL'];
+  const FAKE_KEY = 'acc0-not-a-real-key-0000000000';
 
   /** Starts the app, runs fn, and always stops it (success or failure). */
   async function withApp<T>(
@@ -434,6 +797,27 @@ describe('G0.5 clean start and setup state without Crusoe or Intelligence config
     return h;
   };
 
+  const liveEnv = (stub: StubProvider, model: string) => ({
+    NEMODOTS_INFERENCE_MODE: 'live',
+    OPENAI_API_KEY: FAKE_KEY,
+    OPENAI_BASE_URL: `http://127.0.0.1:${stub.port}/v1`,
+    OPENAI_MODEL: model,
+  });
+
+  const counts = async () => {
+    const out: Record<string, number> = {};
+    for (const table of ['missions', 'tasks', 'events'])
+      out[table] = Number(
+        (
+          await query<{ n: string }>(
+            db.urls.verifier,
+            `SELECT count(*)::text AS n FROM coordinator.${table}`,
+          )
+        )[0].n,
+      );
+    return out;
+  };
+
   it(
     '[G0.5] clean start: app serves and the upstream setup state reports not configured',
     () =>
@@ -462,9 +846,10 @@ describe('G0.5 clean start and setup state without Crusoe or Intelligence config
   );
 
   it(
-    '[G0.5] starting a mission while blocked answers 503 with missingEnv names and creates nothing',
+    '[G0.5] starting a mission while blocked answers 503 with missingEnv names and creates nothing (route list AND coordinator tables)',
     () =>
       withApp('blocked', {}, async () => {
+        const before = await counts();
         const res = await fetch(`${base}/api/nemodots/missions`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
@@ -480,6 +865,9 @@ describe('G0.5 clean start and setup state without Crusoe or Intelligence config
         const list = await fetch(`${base}/api/nemodots/missions`);
         expect(list.status).toBe(200);
         expect(await list.json()).toEqual([]);
+        // Independent of the production route: the verifier role reads the tables.
+        expect(await counts()).toEqual(before);
+        expect(before).toEqual({ missions: 0, tasks: 0, events: 0 });
       }),
     120_000,
   );
@@ -501,10 +889,7 @@ describe('G0.5 clean start and setup state without Crusoe or Intelligence config
     () =>
       withApp(
         'partial',
-        {
-          OPENAI_API_KEY: 'acc0-not-a-real-key-0000000000',
-          OPENAI_MODEL: 'acc0-model',
-        },
+        { OPENAI_API_KEY: FAKE_KEY, OPENAI_MODEL: 'acc0-model' },
         async () => {
           const h = await health();
           expect(h.status, h.text.slice(0, 200)).toBe(200);
@@ -518,54 +903,138 @@ describe('G0.5 clean start and setup state without Crusoe or Intelligence config
     120_000,
   );
 
-  it(
-    '[G0.5] fixture mode is labelled fixture, never live',
-    () =>
-      withApp(
-        'fixture',
-        { NEMODOTS_INFERENCE_MODE: 'fixture', NEMODOTS_FIXTURE_PATH: FIXTURE },
-        async () => {
-          const h = await health();
-          expect(h.status, h.text.slice(0, 200)).toBe(200);
-          expect(h.json.mode).toBe('fixture');
-          expect(h.json.missingEnv).toEqual([]);
-          expect(h.json.provider.reachable).toBe(false);
-        },
-      ),
-    120_000,
-  );
+  it('[G0.5] fixture mode is labelled fixture even when all three OPENAI_* variables point at a live-looking stub, and nothing is sent to that stub', async () => {
+    const stub = await startStubProvider(['acc0/model-x']);
+    stubs.push(stub);
+    await withApp(
+      'fixture',
+      {
+        ...liveEnv(stub, 'acc0/model-x'),
+        NEMODOTS_INFERENCE_MODE: 'fixture',
+        NEMODOTS_FIXTURE_PATH: FIXTURE,
+      },
+      async () => {
+        const first = await health();
+        expect(first.status, first.text.slice(0, 200)).toBe(200);
+        expect(first.json.mode).toBe('fixture');
+        expect(first.json.missingEnv).toEqual([]);
+        expect(first.json.provider.reachable).toBe(false);
+        expect(first.json.provider.modelListed).toBe(false);
+        expect(first.text).not.toContain(FAKE_KEY);
+        await sleep(1500);
+        const second = await health();
+        expect(second.json.mode).toBe('fixture');
+        expect(
+          stub.requests,
+          `fixture mode contacted the provider: ${stub.requests.join(', ')}`,
+        ).toEqual([]);
+      },
+    );
+  }, 120_000);
+
+  it('[G0.5] fixture mode with a nonexistent fixture file is refused or blocked, never labelled fixture or live', async () => {
+    const missingFixture = path.join(SCRATCH, 'no-such-fixture.json');
+    expect(existsSync(missingFixture)).toBe(false);
+    const proc = startManaged('node', ['--import', 'tsx', APP_ENTRY], {
+      cwd: APP_ROOT,
+      env: stackEnv({
+        HOST: '127.0.0.1',
+        PORT: String(APP_PORT),
+        DATABASE_PATH: path.join(ensureScratch(), 'app-nofixture.sqlite'),
+        OPENAI_API_KEY: '',
+        OPENAI_BASE_URL: '',
+        OPENAI_MODEL: '',
+        INTELLIGENCE_API_KEY: '',
+        CPK_INTELLIGENCE_API_KEY: '',
+        NEMODOTS_INFERENCE_MODE: 'fixture',
+        NEMODOTS_FIXTURE_PATH: missingFixture,
+      }),
+      logName: 'g0-app-nofixture.log',
+      redact,
+    });
+    owned.push(proc);
+    try {
+      let outcome: 'refused' | 'blocked' | 'unexpected';
+      let detail = '';
+      try {
+        await waitForHttp(`${base}/api/state`, proc, 60_000);
+        const h = await health();
+        detail = `status=${h.status} mode=${h.json?.mode} body=${h.text.slice(0, 120)}`;
+        // Only an explicit blocked label counts: a 404 from a route that does
+        // not exist yet is not a refusal.
+        outcome =
+          h.status === 200 && h.json?.mode === 'blocked'
+            ? 'blocked'
+            : 'unexpected';
+      } catch {
+        outcome = proc.exited() ? 'refused' : 'unexpected';
+        detail = proc.output().slice(-300);
+      }
+      if (outcome === 'refused')
+        expect(
+          proc.output(),
+          'a refusal must say why (the fixture path)',
+        ).toMatch(/fixture/i);
+      expect(
+        ['refused', 'blocked'],
+        `a missing fixture file must be refused or labelled blocked (${detail})`,
+      ).toContain(outcome);
+    } finally {
+      await proc.stop();
+      owned.splice(owned.indexOf(proc), 1);
+      await sleep(200);
+    }
+  }, 120_000);
+
+  it('[G0.5] live mode with a provider that lists the configured model is labelled live, reachable and modelListed (positive control)', async () => {
+    const stub = await startStubProvider(['acc0/model-x', 'acc0/other']);
+    stubs.push(stub);
+    await withApp('live-ok', liveEnv(stub, 'acc0/model-x'), async () => {
+      const h = await health();
+      expect(h.status, h.text.slice(0, 200)).toBe(200);
+      expect(h.json.mode).toBe('live');
+      expect(h.json.missingEnv).toEqual([]);
+      expect(h.json.provider.host).toBe(`127.0.0.1:${stub.port}`);
+      expect(h.json.provider.reachable).toBe(true);
+      expect(h.json.provider.modelListed).toBe(true);
+      expect(h.text).not.toContain(FAKE_KEY);
+      expect(stub.requests.length, 'provider was never asked').toBeGreaterThan(
+        0,
+      );
+    });
+  }, 120_000);
+
+  it('[G0.5] live mode with a provider that lists a DIFFERENT model is reachable but modelListed false', async () => {
+    const stub = await startStubProvider(['acc0/some-other-model']);
+    stubs.push(stub);
+    await withApp('live-other', liveEnv(stub, 'acc0/model-x'), async () => {
+      const h = await health();
+      expect(h.status, h.text.slice(0, 200)).toBe(200);
+      expect(h.json.mode).toBe('live');
+      expect(h.json.provider.reachable).toBe(true);
+      expect(h.json.provider.modelListed).toBe(false);
+    });
+  }, 120_000);
 
   it('[G0.5] fully configured live mode with an unreachable provider is labelled live-but-unreachable, not healthy', async () => {
     // A stub that fails every request stands in for a dead provider endpoint
-    // (valid for this adapter/labelling check; it proves nothing about inference).
-    stubServer = createServer((_req, res) => {
-      res.statusCode = 503;
-      res.end('{"error":"stub down"}');
+    // (valid for this labelling check; it proves nothing about inference).
+    const stub = await startStubProvider('down');
+    stubs.push(stub);
+    await withApp('live', liveEnv(stub, 'acc0-model'), async () => {
+      const h = await health();
+      expect(h.status, h.text.slice(0, 200)).toBe(200);
+      expect(h.json.mode).toBe('live');
+      expect(h.json.missingEnv).toEqual([]);
+      expect(h.json.provider.host).toBe(`127.0.0.1:${stub.port}`);
+      expect(h.json.provider.reachable).toBe(false);
+      expect(h.json.provider.modelListed).toBe(false);
+      expect(h.text).not.toContain(FAKE_KEY);
+      expect(
+        stub.requests.length,
+        'the unreachable case never asked the provider',
+      ).toBeGreaterThan(0);
     });
-    await new Promise<void>((r) =>
-      stubServer!.listen(0, '127.0.0.1', () => r()),
-    );
-    const addr = stubServer.address();
-    const stubPort = typeof addr === 'object' && addr ? addr.port : 0;
-    await withApp(
-      'live',
-      {
-        NEMODOTS_INFERENCE_MODE: 'live',
-        OPENAI_API_KEY: 'acc0-not-a-real-key-0000000000',
-        OPENAI_BASE_URL: `http://127.0.0.1:${stubPort}/v1`,
-        OPENAI_MODEL: 'acc0-model',
-      },
-      async () => {
-        const h = await health();
-        expect(h.status, h.text.slice(0, 200)).toBe(200);
-        expect(h.json.mode).toBe('live');
-        expect(h.json.missingEnv).toEqual([]);
-        expect(h.json.provider.host).toBe(`127.0.0.1:${stubPort}`);
-        expect(h.json.provider.reachable).toBe(false);
-        expect(h.json.provider.modelListed).toBe(false);
-        expect(h.text).not.toContain('acc0-not-a-real-key');
-      },
-    );
   }, 120_000);
 
   it('[G0.5] with the checkout API running, health reports it reachable', async () => {

@@ -11,6 +11,8 @@ import {
 } from '../../../../src/server/nemodots/coordinator/index.js';
 import {
   EventPayloadSchema,
+  type AttemptContext,
+  type DependencyVector,
   type ModelCallRecord,
   type TaskId,
 } from '../../../../src/server/nemodots/contracts/index.js';
@@ -28,6 +30,7 @@ import {
   taskRow,
   vectorOf,
   withHarness,
+  type Harness,
 } from './harness.js';
 
 const TWO_INVESTIGATORS = [
@@ -534,13 +537,8 @@ it('recordModelCall stores through the ledger port in the publication transactio
 it('a SupportError at publication invalidates the attempt, writes a synthetic invalidation and schedules a repair, with no partial rows (C13)', async () => {
   const publishers: [
     string,
-    (
-      h: Parameters<Parameters<typeof withHarness>[0]>[0],
-      ctx: any,
-      v: any,
-    ) => Promise<unknown>,
+    (h: Harness, ctx: AttemptContext, v: DependencyVector) => Promise<unknown>,
   ][] = [
-    // eslint-disable-line @typescript-eslint/no-explicit-any
     [
       'publishOutput',
       (h, ctx, v) =>

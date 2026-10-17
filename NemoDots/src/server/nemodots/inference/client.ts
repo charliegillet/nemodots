@@ -51,16 +51,24 @@ export interface InferenceClientOptions {
 }
 
 /** Optional per-delta observer (live tests cancel after N deltas; a UI may stream). */
-export type StreamObserver = (delta: {
-  content: string | null;
-  reasoning: string | null;
-}) => void;
+export type StreamObserver = (
+  delta: { content: string | null; reasoning: string | null },
+  /** 1-based attempt that produced this delta. A retry restarts the stream from the beginning. */
+  attempt: number,
+) => void;
 
 export interface CompleteContext {
   signal: AbortSignal;
   modelCallId: string;
   role: string;
   onDelta?: StreamObserver;
+  /**
+   * Called once, before a retry, when the failed attempt had already delivered
+   * deltas to onDelta. Everything delivered so far is void: discard it (the
+   * retried attempt replays the stream from the start). `nextAttempt` is the
+   * attempt number the following deltas will carry.
+   */
+  onAttemptReset?: (nextAttempt: number) => void;
 }
 
 export const NULL_USAGE: Usage = Object.freeze({
@@ -149,7 +157,11 @@ class Accumulator {
   constructor(
     private readonly now: () => string,
     private readonly onDelta?: StreamObserver,
+    private readonly attemptNumber = 1,
   ) {}
+
+  /** True once any delta reached the observer. */
+  delivered = false;
 
   /** One SSE `data:` payload. */
   chunk(payload: string) {
@@ -191,7 +203,8 @@ class Accumulator {
           : null;
       if (content !== null || thought !== null) {
         try {
-          this.onDelta({ content, reasoning: thought });
+          this.delivered = true;
+          this.onDelta({ content, reasoning: thought }, this.attemptNumber);
         } catch {
           // an observer must never break inference
         }
@@ -299,7 +312,12 @@ const defaultSleep = (ms: number, signal: AbortSignal) =>
 type TryResult =
   | { kind: 'ok'; attempt: InferenceAttempt; parsed: Parsed }
   | { kind: 'cancelled'; attempt: InferenceAttempt; partial: Partial<Parsed> }
-  | { kind: 'error'; attempt: InferenceAttempt; failure: ClassifiedError };
+  | {
+      kind: 'error';
+      attempt: InferenceAttempt;
+      failure: ClassifiedError;
+      delivered: boolean;
+    };
 
 export class CrusoeInferenceClient implements InferenceAdapter {
   readonly mode = 'live' as const;
@@ -442,6 +460,13 @@ export class CrusoeInferenceClient implements InferenceAdapter {
       ).includes(result.failure.class);
       if (!retryable || n > this.retry.maxRetries)
         return finish('failed', {}, 'error', { ...NULL_USAGE });
+      if (result.delivered && ctx.onAttemptReset) {
+        try {
+          ctx.onAttemptReset(n + 1);
+        } catch {
+          // an observer must never break inference
+        }
+      }
       const delay = backoffMs(n, {
         ...this.retry,
         retryAfterMs: result.failure.retryAfterMs,
@@ -533,7 +558,7 @@ export class CrusoeInferenceClient implements InferenceAdapter {
     aborted.catch(() => undefined);
     const onAbort = () => controller.abort();
     ctx.signal.addEventListener('abort', onAbort, { once: true });
-    const accumulator = new Accumulator(() => this.iso(), ctx.onDelta);
+    const accumulator = new Accumulator(() => this.iso(), ctx.onDelta, n);
     try {
       if (ctx.signal.aborted) return cancelled();
       arm();
@@ -562,7 +587,7 @@ export class CrusoeInferenceClient implements InferenceAdapter {
           response.headers,
           this.now(),
         );
-        return this.errored(attempt, failure);
+        return this.errored(attempt, failure, false);
       }
       let parsed: Parsed;
       if (req.stream) {
@@ -597,17 +622,21 @@ export class CrusoeInferenceClient implements InferenceAdapter {
             accumulator.reasoning === '' ? null : accumulator.reasoning,
         });
       if (error instanceof AttemptFailure)
-        return this.errored(attempt, error.failure);
-      return this.errored(attempt, {
-        class: timedOut ? 'timeout' : 'network',
-        code: deadlineHit
-          ? 'client_deadline'
-          : timedOut
-            ? 'client_timeout'
-            : networkCode(error),
-        errorId: null,
-        retryAfterMs: null,
-      });
+        return this.errored(attempt, error.failure, accumulator.delivered);
+      return this.errored(
+        attempt,
+        {
+          class: timedOut ? 'timeout' : 'network',
+          code: deadlineHit
+            ? 'client_deadline'
+            : timedOut
+              ? 'client_timeout'
+              : networkCode(error),
+          errorId: null,
+          retryAfterMs: null,
+        },
+        accumulator.delivered,
+      );
     } finally {
       clearTimeout(timer);
       clearTimeout(deadline);
@@ -620,6 +649,7 @@ export class CrusoeInferenceClient implements InferenceAdapter {
   private errored(
     attempt: InferenceAttempt,
     failure: ClassifiedError,
+    delivered: boolean,
   ): TryResult {
     attempt.finishedAt = this.iso();
     attempt.finishReason = 'error';
@@ -630,7 +660,7 @@ export class CrusoeInferenceClient implements InferenceAdapter {
       code: failure.code,
       errorId: failure.errorId,
     };
-    return { kind: 'error', attempt, failure };
+    return { kind: 'error', attempt, failure, delivered };
   }
 }
 

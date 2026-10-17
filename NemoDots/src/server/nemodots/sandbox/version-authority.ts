@@ -54,8 +54,18 @@ export interface AdvanceConfigInput {
   key: string;
   /** Ignored (and must be omitted) with deleteKey. */
   value?: ConfigScalar;
-  /** The version the caller read. 0 means "the key does not exist" (insert). */
+  /**
+   * The version the caller read. 0 means "the key does not exist" (insert).
+   * Ignored when `unconditional` is set.
+   */
   expectedVersion: number;
+  /**
+   * Injector/seed writers that write regardless of the current version: the
+   * expected version is read UNDER the member row lock taken by the single
+   * lock sequence below (collection first), never before it. Actions and the
+   * owner edit never set this; their CAS is the point.
+   */
+  unconditional?: boolean;
   causedBy: CausedBy;
   /** Insert the key when it does not exist (expectedVersion must be 0). */
   insertIfMissing?: boolean;
@@ -176,9 +186,12 @@ export async function advanceConfig(
   client: PgClient,
   input: AdvanceConfigInput,
 ): Promise<AdvanceConfigResult> {
-  const { key, expectedVersion, causedBy } = input;
+  const { key, causedBy } = input;
   assertKey(key);
-  if (!Number.isInteger(expectedVersion) || expectedVersion < 0)
+  if (
+    !input.unconditional &&
+    (!Number.isInteger(input.expectedVersion) || input.expectedVersion < 0)
+  )
     throw new ConfigVersionError(
       'invalid_input',
       key,
@@ -215,13 +228,23 @@ export async function advanceConfig(
   }
 
   // Step 5: the member row.
-  const member = await client.query<{ version: string; value: ConfigScalar }>(
-    'SELECT version, value FROM checkout.config_entries WHERE key = $1 FOR UPDATE',
-    [key],
-  );
+  const selectMember = () =>
+    client.query<{ version: string; value: ConfigScalar }>(
+      'SELECT version, value FROM checkout.config_entries WHERE key = $1 FOR UPDATE',
+      [key],
+    );
+  let member = await selectMember();
   const actionId = causedBy.actionId ?? null;
+  // An unconditional write advances from whatever version it finds under lock.
+  const expectedOf = (found: boolean) =>
+    input.unconditional
+      ? found
+        ? num(member.rows[0].version)
+        : 0
+      : input.expectedVersion;
 
   if (!member.rows.length) {
+    const expectedVersion = expectedOf(false);
     if (!input.insertIfMissing)
       throw new ConfigVersionError(
         'missing_key',
@@ -238,7 +261,23 @@ export async function advanceConfig(
         expectedVersion,
         0,
       );
-    if (!collectionLocked) await lockCollection(); // lost a race with a delete
+    if (!collectionLocked) {
+      // The peek saw a row that a concurrent delete then removed: the lock on
+      // the collection is taken now (never while holding the member row, which
+      // does not exist) and membership is checked AGAIN. A competing inserter
+      // that was queued behind the same delete may have created the key in the
+      // meantime; that is a lost compare-and-set, not an internal error.
+      await lockCollection();
+      member = await selectMember();
+      if (member.rows.length)
+        throw new ConfigVersionError(
+          'stale_version',
+          key,
+          'key was created concurrently',
+          expectedVersion,
+          num(member.rows[0].version),
+        );
+    }
     const next = await client.query<{ next: string }>(
       'SELECT COALESCE(MAX(version), 0) + 1 AS next FROM checkout.config_versions WHERE key = $1',
       [key],
@@ -276,6 +315,7 @@ export async function advanceConfig(
   }
 
   const current = num(member.rows[0].version);
+  const expectedVersion = expectedOf(true);
   const beforeDigest = configValueDigest(member.rows[0].value);
   if (current !== expectedVersion)
     throw new ConfigVersionError(
@@ -438,22 +478,20 @@ export function advanceConfigTx(
 
 /**
  * For the injector and the seed, which write a value regardless of what the
- * current version is: reads the version under the row lock and advances from
- * it. Never used by actions or the owner edit, whose CAS is the point.
+ * current version is. The lock sequence is the one in `advanceConfig`
+ * (collection first when the key is inserted or deleted); the expected
+ * version is read under the member lock. Never used by actions or the owner
+ * edit, whose CAS is the point.
  */
-export async function advanceConfigUnconditionally(
+export function advanceConfigUnconditionally(
   client: PgClient,
-  input: Omit<AdvanceConfigInput, 'expectedVersion' | 'deleteKey'> & {
-    deleteKey?: boolean;
-  },
+  input: Omit<AdvanceConfigInput, 'expectedVersion' | 'unconditional'>,
 ): Promise<AdvanceConfigResult> {
-  assertKey(input.key);
-  const row = await client.query<{ version: string }>(
-    'SELECT version FROM checkout.config_entries WHERE key = $1 FOR UPDATE',
-    [input.key],
-  );
-  const expectedVersion = row.rows.length ? num(row.rows[0].version) : 0;
-  return advanceConfig(client, { ...input, expectedVersion });
+  return advanceConfig(client, {
+    ...input,
+    expectedVersion: 0,
+    unconditional: true,
+  });
 }
 
 export function advanceConfigUnconditionallyTx(

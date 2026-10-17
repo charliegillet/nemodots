@@ -9,7 +9,6 @@ import {
 import { latch, withTimeout } from '../../helpers/barrier.js';
 import {
   attemptRow,
-  claimStart,
   expireLease,
   invalidationFor,
   plannedMission,
@@ -174,7 +173,7 @@ it.each([
 
 it('lease loss: a reaper takeover aborts the old host run with lease_lost and its late publication is fenced', async () => {
   await withHarness(async (h) => {
-    const planned = await plannedMission(h, [
+    await plannedMission(h, [
       { role: 'investigator' },
       { role: 'investigator' },
     ]);

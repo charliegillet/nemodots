@@ -251,7 +251,10 @@ export function scanRequestsForLeaks(
   const hits = new Set<string>();
   for (const body of bodies)
     for (const { role, text } of allMessageTexts(body)) {
-      if ((role === 'system' || role === 'developer') && allowed.has(sha256(text)))
+      if (
+        (role === 'system' || role === 'developer') &&
+        allowed.has(sha256(text))
+      )
         continue;
       for (const hit of findLeaks([text], extra)) hits.add(`${role}:${hit}`);
     }

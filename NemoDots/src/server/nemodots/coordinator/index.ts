@@ -70,7 +70,12 @@ export {
   OUTBOX_CHANNEL,
   ActionProposedPayloadSchema,
 } from './outbox.js';
-export type { Outbox, OutboxHandler, OutboxMessage } from './outbox.js';
+export type {
+  Outbox,
+  OutboxHandler,
+  OutboxHelpers,
+  OutboxMessage,
+} from './outbox.js';
 export { OUTBOX_TOPICS, createCoordinatorHandlers } from './handlers.js';
 export {
   createRecovery,

@@ -133,20 +133,18 @@ describe('G0.6 secrets are absent from committed content', () => {
 });
 
 describe('G0.6 secrets are absent from built assets and logs', () => {
-  it("[G0.6] the shared checkout's dist/ (when built) has zero secret matches", () => {
+  it("[G0.6] the shared checkout's dist/ (when built) has zero secret matches", (ctx) => {
     const dist = path.join(APP_ROOT, 'dist');
     if (!existsSync(dist)) {
-      // A missing build is a fact to report, not a pass: the clean-build scan in
-      // install-and-checks.test.ts is the authoritative one.
+      // A missing build is NOT_RUN, never a pass: the clean-build canary scan
+      // in install-and-checks.test.ts is the authoritative one.
       appendManifest({
         gate: 0,
         step: 'secret-scan-shared-dist',
+        status: 'NOT_RUN',
         note: 'dist absent',
       });
-      expect(
-        existsSync(dist),
-        'shared dist/ absent; see the clean-build scan',
-      ).toBe(false);
+      ctx.skip('NOT_RUN: shared dist/ is absent, nothing to scan');
       return;
     }
     const report = scan(needles(), { roots: [dist], skipDirs: new Set() });
@@ -204,5 +202,34 @@ describe('G0.6 secrets are absent from built assets and logs', () => {
       extensions: new Set(['.log']),
     });
     expect(summarize(report)).toBe('no matches');
+  });
+});
+
+describe('G0.6 parts this suite cannot execute (reported, never folded into PASS)', () => {
+  it('[G0.6] git history (git log -p main..nemodots and the staged diff) has zero secret-value matches', (ctx) => {
+    appendManifest({
+      gate: 0,
+      step: 'secret-scan-git-history',
+      status: 'NOT_RUN',
+      reason:
+        'the verifier runs no git commands (LEAD_NOTES); every commit on nemodots is auto-pushed, so a committed-then-deleted secret would stay in pushed history',
+      dependency:
+        'integrator: run a needle-count scan (counts only, never values) over `git log -p main..nemodots` and the staged diff with the needles from .env and roles.env, and write the result into the acceptance manifest',
+    });
+    ctx.skip(
+      'NOT_RUN: git history scan is handed to the integrator (counts only)',
+    );
+  });
+
+  it('[G0.6] screenshots and other binary files (png, gif, mp4, zip) contain no secrets', (ctx) => {
+    appendManifest({
+      gate: 0,
+      step: 'secret-scan-binaries',
+      status: 'NOT_RUN',
+      reason:
+        'the text scanner skips binary files; screenshots named by TEST_PROMPT G0.6 cannot be text-scanned here',
+      handedTo: 'gate 7 (UI/E2E) with a visual check of every screenshot',
+    });
+    ctx.skip('NOT_RUN: binary and screenshot scan is handed to gate 7');
   });
 });

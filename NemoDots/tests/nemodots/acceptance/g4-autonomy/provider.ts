@@ -279,7 +279,8 @@ export async function startProvider(
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      if (record) record.responseText += decoder.decode(value, { stream: true });
+      if (record)
+        record.responseText += decoder.decode(value, { stream: true });
       res.write(value);
     }
     res.end();
@@ -515,7 +516,8 @@ export function completionOf(record: RecordedCall): ParsedCompletion {
   } else {
     try {
       const body = JSON.parse(text);
-      for (const choice of body.choices ?? []) absorb(choice.message, 'message');
+      for (const choice of body.choices ?? [])
+        absorb(choice.message, 'message');
     } catch {
       /* not JSON */
     }

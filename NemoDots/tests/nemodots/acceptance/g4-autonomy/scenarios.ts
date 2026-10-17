@@ -36,7 +36,10 @@ export const SPECIALIST_CAPS = SPEC_ROLE_CAPABILITIES;
 export interface PlanTaskSpec {
   title: string;
   question: string;
-  role: Exclude<keyof typeof SPEC_ROLE_CAPABILITIES, 'planner' | 'postcondition'>;
+  role: Exclude<
+    keyof typeof SPEC_ROLE_CAPABILITIES,
+    'planner' | 'postcondition'
+  >;
   dependsOn?: number[];
 }
 export function planReply(tasks: PlanTaskSpec[]): ProviderReply {

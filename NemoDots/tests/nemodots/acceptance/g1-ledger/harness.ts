@@ -43,15 +43,25 @@ export async function entry<T = unknown>(
 ): Promise<T> {
   const file = resolve(APP_ROOT, 'src/server/nemodots', rel);
   const label = `src/server/nemodots/${rel}#${names.join('|')}`;
-  if (!existsSync(file)) throw new EntryPointMissing(label, 'module file does not exist');
+  if (!existsSync(file))
+    throw new EntryPointMissing(label, 'module file does not exist');
   let mod: Record<string, unknown>;
   try {
-    mod = (await import(/* @vite-ignore */ pathToFileURL(file).href)) as Record<string, unknown>;
+    mod = (await import(/* @vite-ignore */ pathToFileURL(file).href)) as Record<
+      string,
+      unknown
+    >;
   } catch (error) {
-    throw new EntryPointMissing(label, `module failed to load: ${(error as Error).message}`);
+    throw new EntryPointMissing(
+      label,
+      `module failed to load: ${(error as Error).message}`,
+    );
   }
   for (const name of names) if (name in mod) return mod[name] as T;
-  throw new EntryPointMissing(label, `module exports none of: ${Object.keys(mod).join(', ') || '(nothing)'}`);
+  throw new EntryPointMissing(
+    label,
+    `module exports none of: ${Object.keys(mod).join(', ') || '(nothing)'}`,
+  );
 }
 
 // --------------------------------------------------------------- database
@@ -61,16 +71,24 @@ export interface AccDb {
   urls: TestDatabaseUrls;
 }
 
-export async function withAccDatabase<T>(fn: (db: AccDb) => Promise<T>): Promise<T> {
+export async function withAccDatabase<T>(
+  fn: (db: AccDb) => Promise<T>,
+): Promise<T> {
   const base = stackRoleUrls();
   const name = `${DB_PREFIX}${randomBytes(6).toString('hex')}`;
   if (!/^acc1_[0-9a-f]{12}$/.test(name)) throw new Error('bad database name');
-  const admin = new pg.Client({ connectionString: base.admin, application_name: 'acc1-admin' });
+  const admin = new pg.Client({
+    connectionString: base.admin,
+    application_name: 'acc1-admin',
+  });
   await admin.connect();
   try {
     await admin.query(`CREATE DATABASE ${name} OWNER nemodots_admin`);
     const urls = Object.fromEntries(
-      (Object.keys(base) as (keyof TestDatabaseUrls)[]).map((role) => [role, withDatabase(base[role], name)]),
+      (Object.keys(base) as (keyof TestDatabaseUrls)[]).map((role) => [
+        role,
+        withDatabase(base[role], name),
+      ]),
     ) as TestDatabaseUrls;
     try {
       await migrate({ connectionString: urls.admin });
@@ -84,14 +102,24 @@ export async function withAccDatabase<T>(fn: (db: AccDb) => Promise<T>): Promise
 }
 
 export function pool(url: string, max = 6): pg.Pool {
-  const p = new pg.Pool({ connectionString: url, max, application_name: 'acc1-g1' });
+  const p = new pg.Pool({
+    connectionString: url,
+    max,
+    application_name: 'acc1-g1',
+  });
   p.on('error', () => {});
   return p;
 }
 
 // ------------------------------------------------------ schema introspection
 
-type Col = { name: string; type: string; notNull: boolean; hasDefault: boolean; generated: boolean };
+type Col = {
+  name: string;
+  type: string;
+  notNull: boolean;
+  hasDefault: boolean;
+  generated: boolean;
+};
 type Fk = { column: string; table: string; refColumn: string };
 
 export class Schema {
@@ -107,7 +135,10 @@ export class Schema {
 
   async exists(table: string): Promise<boolean> {
     const [s, t] = Schema.split(table);
-    const r = await this.db.query('SELECT 1 FROM information_schema.tables WHERE table_schema=$1 AND table_name=$2', [s, t]);
+    const r = await this.db.query(
+      'SELECT 1 FROM information_schema.tables WHERE table_schema=$1 AND table_name=$2',
+      [s, t],
+    );
     return r.rowCount === 1;
   }
 
@@ -122,7 +153,10 @@ export class Schema {
     );
     const cols = r.rows.map((row) => ({
       name: row.column_name as string,
-      type: row.data_type === 'USER-DEFINED' || row.data_type === 'ARRAY' ? (row.udt_name as string) : (row.data_type as string),
+      type:
+        row.data_type === 'USER-DEFINED' || row.data_type === 'ARRAY'
+          ? (row.udt_name as string)
+          : (row.data_type as string),
       notNull: row.is_nullable === 'NO',
       hasDefault: row.column_default !== null || row.is_identity === 'YES',
       generated: row.is_generated === 'ALWAYS',
@@ -132,7 +166,10 @@ export class Schema {
   }
 
   /** First candidate column that exists on the table, or null. */
-  async pick(table: string, candidates: readonly string[]): Promise<string | null> {
+  async pick(
+    table: string,
+    candidates: readonly string[],
+  ): Promise<string | null> {
     const names = new Set((await this.columns(table)).map((c) => c.name));
     return candidates.find((c) => names.has(c)) ?? null;
   }
@@ -162,7 +199,11 @@ export class Schema {
         WHERE k.contype = 'f' AND rn.nspname = $1 AND r.relname = $2 AND array_length(k.conkey, 1) = 1`,
       [s, t],
     );
-    const fks = r.rows.map((row) => ({ column: row.col as string, table: row.ref_table as string, refColumn: row.ref_col as string }));
+    const fks = r.rows.map((row) => ({
+      column: row.col as string,
+      table: row.ref_table as string,
+      refColumn: row.ref_col as string,
+    }));
     this.fks.set(table, fks);
     return fks;
   }
@@ -234,19 +275,41 @@ export async function insertRow(
 }
 
 const toParam = (v: unknown) =>
-  v !== null && typeof v === 'object' && !(v instanceof Date) && !Buffer.isBuffer(v) ? JSON.stringify(v) : v;
+  v !== null &&
+  typeof v === 'object' &&
+  !(v instanceof Date) &&
+  !Buffer.isBuffer(v)
+    ? JSON.stringify(v)
+    : v;
 
 /** One multi-row INSERT of rows that share the same column set. */
-export async function insertValues(db: pg.Pool, table: string, rows: Record<string, unknown>[]): Promise<Record<string, unknown>[]> {
+export async function insertValues(
+  db: pg.Pool,
+  table: string,
+  rows: Record<string, unknown>[],
+): Promise<Record<string, unknown>[]> {
   if (!rows.length) return [];
   const names = Object.keys(rows[0]);
-  if (!names.length) return (await db.query(`INSERT INTO ${table} DEFAULT VALUES RETURNING *`)).rows;
+  if (!names.length)
+    return (await db.query(`INSERT INTO ${table} DEFAULT VALUES RETURNING *`))
+      .rows;
   const out: Record<string, unknown>[] = [];
   for (let from = 0; from < rows.length; from += 1000) {
     const chunk = rows.slice(from, from + 1000);
     const params: unknown[] = [];
-    const tuples = chunk.map((row) => `(${names.map((n) => { params.push(toParam(row[n])); return `$${params.length}`; }).join(', ')})`);
-    const r = await db.query(`INSERT INTO ${table} (${names.map((n) => `"${n}"`).join(', ')}) VALUES ${tuples.join(', ')} RETURNING *`, params);
+    const tuples = chunk.map(
+      (row) =>
+        `(${names
+          .map((n) => {
+            params.push(toParam(row[n]));
+            return `$${params.length}`;
+          })
+          .join(', ')})`,
+    );
+    const r = await db.query(
+      `INSERT INTO ${table} (${names.map((n) => `"${n}"`).join(', ')}) VALUES ${tuples.join(', ')} RETURNING *`,
+      params,
+    );
     out.push(...r.rows);
   }
   return out;
@@ -261,13 +324,18 @@ export async function fillRow(
   options: InsertOptions & { depth?: number } = {},
 ): Promise<Record<string, unknown>> {
   const depth = options.depth ?? 0;
-  if (depth > 4) throw new Error(`SCHEMA BINDING: foreign key chain too deep seeding ${table}`);
+  if (depth > 4)
+    throw new Error(
+      `SCHEMA BINDING: foreign key chain too deep seeding ${table}`,
+    );
   const cols = await schema.columns(table);
   const fks = await schema.foreignKeys(table);
   const values: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(given)) {
     if (!cols.some((c) => c.name === k)) {
-      throw new Error(`SCHEMA BINDING: ${table} has no column "${k}" (has: ${cols.map((c) => c.name).join(', ')})`);
+      throw new Error(
+        `SCHEMA BINDING: ${table} has no column "${k}" (has: ${cols.map((c) => c.name).join(', ')})`,
+      );
     }
     values[k] = v;
   }
@@ -279,7 +347,13 @@ export async function fillRow(
       const shared = options.parents?.[fk.table];
       if (shared !== undefined) values[col.name] = shared;
       else {
-        const parent = await insertRow(db, schema, fk.table, {}, { ...options, depth: depth + 1 });
+        const parent = await insertRow(
+          db,
+          schema,
+          fk.table,
+          {},
+          { ...options, depth: depth + 1 },
+        );
         values[col.name] = parent[fk.refColumn];
       }
       continue;
@@ -288,7 +362,10 @@ export async function fillRow(
     if (lits.length) values[col.name] = lits[0];
     else {
       const make = filler[col.type];
-      if (!make) throw new Error(`SCHEMA BINDING: cannot fill ${table}.${col.name} (${col.type})`);
+      if (!make)
+        throw new Error(
+          `SCHEMA BINDING: cannot fill ${table}.${col.name} (${col.type})`,
+        );
       values[col.name] = make();
     }
   }

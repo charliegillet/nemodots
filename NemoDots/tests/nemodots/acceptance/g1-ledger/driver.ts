@@ -51,16 +51,30 @@ export type Env = 'dev' | 'test' | 'eval';
 export function errorCode(error: unknown): string {
   if (!(error instanceof Error)) return `unclassified:${String(error)}`;
   const e = error as Error & Record<string, unknown>;
-  for (const field of ['code', 'reason', 'kind', 'blockReason', 'errorCode', 'name']) {
+  for (const field of [
+    'code',
+    'reason',
+    'kind',
+    'blockReason',
+    'errorCode',
+    'name',
+  ]) {
     const v = e[field];
     if (typeof v === 'string') {
       const snake = v.replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase();
       if ((KNOWN_ERRORS as readonly string[]).includes(snake)) return snake;
     }
   }
-  const text = `${e.name} ${e.message}`.replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase();
+  const text = `${e.name} ${e.message}`
+    .replace(/([a-z])([A-Z])/g, '$1_$2')
+    .toLowerCase();
   for (const known of KNOWN_ERRORS) if (text.includes(known)) return known;
-  if (/immutable|not allowed|read-only|may not be (updated|modified)/i.test(e.message)) return 'immutable';
+  if (
+    /immutable|not allowed|read-only|may not be (updated|modified)/i.test(
+      e.message,
+    )
+  )
+    return 'immutable';
   return `unclassified:${e.name}: ${e.message.slice(0, 160)}`;
 }
 
@@ -100,6 +114,8 @@ export class World {
   readonly labelEnv = new Map<string, { env: Env; key: string }>();
   bases: { entries: Map<string, number>; collection: number } | null = null;
   readonly results: OpResult[] = [];
+  /** page_snapshot revisions minted by a real page edit (page-edit.ts); excluded from the oracle's "ledger value receipts" count. */
+  pageEditMinted = 0;
   private seeded = false;
   private obsReceiptsAtStart = 0;
   private findingsAtStart = 0;
@@ -117,7 +133,13 @@ export class World {
   }
 
   scope(env: Env) {
-    return { ownerId: OWNER_ID, missionId: this.missionId, spaceId: null, environment: env, resource: 'checkout' };
+    return {
+      ownerId: OWNER_ID,
+      missionId: this.missionId,
+      spaceId: null,
+      environment: env,
+      resource: 'checkout',
+    };
   }
 
   // ------------------------------------------------------------ SQL readers
@@ -152,7 +174,13 @@ export class World {
         WHERE s."${s.env}" = $1 AND s."${s.key}" = $2 ORDER BY r."${r.revision}", r."${r.id}"`,
       [env, key],
     );
-    return rows.rows.map((x) => ({ id: x.id, revision: Number(x.revision), status: x.status, trust: x.trust, digest: x.digest }));
+    return rows.rows.map((x) => ({
+      id: x.id,
+      revision: Number(x.revision),
+      status: x.status,
+      trust: x.trust,
+      digest: x.digest,
+    }));
   }
 
   async currentOf(env: Env, key: string): Promise<Recv | null> {
@@ -170,12 +198,23 @@ export class World {
       [id],
     );
     const x = rows.rows[0];
-    return x ? { id: x.id, revision: Number(x.revision), status: x.status, trust: x.trust, digest: x.digest } : null;
+    return x
+      ? {
+          id: x.id,
+          revision: Number(x.revision),
+          status: x.status,
+          trust: x.trust,
+          digest: x.digest,
+        }
+      : null;
   }
 
   async confirmationCount(receiptId: string): Promise<number> {
     const rc = await this.schema.need(CONF, ['receipt_id']);
-    const r = await this.admin.query(`SELECT count(*)::int AS n FROM ${CONF} WHERE "${rc}" = $1`, [receiptId]);
+    const r = await this.admin.query(
+      `SELECT count(*)::int AS n FROM ${CONF} WHERE "${rc}" = $1`,
+      [receiptId],
+    );
     return r.rows[0].n;
   }
 
@@ -193,19 +232,27 @@ export class World {
     if (!(await this.schema.exists(FIND))) return 0;
     const col = await this.schema.pick(FIND, ['trust']);
     const r = await this.admin.query(
-      trust && col ? `SELECT count(*)::int AS n FROM ${FIND} WHERE "${col}" = $1` : `SELECT count(*)::int AS n FROM ${FIND}`,
+      trust && col
+        ? `SELECT count(*)::int AS n FROM ${FIND} WHERE "${col}" = $1`
+        : `SELECT count(*)::int AS n FROM ${FIND}`,
       trust && col ? [trust] : [],
     );
     return r.rows[0].n;
   }
 
   async configVersion(key: string): Promise<number | null> {
-    const r = await this.admin.query(`SELECT version FROM ${CFG} WHERE key = $1`, [key]);
+    const r = await this.admin.query(
+      `SELECT version FROM ${CFG} WHERE key = $1`,
+      [key],
+    );
     return r.rowCount ? Number(r.rows[0].version) : null;
   }
 
   async configValue(key: string): Promise<unknown> {
-    const r = await this.admin.query(`SELECT value FROM ${CFG} WHERE key = $1`, [key]);
+    const r = await this.admin.query(
+      `SELECT value FROM ${CFG} WHERE key = $1`,
+      [key],
+    );
     return r.rowCount ? r.rows[0].value : undefined;
   }
 
@@ -223,25 +270,39 @@ export class World {
   }
 
   isControlled(sourceKey: string) {
-    return sourceKey === 'checkout.config' || sourceKey.startsWith('checkout.config/');
+    return (
+      sourceKey === 'checkout.config' ||
+      sourceKey.startsWith('checkout.config/')
+    );
   }
 
   // --------------------------------------------------------------- seeding
 
   async seedConfig(key: string, value: unknown) {
     if (!(await this.schema.exists(CFG)) || !(await this.schema.exists(COLL))) {
-      throw new Error(`ENTRY POINT MISSING: migration 0004_checkout (${CFG}, ${COLL}) is not present in the migrated database`);
+      throw new Error(
+        `ENTRY POINT MISSING: migration 0004_checkout (${CFG}, ${COLL}) is not present in the migrated database`,
+      );
     }
     // Setup, not behaviour under test: plain SQL as the table owner, mirroring the
     // authority's own rules (a new key bumps the membership collection once).
-    const hasCollection = (await this.admin.query(`SELECT 1 FROM ${COLL} LIMIT 1`)).rowCount;
-    if (!hasCollection) await insertRow(this.admin, this.schema, COLL, { version: 1 });
+    const hasCollection = (
+      await this.admin.query(`SELECT 1 FROM ${COLL} LIMIT 1`)
+    ).rowCount;
+    if (!hasCollection)
+      await insertRow(this.admin, this.schema, COLL, { version: 1 });
     const existing = await this.configVersion(key);
     if (existing === null) {
-      await this.admin.query(`INSERT INTO ${CFG} (key, value, version, caused_by_actor) VALUES ($1, $2::jsonb, 1, 'seed')`, [key, JSON.stringify(value)]);
+      await this.admin.query(
+        `INSERT INTO ${CFG} (key, value, version, caused_by_actor) VALUES ($1, $2::jsonb, 1, 'seed')`,
+        [key, JSON.stringify(value)],
+      );
       await this.admin.query(`UPDATE ${COLL} SET version = version + 1`);
     } else {
-      await this.admin.query(`UPDATE ${CFG} SET value = $2::jsonb, version = version + 1, caused_by_actor = 'seed' WHERE key = $1`, [key, JSON.stringify(value)]);
+      await this.admin.query(
+        `UPDATE ${CFG} SET value = $2::jsonb, version = version + 1, caused_by_actor = 'seed' WHERE key = $1`,
+        [key, JSON.stringify(value)],
+      );
     }
   }
 
@@ -252,7 +313,12 @@ export class World {
       const r = await this.admin.query(`SELECT key, version FROM ${CFG}`);
       for (const row of r.rows) entries.set(row.key, Number(row.version));
     }
-    this.bases = { entries, collection: (await this.schema.exists(COLL)) ? await this.collectionVersion() : 0 };
+    this.bases = {
+      entries,
+      collection: (await this.schema.exists(COLL))
+        ? await this.collectionVersion()
+        : 0,
+    };
     this.obsReceiptsAtStart = await this.totalReceipts();
     this.findingsAtStart = await this.findingsCount();
   }
@@ -264,11 +330,20 @@ export class World {
     return m ? (this.bases.entries.get(m[1]) ?? 0) : 0;
   }
 
+  /**
+   * Receipts minted since the first non-seed op, excluding page_snapshot revisions minted by a real page
+   * edit: the frozen LG-14 value (newObservationReceipts: 1) counts ledger VALUE receipts; the page revision
+   * is asserted separately in page-edit.ts (exactly one new opendots.page/<id> revision).
+   */
   newReceiptsSinceSeed() {
-    return this.totalReceipts().then((n) => n - this.obsReceiptsAtStart);
+    return this.totalReceipts().then(
+      (n) => n - this.obsReceiptsAtStart - this.pageEditMinted,
+    );
   }
   newFindingsSinceSeed() {
-    return this.findingsCount('model_claim').then((n) => n - this.findingsAtStart);
+    return this.findingsCount('model_claim').then(
+      (n) => n - this.findingsAtStart,
+    );
   }
 
   // ------------------------------------------------------------- operations
@@ -284,9 +359,15 @@ export class World {
   }
 
   /** Same as advance, on a connection the caller owns (so the caller knows its backend pid). */
-  async advanceOn(client: pg.PoolClient, op: Extract<LedgerOp, { op: 'advance_config' }>) {
+  async advanceOn(
+    client: pg.PoolClient,
+    op: Extract<LedgerOp, { op: 'advance_config' }>,
+  ) {
     const advanceConfig = await entry<
-      (client: pg.PoolClient, input: Record<string, unknown>) => Promise<unknown>
+      (
+        client: pg.PoolClient,
+        input: Record<string, unknown>,
+      ) => Promise<unknown>
     >('sandbox/version-authority.ts', ['advanceConfig']);
     {
       const current = (await this.configVersion(op.key)) ?? 0;
@@ -296,7 +377,12 @@ export class World {
         await advanceConfig(client, {
           key: op.key,
           // The authority refuses a value or insertIfMissing together with deleteKey.
-          ...(op.deleteKey ? { deleteKey: true } : { value: op.value, ...(op.insertIfMissing ? { insertIfMissing: true } : {}) }),
+          ...(op.deleteKey
+            ? { deleteKey: true }
+            : {
+                value: op.value,
+                ...(op.insertIfMissing ? { insertIfMissing: true } : {}),
+              }),
           expectedVersion: current,
           causedBy: { actor: op.actor, actionId: null },
         });
@@ -318,7 +404,12 @@ export class World {
 
   /** SourceRef for a source key (CONTRACTS 1): the type follows the key family. */
   sourceRef(key: string, env: Env) {
-    const family = key === 'checkout.config' ? 'collection' : key.startsWith('checkout.config/') ? 'member' : key;
+    const family =
+      key === 'checkout.config'
+        ? 'collection'
+        : key.startsWith('checkout.config/')
+          ? 'member'
+          : key;
     const sourceType =
       family === 'collection'
         ? 'controlled_collection'
@@ -335,15 +426,22 @@ export class World {
                   : key.startsWith('opendots.memory/')
                     ? 'memory_snapshot'
                     : 'observed_endpoint';
-    const authority = sourceType.startsWith('controlled') ? 'controlled' : 'observed';
+    const authority = sourceType.startsWith('controlled')
+      ? 'controlled'
+      : 'observed';
     return { key, sourceType, authority, scope: this.scope(env) };
   }
 
   /** The value a watcher reads from the controlled authority (ARCHITECTURE 9.4): member {key,value,version}, collection {keys,collectionVersion}. */
   async controlledValue(key: string): Promise<unknown> {
     if (key === 'checkout.config') {
-      const keys = await this.admin.query(`SELECT key FROM ${CFG} ORDER BY key`);
-      return { keys: keys.rows.map((r) => r.key), collectionVersion: await this.collectionVersion() };
+      const keys = await this.admin.query(
+        `SELECT key FROM ${CFG} ORDER BY key`,
+      );
+      return {
+        keys: keys.rows.map((r) => r.key),
+        collectionVersion: await this.collectionVersion(),
+      };
     }
     const member = key.slice('checkout.config/'.length);
     const version = await this.configVersion(member);
@@ -352,7 +450,10 @@ export class World {
   }
 
   /** Runs fn on a connection inside a transaction owned here (the ledger requires the caller's). */
-  async inTx<T>(fn: (client: pg.PoolClient) => Promise<T>, via: pg.Pool = this.app): Promise<T> {
+  async inTx<T>(
+    fn: (client: pg.PoolClient) => Promise<T>,
+    via: pg.Pool = this.app,
+  ): Promise<T> {
     const client = await via.connect();
     try {
       await client.query('BEGIN');
@@ -369,34 +470,50 @@ export class World {
     }
   }
 
-  async registerInput(op: Extract<LedgerOp, { op: 'register' }>): Promise<Record<string, unknown>> {
+  async registerInput(
+    op: Extract<LedgerOp, { op: 'register' }>,
+  ): Promise<Record<string, unknown>> {
     const env = op.environment ?? 'test';
     const controlled = this.isControlled(op.sourceKey);
     const base = controlled ? this.baseOf(op.sourceKey) : 0;
     const input: Record<string, unknown> = {
       source: this.sourceRef(op.sourceKey, env),
-      normalizedValue: controlled ? await this.controlledValue(op.sourceKey) : (this.payloadFor(op) ?? {}),
+      normalizedValue: controlled
+        ? await this.controlledValue(op.sourceKey)
+        : (this.payloadFor(op) ?? {}),
       provenance: { kind: 'watcher' },
     };
     const claimed: Record<string, unknown> = {};
-    if (op.claimRevision !== undefined) claimed.sourceRevision = base + op.claimRevision;
+    if (op.claimRevision !== undefined)
+      claimed.sourceRevision = base + op.claimRevision;
     if (op.claimDigestMismatch) claimed.contentDigest = 'f'.repeat(64);
     if (Object.keys(claimed).length) input.claimed = claimed;
     return input;
   }
 
-  async register(op: Extract<LedgerOp, { op: 'register' }>, options?: Record<string, unknown>): Promise<OpResult> {
+  async register(
+    op: Extract<LedgerOp, { op: 'register' }>,
+    options?: Record<string, unknown>,
+  ): Promise<OpResult> {
     // BIND: registerObservation(client in an open transaction, { source, normalizedValue, provenance, claimed? }).
-    const registerObservation = await entry<(client: pg.PoolClient, input: Record<string, unknown>, options?: Record<string, unknown>) => Promise<unknown>>(
-      'ledger/receipts.ts',
-      ['registerObservation'],
-    );
+    const registerObservation = await entry<
+      (
+        client: pg.PoolClient,
+        input: Record<string, unknown>,
+        options?: Record<string, unknown>,
+      ) => Promise<unknown>
+    >('ledger/receipts.ts', ['registerObservation']);
     const env = op.environment ?? 'test';
     const before = await this.receiptsOf(env, op.sourceKey);
     const beforeCur = await this.currentOf(env, op.sourceKey);
-    const confBefore = beforeCur ? await this.confirmationCount(beforeCur.id) : 0;
+    const confBefore = beforeCur
+      ? await this.confirmationCount(beforeCur.id)
+      : 0;
     const controlled = this.isControlled(op.sourceKey);
-    const result: OpResult = { ok: true, baseRevision: controlled ? this.baseOf(op.sourceKey) : 0 };
+    const result: OpResult = {
+      ok: true,
+      baseRevision: controlled ? this.baseOf(op.sourceKey) : 0,
+    };
     try {
       const input = await this.registerInput(op);
       await this.inTx((client) => registerObservation(client, input, options));
@@ -408,7 +525,10 @@ export class World {
     const afterCur = await this.currentOf(env, op.sourceKey);
     result.receiptDelta = after.length - before.length;
     result.current = afterCur;
-    result.confirmationDelta = afterCur ? (await this.confirmationCount(afterCur.id)) - (beforeCur && beforeCur.id === afterCur.id ? confBefore : 0) : 0;
+    result.confirmationDelta = afterCur
+      ? (await this.confirmationCount(afterCur.id)) -
+        (beforeCur && beforeCur.id === afterCur.id ? confBefore : 0)
+      : 0;
     if (result.ok && afterCur) {
       this.labels.set(op.label, afterCur.id);
       this.labelEnv.set(op.label, { env, key: op.sourceKey });
@@ -416,15 +536,29 @@ export class World {
     return result;
   }
 
-  async registerConcurrent(op: Extract<LedgerOp, { op: 'register_concurrent' }>): Promise<OpResult> {
-    const registerObservation = await entry<(client: pg.PoolClient, input: Record<string, unknown>) => Promise<unknown>>('ledger/receipts.ts', ['registerObservation']);
+  async registerConcurrent(
+    op: Extract<LedgerOp, { op: 'register_concurrent' }>,
+  ): Promise<OpResult> {
+    const registerObservation = await entry<
+      (
+        client: pg.PoolClient,
+        input: Record<string, unknown>,
+      ) => Promise<unknown>
+    >('ledger/receipts.ts', ['registerObservation']);
     const before = await this.receiptsOf('test', op.sourceKey);
-    const input = await this.registerInput({ op: 'register', label: op.labels[0], sourceKey: op.sourceKey, normalizedValue: op.normalizedValue });
+    const input = await this.registerInput({
+      op: 'register',
+      label: op.labels[0],
+      sourceKey: op.sourceKey,
+      normalizedValue: op.normalizedValue,
+    });
     const settled = await Promise.allSettled([
       this.inTx((c) => registerObservation(c, structuredClone(input))),
       this.inTx((c) => registerObservation(c, structuredClone(input))),
     ]);
-    const failed = settled.filter((x) => x.status === 'rejected') as PromiseRejectedResult[];
+    const failed = settled.filter(
+      (x) => x.status === 'rejected',
+    ) as PromiseRejectedResult[];
     const cur = await this.currentOf('test', op.sourceKey);
     const after = await this.receiptsOf('test', op.sourceKey);
     if (cur)
@@ -441,20 +575,33 @@ export class World {
     };
   }
 
-  async assertCurrent(op: Extract<LedgerOp, { op: 'assert_current' }>): Promise<OpResult> {
-    const mod = await entry<Record<string, unknown>>('ledger/support.ts', ['assertCurrent', 'supportValidator', 'SupportValidator', 'createSupportValidator']);
+  async assertCurrent(
+    op: Extract<LedgerOp, { op: 'assert_current' }>,
+  ): Promise<OpResult> {
+    const mod = await entry<Record<string, unknown>>('ledger/support.ts', [
+      'assertCurrent',
+      'supportValidator',
+      'SupportValidator',
+      'createSupportValidator',
+    ]);
     // Resolve the callable regardless of how support.ts exports it.
     const fn = await this.resolveAssertCurrent(mod);
     const ids = op.labels.map((l) => {
       const id = this.labels.get(l);
-      if (!id) throw new Error(`oracle label ${l} has no receipt (an earlier op failed)`);
+      if (!id)
+        throw new Error(
+          `oracle label ${l} has no receipt (an earlier op failed)`,
+        );
       return id;
     });
     const client = await this.app.connect();
     try {
       await client.query('BEGIN');
       try {
-        await fn(client, ids, { lockMode: op.lockMode, ...(op.freshness ? { freshness: op.freshness } : {}) });
+        await fn(client, ids, {
+          lockMode: op.lockMode,
+          ...(op.freshness ? { freshness: op.freshness } : {}),
+        });
         await client.query('COMMIT');
         return { ok: true };
       } catch (error) {
@@ -466,29 +613,49 @@ export class World {
     }
   }
 
-  private async resolveAssertCurrent(mod: unknown): Promise<(c: pg.PoolClient, ids: string[], o: Record<string, unknown>) => Promise<unknown>> {
-    type F = (c: pg.PoolClient, ids: string[], o: Record<string, unknown>) => Promise<unknown>;
+  private async resolveAssertCurrent(
+    mod: unknown,
+  ): Promise<
+    (
+      c: pg.PoolClient,
+      ids: string[],
+      o: Record<string, unknown>,
+    ) => Promise<unknown>
+  > {
+    type F = (
+      c: pg.PoolClient,
+      ids: string[],
+      o: Record<string, unknown>,
+    ) => Promise<unknown>;
     if (typeof mod === 'function') {
       const direct = mod as unknown;
       try {
         const made = (mod as () => unknown)();
-        if (made && typeof (made as { assertCurrent?: unknown }).assertCurrent === 'function') {
-          return ((made as { assertCurrent: F }).assertCurrent).bind(made);
+        if (
+          made &&
+          typeof (made as { assertCurrent?: unknown }).assertCurrent ===
+            'function'
+        ) {
+          return (made as { assertCurrent: F }).assertCurrent.bind(made);
         }
       } catch {
         /* not a factory */
       }
       try {
         const inst = new (mod as new () => { assertCurrent: F })();
-        if (typeof inst.assertCurrent === 'function') return inst.assertCurrent.bind(inst);
+        if (typeof inst.assertCurrent === 'function')
+          return inst.assertCurrent.bind(inst);
       } catch {
         /* not a class */
       }
       return direct as F;
     }
     const obj = mod as { assertCurrent?: F };
-    if (obj && typeof obj.assertCurrent === 'function') return obj.assertCurrent.bind(obj);
-    throw new Error('ENTRY POINT MISSING: ledger/support.ts exports no assertCurrent');
+    if (obj && typeof obj.assertCurrent === 'function')
+      return obj.assertCurrent.bind(obj);
+    throw new Error(
+      'ENTRY POINT MISSING: ledger/support.ts exports no assertCurrent',
+    );
   }
 
   async ageReceipt(op: Extract<LedgerOp, { op: 'age_receipt' }>) {
@@ -504,9 +671,22 @@ export class World {
       await client.query(`ALTER TABLE ${REC} DISABLE TRIGGER USER`);
       await client.query(`ALTER TABLE ${CONF} DISABLE TRIGGER USER`);
       const ms = String(op.ageMs);
-      const sets = [observed && `"${observed}" = "${observed}" - ($2 || ' milliseconds')::interval`, confirmed && `"${confirmed}" = "${confirmed}" - ($2 || ' milliseconds')::interval`].filter(Boolean);
-      if (sets.length) await client.query(`UPDATE ${REC} SET ${sets.join(', ')} WHERE id = $1`, [id, ms]);
-      if (cc) await client.query(`UPDATE ${CONF} SET "${cc}" = "${cc}" - ($2 || ' milliseconds')::interval WHERE "${rc}" = $1`, [id, ms]);
+      const sets = [
+        observed &&
+          `"${observed}" = "${observed}" - ($2 || ' milliseconds')::interval`,
+        confirmed &&
+          `"${confirmed}" = "${confirmed}" - ($2 || ' milliseconds')::interval`,
+      ].filter(Boolean);
+      if (sets.length)
+        await client.query(
+          `UPDATE ${REC} SET ${sets.join(', ')} WHERE id = $1`,
+          [id, ms],
+        );
+      if (cc)
+        await client.query(
+          `UPDATE ${CONF} SET "${cc}" = "${cc}" - ($2 || ' milliseconds')::interval WHERE "${rc}" = $1`,
+          [id, ms],
+        );
       await client.query(`ALTER TABLE ${REC} ENABLE TRIGGER USER`);
       await client.query(`ALTER TABLE ${CONF} ENABLE TRIGGER USER`);
       await client.query('COMMIT');
@@ -521,10 +701,22 @@ export class World {
   async transition(op: Extract<LedgerOp, { op: 'transition' }>) {
     const id = this.labels.get(op.label);
     if (!id) throw new Error(`label ${op.label} unknown`);
-    const transitionReceipt = await entry<(client: pg.PoolClient, input: Record<string, unknown>) => Promise<unknown>>('ledger/receipts.ts', ['transitionReceipt']);
-    const reason = op.to === 'expired' ? 'ttl_elapsed' : op.to === 'retracted' ? 'owner_retraction' : 'conflicting_observation';
+    const transitionReceipt = await entry<
+      (
+        client: pg.PoolClient,
+        input: Record<string, unknown>,
+      ) => Promise<unknown>
+    >('ledger/receipts.ts', ['transitionReceipt']);
+    const reason =
+      op.to === 'expired'
+        ? 'ttl_elapsed'
+        : op.to === 'retracted'
+          ? 'owner_retraction'
+          : 'conflicting_observation';
     // BIND: transitionReceipt(client in an open transaction, { receiptId, to, reason }).
-    await this.inTx((client) => transitionReceipt(client, { receiptId: id, to: op.to, reason }));
+    await this.inTx((client) =>
+      transitionReceipt(client, { receiptId: id, to: op.to, reason }),
+    );
   }
 
   /**
@@ -534,7 +726,10 @@ export class World {
    * production publishFinding.
    */
   async attemptContext() {
-    await insertRow(this.admin, this.schema, 'coordinator.missions', { id: this.missionId, status: 'running' });
+    await insertRow(this.admin, this.schema, 'coordinator.missions', {
+      id: this.missionId,
+      status: 'running',
+    });
     const taskId = randomUUID();
     await this.admin.query(
       `INSERT INTO coordinator.tasks (id, mission_id, depth, ordinal, title, question, role, capabilities, status, generation, fence_seq, attempt_count, budget)
@@ -548,26 +743,47 @@ export class World {
       [attemptId, taskId, this.missionId],
     );
     return {
-      missionId: this.missionId, taskId, attemptId, fencingToken: 1, generation: 0,
-      capabilities: ['observe', 'publish_finding'], role: 'investigator',
+      missionId: this.missionId,
+      taskId,
+      attemptId,
+      fencingToken: 1,
+      generation: 0,
+      capabilities: ['observe', 'publish_finding'],
+      role: 'investigator',
     };
   }
 
-  async publishFinding(op: Extract<LedgerOp, { op: 'publish_finding' }>): Promise<OpResult> {
+  async publishFinding(
+    op: Extract<LedgerOp, { op: 'publish_finding' }>,
+  ): Promise<OpResult> {
     // BIND: coordinator/publish.ts#publishFinding(deps, context, { claim, supportingReceiptIds, confidence, dependencyVector }).
-    const publishFinding = await entry<(deps: unknown, ctx: unknown, input: unknown) => Promise<unknown>>('coordinator/publish.ts', ['publishFinding']);
-    const { createEventSink } = await import('../../../../src/server/nemodots/coordinator/events.js');
-    const { addEdges } = await import('../../../../src/server/nemodots/ledger/edges.js');
-    const support = await entry<Record<string, unknown>>('ledger/support.ts', ['supportValidator']);
+    const publishFinding = await entry<
+      (deps: unknown, ctx: unknown, input: unknown) => Promise<unknown>
+    >('coordinator/publish.ts', ['publishFinding']);
+    const { createEventSink } =
+      await import('../../../../src/server/nemodots/coordinator/events.js');
+    const { addEdges } =
+      await import('../../../../src/server/nemodots/ledger/edges.js');
+    const support = await entry<Record<string, unknown>>('ledger/support.ts', [
+      'supportValidator',
+    ]);
     void addEdges;
     const ctx = await this.attemptContext();
-    const vector = [] as { sourceKey: string; sourceRevision: number; receiptId: string }[];
+    const vector = [] as {
+      sourceKey: string;
+      sourceRevision: number;
+      receiptId: string;
+    }[];
     for (const l of op.citing) {
       const id = this.labels.get(l);
       const where = this.labelEnv.get(l);
       if (!id || !where) throw new Error(`label ${l} unknown`);
       const rec = await this.receiptById(id);
-      vector.push({ sourceKey: where.key, sourceRevision: rec!.revision, receiptId: id });
+      vector.push({
+        sourceKey: where.key,
+        sourceRevision: rec!.revision,
+        receiptId: id,
+      });
     }
     const deps = {
       pool: this.app,
@@ -575,7 +791,10 @@ export class World {
       events: createEventSink(),
       supportValidator: support,
       // The graph has no finding node kind; the composition root records nothing for findings.
-      ledger: { recordModelCall: async () => {}, recordArtifact: async () => {} },
+      ledger: {
+        recordModelCall: async () => {},
+        recordArtifact: async () => {},
+      },
       recordOrphanedAttempt: async () => {},
       intents: {},
       clock: () => new Date(),
@@ -594,21 +813,39 @@ export class World {
   }
 
   /** Attempts to rewrite an immutable receipt column as the app role; the row must be unchanged afterwards. */
-  async tamper(op: Extract<LedgerOp, { op: 'tamper_update' }>): Promise<OpResult & { unchanged: boolean }> {
+  async tamper(
+    op: Extract<LedgerOp, { op: 'tamper_update' }>,
+  ): Promise<OpResult & { unchanged: boolean }> {
     const id = this.labels.get(op.label);
     if (!id) throw new Error(`label ${op.label} unknown`);
     const col = await this.schema.need(REC, [op.column]);
-    const before = await this.admin.query(`SELECT "${col}"::text AS v FROM ${REC} WHERE id = $1`, [id]);
-    const patch = col === 'source_revision' ? `"${col}" = "${col}" + 100` : col === 'content_digest' ? `"${col}" = repeat('0', 64)` : `"${col}" = '{"tampered":true}'::jsonb`;
+    const before = await this.admin.query(
+      `SELECT "${col}"::text AS v FROM ${REC} WHERE id = $1`,
+      [id],
+    );
+    const patch =
+      col === 'source_revision'
+        ? `"${col}" = "${col}" + 100`
+        : col === 'content_digest'
+          ? `"${col}" = repeat('0', 64)`
+          : `"${col}" = '{"tampered":true}'::jsonb`;
     let result: OpResult = { ok: true };
     try {
       await this.app.query(`UPDATE ${REC} SET ${patch} WHERE id = $1`, [id]);
     } catch (error) {
       const sqlstate = (error as { code?: string }).code ?? '';
       // Any trigger/permission/constraint refusal is the guarantee holding; a missing relation or column is a binding problem.
-      result = { ok: false, error: /^(42P01|42703)$/.test(sqlstate) ? `binding:${sqlstate}` : 'immutable' };
+      result = {
+        ok: false,
+        error: /^(42P01|42703)$/.test(sqlstate)
+          ? `binding:${sqlstate}`
+          : 'immutable',
+      };
     }
-    const after = await this.admin.query(`SELECT "${col}"::text AS v FROM ${REC} WHERE id = $1`, [id]);
+    const after = await this.admin.query(
+      `SELECT "${col}"::text AS v FROM ${REC} WHERE id = $1`,
+      [id],
+    );
     return { ...result, unchanged: before.rows[0].v === after.rows[0].v };
   }
 }

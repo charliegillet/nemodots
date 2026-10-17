@@ -383,7 +383,9 @@ export interface World {
   cfg(
     key: string,
   ): Promise<{ value: unknown; version: number; causedBy: string | null }>;
-  snapshotConfig(): Promise<Record<string, { value: unknown; version: number }>>;
+  snapshotConfig(): Promise<
+    Record<string, { value: unknown; version: number }>
+  >;
   history(key: string): Promise<Rec[]>;
   intent(id: string): Promise<Rec>;
   auths(id: string): Promise<Rec[]>;
@@ -545,7 +547,8 @@ async function build(c: {
     ['createMissionControl', 'createControl', 'createMissionControlPort'],
   );
   let hooksModule: Rec | null = null;
-  if (c.need.includes('hooks')) hooksModule = await entry<Rec>('actions/test-hooks.ts');
+  if (c.need.includes('hooks'))
+    hooksModule = await entry<Rec>('actions/test-hooks.ts');
   let cacheKeyFn: ((p: string, ns: string, n: string) => string) | null = null;
   if (c.need.includes('cacheKey')) cacheKeyFn = await loadCacheKey();
 
@@ -796,7 +799,11 @@ async function build(c: {
       environment: 'test',
       resource: 'checkout',
       mode: 'fixture',
-      provider: { host: 'fixture.local', plannerModel: 'fx', workerModel: 'fx' },
+      provider: {
+        host: 'fixture.local',
+        plannerModel: 'fx',
+        workerModel: 'fx',
+      },
       budgets: BUDGETS,
       leaseMs: 30_000,
       taskDefaults: { maxAttempts: 3, maxIterations: 8, maxTokens: 20_000 },
@@ -1119,7 +1126,9 @@ async function build(c: {
         "SELECT to_regclass('coordinator.action_intents') IS NOT NULL AS ok",
       );
       return {
-        outputs: await n('SELECT count(*)::int n FROM coordinator.task_outputs'),
+        outputs: await n(
+          'SELECT count(*)::int n FROM coordinator.task_outputs',
+        ),
         findings: await n('SELECT count(*)::int n FROM coordinator.findings'),
         tasks: await n('SELECT count(*)::int n FROM coordinator.tasks'),
         attempts: await n(

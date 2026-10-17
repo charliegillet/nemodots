@@ -14,6 +14,8 @@ import {
   type System,
   type SystemOptions,
 } from './system.js';
+import { newProposerState, type ProposerState } from './scenarios.js';
+import { specDigest } from './spec.js';
 import type { MissionSnapshot } from '../../../../src/server/nemodots/contracts/index.js';
 
 /**
@@ -164,12 +166,14 @@ export async function waitRegistered(
     timeoutMs,
     label,
   );
-  return tail.of('receipt.registered').find(
-    (e) =>
-      e.id > afterEventId &&
-      e.payload.sourceKey === sourceKey &&
-      e.payload.sourceRevision >= minRevision,
-  )!;
+  return tail
+    .of('receipt.registered')
+    .find(
+      (e) =>
+        e.id > afterEventId &&
+        e.payload.sourceKey === sourceKey &&
+        e.payload.sourceRevision >= minRevision,
+    )!;
 }
 
 /**
@@ -186,4 +190,38 @@ export function snapshotSummary(snapshot: MissionSnapshot) {
     status: snapshot.mission.status,
     tasks: snapshot.tasks.map((t) => `${t.title}:${t.status}`),
   };
+}
+
+/**
+ * Prepares ALPHA's admissible proposal against the live world: a value
+ * different from the current one and the spec digest of the value actually
+ * stored (read through the verifier role, never scraped from a tool result).
+ */
+export async function prepareProposer(
+  sys: System,
+  state: ProposerState,
+  overrides: Partial<ProposerState> = {},
+) {
+  Object.assign(state, newProposerState(), overrides);
+  const current = await readConfig(sys, 'cache.schema_version');
+  state.value = alternateValue('cache.schema_version', current.value);
+  state.currentDigest = specDigest(current.value);
+  return current;
+}
+
+export const sleep = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** Rejects with an explicit label instead of hanging when a gate or wait never completes. */
+export function within<T>(promise: Promise<T>, ms: number, label: string) {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(
+        () =>
+          reject(new Error(`Timed out after ${ms} ms waiting for ${label}`)),
+        ms,
+      ),
+    ),
+  ]);
 }

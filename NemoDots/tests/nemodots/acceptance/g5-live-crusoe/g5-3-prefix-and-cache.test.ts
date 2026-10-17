@@ -32,6 +32,13 @@ import {
 } from './support.js';
 
 const sha = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex');
+// CONTRACTS.md defines digests as SHA-256 of canonical JSON, which for a string
+// is its NFC JSON encoding; the raw-characters form is the other plausible
+// reading. ACCEPTANCE_CONTRACT "Gate 5 clarifications" records both as
+// acceptable until the architect settles it; the tests then rely on the
+// digest's invariants (stable, sensitive, wire-consistent), not the encoding.
+const prefixDigestOk = (prefix: string, d: string) =>
+  d === sha(prefix) || d === sha(JSON.stringify(prefix.normalize('NFC')));
 const NOW_A = '2026-10-17T18:00:00.000Z';
 const NOW_B = '2026-10-17T18:07:30.000Z';
 
@@ -156,10 +163,13 @@ function toRequest(
 }
 
 describe('G5.6a prefix and tool-schema digests (deterministic compile)', () => {
-  it('prefixDigest == sha256 of the leading prefixLength chars of the system string; toolSchemaHash == digest of the contract tool schemas', () => {
+  it('prefixDigest is the SHA-256 (raw or canonical-JSON encoding) of the leading prefixLength chars of the system string; toolSchemaHash == digest of the contract tool schemas', () => {
     const c = compileContext(input());
     const prefix = c.system.slice(0, c.snapshot.prefixLength);
-    expect(sha(prefix)).toBe(c.snapshot.prefixDigest);
+    expect(
+      prefixDigestOk(prefix, c.snapshot.prefixDigest),
+      'prefixDigest is neither sha256(raw prefix) nor sha256(canonical JSON string)',
+    ).toBe(true);
     expect(c.snapshot.toolSchemaHash).toBe(toolSchemaHash());
     expect(c.snapshot.toolSchemaHash).toBe(digest(toolSchemas()));
     expect(c.tools).toEqual(toolSchemas());
@@ -314,12 +324,18 @@ describe('G5.6b the wire carries what the snapshot claims (live, through the ada
       expect(sysA.slice(0, a.snapshot.prefixLength)).toBe(
         sysB.slice(0, b.snapshot.prefixLength),
       );
-      expect(sha(sysA.slice(0, a.snapshot.prefixLength))).toBe(
-        a.snapshot.prefixDigest,
-      );
-      expect(sha(sysB.slice(0, b.snapshot.prefixLength))).toBe(
-        a.snapshot.prefixDigest,
-      );
+      expect(
+        prefixDigestOk(
+          sysA.slice(0, a.snapshot.prefixLength),
+          a.snapshot.prefixDigest,
+        ),
+      ).toBe(true);
+      expect(
+        prefixDigestOk(
+          sysB.slice(0, b.snapshot.prefixLength),
+          a.snapshot.prefixDigest,
+        ),
+      ).toBe(true);
       expect(sysA).not.toBe(sysB);
     } finally {
       await proxy.close();

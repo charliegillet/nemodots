@@ -327,10 +327,23 @@ describe('G5.7 client timing is first NONEMPTY content, per call (not aggregate 
     );
     expect(r.outcome).toBe('completed');
     const a = r.attempts[0];
-    const delta = t(a.firstContentAt) - t(a.startedAt);
-    // The prelude (empty content + reasoning) was written ~immediately, then 1.5 s of silence,
-    // then upstream content. If the empty delta were counted, firstContentAt would be ~0 s.
-    expect(delta).toBeGreaterThanOrEqual(1400);
+    // The proxy wrote headers plus the empty/reasoning prelude at once, then held
+    // 1.5 s before forwarding any upstream content. Measuring from the client's
+    // headersAt (not startedAt) removes Crusoe's own time-to-first-byte from the
+    // delta, so a slow upstream cannot mask an adapter that counts the empty delta.
+    expect(t(a.firstContentAt) - t(a.headersAt)).toBeGreaterThanOrEqual(1400);
+    // Direct check against the proxy's wall clock: firstContentAt must not be
+    // earlier than the moment the first content-bearing delta was forwarded
+    // (50 ms loopback/clock slack).
+    const rec = proxy.seen.find((x) => x.url.endsWith('/chat/completions'))!;
+    expect(rec.firstContentForwardedAt).not.toBeNull();
+    expect(t(a.firstContentAt)).toBeGreaterThanOrEqual(
+      rec.firstContentForwardedAt! - 50,
+    );
+    // and the forwarded content really came after the prelude delay
+    expect(
+      rec.firstContentForwardedAt! - rec.headersWrittenAt!,
+    ).toBeGreaterThanOrEqual(1400);
     expect(r.reasoning).toContain('thinking about it');
   });
 

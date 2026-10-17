@@ -219,6 +219,10 @@ export interface SeenRequest {
   clientClosedEarly: boolean;
   closedAt: number | null;
   finishedAt: number | null;
+  /** wall clock when the proxy wrote response headers to the client (SSE) */
+  headersWrittenAt: number | null;
+  /** wall clock when the proxy forwarded the first upstream content-bearing delta */
+  firstContentForwardedAt: number | null;
 }
 
 export type Action =
@@ -237,6 +241,8 @@ export type Action =
       /** SSE only: events written (with delay) before the first upstream byte */
       prelude?: string[];
       preludeDelayMs?: number;
+      /** hold the request this long before contacting upstream (timeout class) */
+      headerDelayMs?: number;
       /** SSE only: destroy the socket after this many upstream data events */
       destroyAfterEvents?: number;
     };
@@ -282,6 +288,8 @@ export async function startProxy(
       clientClosedEarly: false,
       closedAt: null,
       finishedAt: null,
+      headersWrittenAt: null,
+      firstContentForwardedAt: null,
     };
     seen.push(rec);
     current++;
@@ -352,6 +360,8 @@ async function serve(
     res.end(action.body);
     return;
   }
+  if ('headerDelayMs' in action && action.headerDelayMs)
+    await sleep(action.headerDelayMs);
   const path = rec.url.replace(/^\/v1/, '');
   const headers: Record<string, string> = {
     'content-type':
@@ -387,6 +397,7 @@ async function serve(
     'content-type': type,
     'cache-control': 'no-cache',
   });
+  rec.headersWrittenAt = Date.now();
   const prelude = 'prelude' in action ? (action.prelude ?? []) : [];
   const delay = 'preludeDelayMs' in action ? (action.preludeDelayMs ?? 0) : 0;
   const destroyAfter =
@@ -412,6 +423,15 @@ async function serve(
           out = `data: ${JSON.stringify(transform(JSON.parse(m[1])))}`;
         } catch {
           out = raw;
+        }
+      }
+      if (rec.firstContentForwardedAt === null && m) {
+        try {
+          const c = JSON.parse(m[1])?.choices?.[0]?.delta?.content;
+          if (typeof c === 'string' && c.length > 0)
+            rec.firstContentForwardedAt = Date.now();
+        } catch {
+          /* [DONE] or partial */
         }
       }
       res.write(`${out}\n\n`);

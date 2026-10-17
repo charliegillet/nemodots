@@ -573,3 +573,13 @@ export async function contextRowsForAttempt(
   }
   return { modelCalls, contexts };
 }
+
+/** Outbox rows whose payload mentions the id and that were marked processed. */
+export async function processedOutbox(system: System, needle: string) {
+  const { rows } = await system.verifier.query(
+    `SELECT count(*)::int AS n FROM coordinator.outbox
+      WHERE processed_at IS NOT NULL AND payload::text LIKE $1`,
+    [`%${needle}%`],
+  );
+  return Number(rows[0].n);
+}

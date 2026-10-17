@@ -282,7 +282,13 @@ describe('G0.3 upstream verification commands on the clean install', () => {
       { mode: 0o600 },
     );
     try {
-      const r = await step('build', 'npm', ['run', 'build'], 900_000, canaries.env);
+      const r = await step(
+        'build',
+        'npm',
+        ['run', 'build'],
+        900_000,
+        canaries.env,
+      );
       expect(r.code, failureText('npm run build', r)).toBe(0);
     } finally {
       rmSync(envFile, { force: true });
@@ -306,14 +312,14 @@ describe('G0.3 upstream verification commands on the clean install', () => {
     const globRe = (glob: string) =>
       new RegExp(
         '^' +
-          glob
-            .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-            .replace(/\*/g, '[^/]*') +
+          glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*') +
           '$',
       );
     const covered = (file: string, toks: string[]) =>
       toks.some((t) =>
-        t.includes('*') ? globRe(t).test(file) : file === t || file.startsWith(`${t}/`),
+        t.includes('*')
+          ? globRe(t).test(file)
+          : file === t || file.startsWith(`${t}/`),
       );
     const owned: string[] = [];
     const walkDir = (dir: string) => {
@@ -335,7 +341,9 @@ describe('G0.3 upstream verification commands on the clean install', () => {
     const lintable = (f: string) => /\.(ts|tsx|js|mjs|cjs)$/.test(f);
     const formattable = (f: string) =>
       /\.(ts|tsx|js|mjs|cjs|json|md|css|ya?ml)$/.test(f);
-    const outsideLint = owned.filter((f) => lintable(f) && !covered(f, lintTokens));
+    const outsideLint = owned.filter(
+      (f) => lintable(f) && !covered(f, lintTokens),
+    );
     const outsideFormat = owned.filter(
       (f) => formattable(f) && !covered(f, formatTokens),
     );
@@ -372,18 +380,32 @@ describe('G0.3 upstream verification commands on the clean install', () => {
       ['prettier', '--check', 'scripts/nemodots', 'evals'],
       300_000,
     );
-    expect(r.code, failureText('prettier --check scripts/nemodots evals', r)).toBe(0);
+    expect(
+      r.code,
+      failureText('prettier --check scripts/nemodots evals', r),
+    ).toBe(0);
   });
 
   it('[G0.3] eslint passes directly on scripts/nemodots and evals', async () => {
     expect(results.get('npm-ci')?.code, 'npm ci did not succeed').toBe(0);
-    const r = await step(
-      'eslint-owned',
-      'npx',
-      ['eslint', 'scripts/nemodots', 'evals'],
-      300_000,
+    // ESLint errors out on a directory without lintable files, so pass only
+    // the directories that contain some.
+    const hasLintable = (dir: string): boolean => {
+      const abs = path.join(APP_ROOT, dir);
+      if (!existsSync(abs)) return false;
+      return readdirSync(abs).some((name) => {
+        const rel = `${dir}/${name}`;
+        return statSync(path.join(APP_ROOT, rel)).isDirectory()
+          ? hasLintable(rel)
+          : /\.(ts|tsx|js|mjs|cjs)$/.test(name);
+      });
+    };
+    const dirs = ['scripts/nemodots', 'evals'].filter(hasLintable);
+    expect(dirs, 'scripts/nemodots has lintable files').toContain(
+      'scripts/nemodots',
     );
-    expect(r.code, failureText('eslint scripts/nemodots evals', r)).toBe(0);
+    const r = await step('eslint-owned', 'npx', ['eslint', ...dirs], 300_000);
+    expect(r.code, failureText(`eslint ${dirs.join(' ')}`, r)).toBe(0);
   });
 
   it('[G0.3] typecheck, lint and format failures are not in production or builder-owned files', () => {
@@ -458,9 +480,69 @@ describe('G0.3 upstream verification commands on the clean install', () => {
 });
 
 describe('G0.6 built assets carry no secrets', () => {
-  it('[G0.6] dist/ of the clean build has zero secret-value matches', () => {
-    // `vite build` runs before `tsc`, so the bundle exists even when the
-    // server compile fails; scan it regardless and let the build case fail.
+  const FORBIDDEN_BROWSER_NAMES = [
+    'OPENAI_API_KEY',
+    'CPK_INTELLIGENCE_API_KEY',
+    'INTELLIGENCE_API_KEY',
+    'CRUSOE_API_KEY',
+    'NEMODOTS_PG_URL_',
+    'NEMODOTS_PROBE_SECRET',
+  ];
+
+  it('[G0.6] the canary scanner finds a planted canary (positive control)', () => {
+    const dir = ensureScratch('canary-control');
+    const planted = makeCanaries();
+    writeFileSync(
+      path.join(dir, 'bundle.js'),
+      `const leaked = "${planted.needles[0].value}";\n`,
+    );
+    writeFileSync(path.join(dir, 'clean.js'), 'const fine = 1;\n');
+    const report = scan(planted.needles, {
+      roots: [dir],
+      skipDirs: new Set(),
+    });
+    expect(report.filesScanned).toBe(2);
+    expect(Object.keys(report.hits)).toEqual([planted.needles[0].name]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('[G0.6] dist/client of the canary build contains none of the canary values (plain, VITE_-prefixed, role URL passwords); dist/server none either', () => {
+    expect(canaries, 'the canary build did not run').toBeDefined();
+    expect(results.get('build')?.code, 'build did not succeed').toBe(0);
+    const needles = canaries!.needles;
+    expect(needles.length).toBe((CANARY_PLAIN.length + CANARY_URLS.length) * 2);
+    const client = path.join(COPY, 'dist', 'client');
+    const server = path.join(COPY, 'dist', 'server');
+    expect(
+      existsSync(path.join(client, 'assets')),
+      'build produced no frontend bundle to scan',
+    ).toBe(true);
+    const clientReport = scan(needles, {
+      roots: [client],
+      skipDirs: new Set(),
+    });
+    const serverReport = scan(needles, {
+      roots: [server],
+      skipDirs: new Set(),
+    });
+    appendManifest({
+      gate: 0,
+      step: 'canary-scan',
+      canaryNames: needles.map((n) => n.name),
+      clientFilesScanned: clientReport.filesScanned,
+      serverFilesScanned: serverReport.filesScanned,
+      clientHits: summarize(clientReport),
+      serverHits: summarize(serverReport),
+      policy:
+        'dist/client: zero canary values (secrets must never reach the browser). dist/server: zero as well, since secrets must arrive from the runtime environment and never be baked into compiled output.',
+    });
+    expect(clientReport.filesScanned).toBeGreaterThan(10);
+    expect(serverReport.filesScanned).toBeGreaterThan(10);
+    expect(summarize(clientReport)).toBe('no matches');
+    expect(summarize(serverReport)).toBe('no matches');
+  });
+
+  it('[G0.6] the real secret values (roles.env and gitignored env files) are absent from the clean-build dist/', () => {
     expect(
       existsSync(path.join(COPY, 'dist', 'client', 'assets')),
       'build produced no frontend bundle to scan',
@@ -476,35 +558,30 @@ describe('G0.6 built assets carry no secrets', () => {
     });
     expect(report.filesScanned).toBeGreaterThan(10);
     expect(summarize(report)).toBe('no matches');
-    // Extra pins: the Crusoe key and the PG role URLs never reach the browser bundle.
-    const bundle = path.join(COPY, 'dist', 'client', 'assets');
-    expect(existsSync(bundle) && statSync(bundle).isDirectory()).toBe(true);
-    const assetReport = scan(needles, {
-      roots: [bundle],
-      skipDirs: new Set(),
-      extensions: new Set(['.js', '.css', '.html', '.map', '.json']),
-    });
-    expect(assetReport.filesScanned).toBeGreaterThan(0);
-    expect(summarize(assetReport)).toBe('no matches');
-    // Server-only variable names must not be referenced by the browser bundle.
-    const forbiddenNames = [
-      'NEMODOTS_PG_URL_',
-      'NEMODOTS_PROBE_SECRET',
-      'CRUSOE_API_KEY',
-    ];
-    let nameHits = 0;
-    for (const file of (
-      spawnSync('find', [bundle, '-type', 'f', '-name', '*.js'], {
-        encoding: 'utf8',
-      }).stdout ?? ''
-    )
-      .split('\n')
-      .filter(Boolean)) {
-      const text = readFileSync(file, 'utf8');
-      for (const n of forbiddenNames) if (text.includes(n)) nameHits += 1;
-    }
-    expect(nameHits, 'browser bundle references server-only secret names').toBe(
-      0,
-    );
+  });
+
+  it('[G0.6] the browser bundle does not reference server-only secret names (OpenAI, Intelligence, Crusoe, role URLs, probe secret)', () => {
+    const client = path.join(COPY, 'dist', 'client');
+    expect(existsSync(client), 'no dist/client to scan').toBe(true);
+    const hits: Record<string, number> = {};
+    let scanned = 0;
+    const walkFiles = (dir: string) => {
+      for (const name of readdirSync(dir)) {
+        const abs = path.join(dir, name);
+        if (statSync(abs).isDirectory()) walkFiles(abs);
+        else if (/\.(js|mjs|css|html|map|json|svg)$/.test(name)) {
+          scanned += 1;
+          const text = readFileSync(abs, 'utf8');
+          for (const n of FORBIDDEN_BROWSER_NAMES)
+            if (text.includes(n)) hits[n] = (hits[n] ?? 0) + 1;
+        }
+      }
+    };
+    walkFiles(client);
+    expect(scanned).toBeGreaterThan(10);
+    expect(
+      hits,
+      `browser bundle files referencing server-only names: ${JSON.stringify(hits)}`,
+    ).toEqual({});
   });
 });

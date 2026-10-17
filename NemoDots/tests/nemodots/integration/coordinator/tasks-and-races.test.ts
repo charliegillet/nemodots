@@ -10,6 +10,7 @@ import {
   claimStart,
   count,
   plannedMission,
+  sleep,
   taskRow,
   vectorOf,
   withHarness,
@@ -197,68 +198,74 @@ it('concurrent publications by many attempts (plan, delegate, finding, model-cal
 
 it('cancel racing many publications: every publication either committed before the cancel or is fenced; nothing commits after', async () => {
   await withHarness(async (h) => {
-    const planned = await plannedMission(
-      h,
-      Array.from({ length: 6 }, () => ({ role: 'investigator' as const })),
-    );
-    const claims = [];
-    for (const taskId of planned.taskIds)
-      claims.push(await claimStart(h, { taskId }));
-    const publish = (claimed: (typeof claims)[number]) =>
-      h.coordinator
-        .publishOutput(claimed.context, {
-          kind: 'handoff',
-          content: { id: randomUUID() },
-          dependencyVector: [],
-        })
-        .then(
-          () => 'committed' as const,
-          (error: unknown) => {
-            expect(error).toBeInstanceOf(FenceError);
-            return 'fenced' as const;
-          },
+    // Stagger the cancel so it lands before, between and after the publications.
+    for (const delayMs of [0, 3, 8, 15, 30]) {
+      const planned = await plannedMission(
+        h,
+        Array.from({ length: 6 }, () => ({ role: 'investigator' as const })),
+      );
+      const claims: Awaited<ReturnType<typeof claimStart>>[] = [];
+      for (const taskId of planned.taskIds)
+        claims.push(
+          await claimStart(h, { taskId, missionId: planned.missionId }),
         );
-    const [outcomes, mission] = await Promise.all([
-      Promise.all(claims.map(publish)),
-      h.coordinator.control.cancel(planned.missionId),
-    ]);
-    expect(mission.status).toBe('cancelled');
-    const committed = outcomes.filter(
-      (outcome) => outcome === 'committed',
-    ).length;
-    const stored = await count(
-      h,
-      'coordinator.task_outputs',
-      "kind = 'handoff'",
-    );
-    expect(stored).toBe(committed);
-    // The cancel's exclusive lock waited for in-flight publications: those are
-    // committed, everything else was fenced and its task cancelled.
-    expect(
-      await count(
+      const publish = (claimed: (typeof claims)[number]) =>
+        h.coordinator
+          .publishOutput(claimed.context, {
+            kind: 'handoff',
+            content: { id: randomUUID() },
+            dependencyVector: [],
+          })
+          .then(
+            () => 'committed' as const,
+            (error: unknown) => {
+              expect(error).toBeInstanceOf(FenceError);
+              return 'fenced' as const;
+            },
+          );
+      const [outcomes, mission] = await Promise.all([
+        Promise.all(claims.map(publish)),
+        sleep(delayMs).then(() =>
+          h.coordinator.control.cancel(planned.missionId),
+        ),
+      ]);
+      expect(mission.status).toBe('cancelled');
+      const committed = outcomes.filter(
+        (outcome) => outcome === 'committed',
+      ).length;
+      const stored = await count(
         h,
-        'coordinator.tasks',
-        "mission_id = $1 AND role = 'investigator' AND status = 'succeeded'",
+        'coordinator.task_outputs',
+        "mission_id = $1 AND kind = 'handoff'",
         [planned.missionId],
-      ),
-    ).toBe(committed);
-    expect(
-      await count(
-        h,
-        'coordinator.tasks',
-        "mission_id = $1 AND role = 'investigator' AND status = 'cancelled'",
-        [planned.missionId],
-      ),
-    ).toBe(6 - committed);
-    expect(mission.cancellation?.abortedAttemptIds.length).toBe(6 - committed);
-    // Every task is terminal after the cancel.
-    const open = await count(
-      h,
-      'coordinator.tasks',
-      "mission_id = $1 AND status NOT IN ('succeeded','failed','cancelled')",
-      [planned.missionId],
-    );
-    expect(open).toBe(0);
+      );
+      expect(stored, `delay ${delayMs}`).toBe(committed);
+      // The cancel's exclusive lock waited for in-flight publications: those are
+      // committed, everything else was fenced and its task cancelled.
+      const tasks = (
+        await h.admin.query(
+          `SELECT status, count(*) AS n FROM coordinator.tasks
+            WHERE mission_id = $1 AND role = 'investigator' GROUP BY status`,
+          [planned.missionId],
+        )
+      ).rows;
+      const byStatus = Object.fromEntries(
+        tasks.map((row) => [row.status, Number(row.n)]),
+      );
+      expect(byStatus.succeeded ?? 0, `delay ${delayMs}`).toBe(committed);
+      expect(byStatus.cancelled ?? 0, `delay ${delayMs}`).toBe(6 - committed);
+      expect(mission.cancellation?.abortedAttemptIds.length).toBe(
+        6 - committed,
+      );
+      expect(
+        await count(
+          h,
+          'coordinator.tasks',
+          "mission_id = $1 AND status NOT IN ('succeeded','failed','cancelled')",
+          [planned.missionId],
+        ),
+      ).toBe(0);
+    }
   });
 });
 

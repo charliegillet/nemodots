@@ -49,8 +49,7 @@ export async function lockFencedAttempt(
   )
     throw new FenceError(context.attemptId, 'attempt_missing');
 
-  const lockClause =
-    options.missionLock === 'update' ? 'FOR UPDATE' : 'FOR SHARE';
+  const lockClause = '';
   const missionResult = await client.query<MissionRow>(
     `SELECT * FROM coordinator.missions WHERE id = $1 ${lockClause}`,
     [context.missionId],

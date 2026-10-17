@@ -526,6 +526,58 @@ describe('stream observer (stub-verified)', () => {
       { content: 'b', reasoning: null },
     ]);
   });
+
+  it('a stream truncated mid-way then retried leaves observer output equal to result.content', async () => {
+    stub = await startStub((_req, res, _s, i) => {
+      if (i === 0) {
+        sse(res);
+        res.write(chunk({ content: 'Hel' }));
+        res.write(chunk({ reasoning: 'think' }));
+        res.end(); // truncated: no finish reason
+        return;
+      }
+      textStream(res, ['Hel', 'lo']);
+    });
+    const { client: c } = client(stub, { retry: { maxRetries: 1 } });
+    let text = '';
+    let thought = '';
+    const attempts: number[] = [];
+    const resets: number[] = [];
+    const result = await c.complete(request(), {
+      ...ctx(),
+      onDelta: (d, attempt) => {
+        text += d.content ?? '';
+        thought += d.reasoning ?? '';
+        attempts.push(attempt);
+      },
+      onAttemptReset: (next) => {
+        resets.push(next);
+        text = '';
+        thought = '';
+      },
+    });
+    expect(result.outcome).toBe('completed');
+    expect(result.attempts).toHaveLength(2);
+    expect(resets).toEqual([2]);
+    expect(attempts).toEqual([1, 1, 2, 2]);
+    expect(text).toBe(result.content);
+    expect(thought).toBe('');
+  });
+
+  it('no reset is signalled when the failed attempt delivered nothing', async () => {
+    stub = await startStub((_req, res, _s, i) => {
+      if (i === 0) return json(res, 503, { error: { message: 'x' } });
+      textStream(res, ['ok']);
+    });
+    const { client: c } = client(stub, { retry: { maxRetries: 1 } });
+    const resets: number[] = [];
+    await c.complete(request(), {
+      ...ctx(),
+      onDelta: () => undefined,
+      onAttemptReset: (n) => resets.push(n),
+    });
+    expect(resets).toEqual([]);
+  });
 });
 
 describe('structured output (stub-verified)', () => {

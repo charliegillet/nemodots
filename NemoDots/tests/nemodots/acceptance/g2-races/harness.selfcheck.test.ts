@@ -16,7 +16,8 @@ import {
   withWorld,
 } from './harness.js';
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const NONE = { need: [] as never[] };
 
 describe('G2 harness self-check', () => {
@@ -141,18 +142,20 @@ describe('G2 harness self-check', () => {
       const script = `redis.call('SET', KEYS[1], 'x'); return redis.call('UNLINK', KEYS[2])`;
       await w.redis.set(key2, 'v');
       w.fault.mode = 'drop_reply';
-      const lost = await rc
-        .eval(script, { keys: [key, key2] })
-        .then(() => 'reply', (e) => `lost:${(e as Error).message}`);
+      const lost = await rc.eval(script, { keys: [key, key2] }).then(
+        () => 'reply',
+        (e) => `lost:${(e as Error).message}`,
+      );
       w.fault.mode = 'ok';
       expect(lost).toMatch(/^lost:/);
       expect(await w.redis.get(key)).toBe('x'); // the effect happened
       expect(await w.redis.exists(key2)).toBe(0);
       await w.redis.set(key2, 'v');
       w.fault.mode = 'fail_before';
-      const refused = await rc
-        .eval(script, { keys: [keyB, key2] })
-        .then(() => 'reply', (e) => `failed:${(e as Error).message}`);
+      const refused = await rc.eval(script, { keys: [keyB, key2] }).then(
+        () => 'reply',
+        (e) => `failed:${(e as Error).message}`,
+      );
       w.fault.mode = 'ok';
       expect(refused).toMatch(/^failed:/);
       expect(await w.redis.get(keyB)).toBeNull(); // nothing happened

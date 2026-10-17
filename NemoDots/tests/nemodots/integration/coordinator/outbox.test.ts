@@ -6,6 +6,7 @@ import {
   createCoordinatorHandlers,
   createOutbox,
   enqueueOutbox,
+  type OutboxHelpers,
   OUTBOX_TOPICS,
 } from '../../../../src/server/nemodots/coordinator/index.js';
 import { latch } from '../../helpers/barrier.js';
@@ -37,7 +38,7 @@ it('duplicate delivery of one message applies its database effect exactly once',
     const deliveries: string[] = [];
     const handlerFor =
       (name: string, hold: boolean) =>
-      async (_message: unknown, helpers: { runOnce: Function }) => {
+      async (_message: unknown, helpers: OutboxHelpers) => {
         deliveries.push(name);
         if (hold) {
           firstStarted.open();

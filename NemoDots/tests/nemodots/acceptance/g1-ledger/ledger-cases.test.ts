@@ -8,6 +8,7 @@ import { LEDGER_CASES } from '../oracle/ledger.js';
 import type { LedgerCase, LedgerOp } from '../oracle/types.js';
 import { World, errorCode, type OpResult } from './driver.js';
 import { withAccDatabase } from './harness.js';
+import { realPageEdit } from './page-edit.js';
 
 async function exec(w: World, op: LedgerOp): Promise<OpResult> {
   switch (op.op) {
@@ -39,43 +40,88 @@ async function exec(w: World, op: LedgerOp): Promise<OpResult> {
     }
     case 'publish_finding':
       return w.publishFinding(op);
-    case 'page_edit':
-      // A page edit happens in the OpenDots page store, which the ledger never
-      // reads. The oracle expectation is that nothing in the ledger or the
-      // authority moves; the final checks prove it.
-      return { ok: true };
+    case 'page_edit': {
+      // A REAL edit through the OpenDots page store (page-edit.ts). It fails with ENTRY POINT MISSING
+      // while the store has no onRevision hook; it never returns ok without a minted page revision.
+      const report = await realPageEdit(w, op.pageId);
+      return report.problems.length
+        ? { ok: false, error: `PAGE_EDIT: ${report.problems.join(' | ')}` }
+        : { ok: true };
+    }
   }
 }
 
-function checkOutcome(i: number, op: LedgerOp, got: OpResult, w: World, expected: NonNullable<LedgerCase['expected']['outcomes'][number]>, problems: string[]) {
+function checkOutcome(
+  i: number,
+  op: LedgerOp,
+  got: OpResult,
+  w: World,
+  expected: NonNullable<LedgerCase['expected']['outcomes'][number]>,
+  problems: string[],
+) {
   const at = `op ${i} (${op.op}${'label' in op ? ` ${op.label}` : ''})`;
   if (!expected.ok) {
-    if (got.ok) problems.push(`${at}: expected rejection "${expected.error}" but it succeeded`);
-    else if (got.error !== expected.error) problems.push(`${at}: expected error "${expected.error}", got "${got.error}"`);
-    if (op.op === 'register' && (got.receiptDelta ?? 0) !== 0) problems.push(`${at}: a rejected registration still wrote ${got.receiptDelta} receipt row(s)`);
-    if (op.op === 'register' && (got.confirmationDelta ?? 0) !== 0) problems.push(`${at}: a rejected registration still appended a confirmation`);
+    if (got.ok)
+      problems.push(
+        `${at}: expected rejection "${expected.error}" but it succeeded`,
+      );
+    else if (got.error !== expected.error)
+      problems.push(
+        `${at}: expected error "${expected.error}", got "${got.error}"`,
+      );
+    if (op.op === 'register' && (got.receiptDelta ?? 0) !== 0)
+      problems.push(
+        `${at}: a rejected registration still wrote ${got.receiptDelta} receipt row(s)`,
+      );
+    if (op.op === 'register' && (got.confirmationDelta ?? 0) !== 0)
+      problems.push(
+        `${at}: a rejected registration still appended a confirmation`,
+      );
     return;
   }
   if (!got.ok) {
     problems.push(`${at}: expected success but got "${got.error}"`);
     return;
   }
-  if (got.error === 'ROW_WAS_MUTATED') problems.push(`${at}: the immutable column changed`);
+  if (got.error === 'ROW_WAS_MUTATED')
+    problems.push(`${at}: the immutable column changed`);
   if (op.op !== 'register' && op.op !== 'register_concurrent') return;
   const cur = got.current;
   if (!cur) {
-    problems.push(`${at}: no supported receipt exists for the source afterwards`);
+    problems.push(
+      `${at}: no supported receipt exists for the source afterwards`,
+    );
     return;
   }
-  if (expected.revision !== undefined && cur.revision !== expected.revision) problems.push(`${at}: expected revision ${expected.revision}, current is ${cur.revision}`);
-  if (expected.relRevision !== undefined && cur.revision - (got.baseRevision ?? 0) !== expected.relRevision) {
-    problems.push(`${at}: expected relative revision ${expected.relRevision}, got ${cur.revision - (got.baseRevision ?? 0)} (authority base ${got.baseRevision})`);
+  if (expected.revision !== undefined && cur.revision !== expected.revision)
+    problems.push(
+      `${at}: expected revision ${expected.revision}, current is ${cur.revision}`,
+    );
+  if (
+    expected.relRevision !== undefined &&
+    cur.revision - (got.baseRevision ?? 0) !== expected.relRevision
+  ) {
+    problems.push(
+      `${at}: expected relative revision ${expected.relRevision}, got ${cur.revision - (got.baseRevision ?? 0)} (authority base ${got.baseRevision})`,
+    );
   }
-  if (op.op === 'register' && expected.newRevision !== undefined && (got.receiptDelta ?? 0) !== (expected.newRevision ? 1 : 0)) {
-    problems.push(`${at}: expected newRevision=${expected.newRevision}, receipt rows changed by ${got.receiptDelta}`);
+  if (
+    op.op === 'register' &&
+    expected.newRevision !== undefined &&
+    (got.receiptDelta ?? 0) !== (expected.newRevision ? 1 : 0)
+  ) {
+    problems.push(
+      `${at}: expected newRevision=${expected.newRevision}, receipt rows changed by ${got.receiptDelta}`,
+    );
   }
-  if (op.op === 'register' && expected.confirmation !== undefined && (got.confirmationDelta ?? 0) !== (expected.confirmation ? 1 : 0)) {
-    problems.push(`${at}: expected confirmation=${expected.confirmation}, confirmations changed by ${got.confirmationDelta}`);
+  if (
+    op.op === 'register' &&
+    expected.confirmation !== undefined &&
+    (got.confirmationDelta ?? 0) !== (expected.confirmation ? 1 : 0)
+  ) {
+    problems.push(
+      `${at}: expected confirmation=${expected.confirmation}, confirmations changed by ${got.confirmationDelta}`,
+    );
   }
   void w;
 }
@@ -89,49 +135,77 @@ async function checkFinal(w: World, c: LedgerCase, problems: string[]) {
   for (const [k, rev] of Object.entries(f.currentRevisionBySource ?? {})) {
     const [env, key] = split(k);
     const cur = await w.currentOf(env, key);
-    if (cur?.revision !== rev) problems.push(`final currentRevision ${k}: expected ${rev}, got ${cur?.revision ?? 'none'}`);
+    if (cur?.revision !== rev)
+      problems.push(
+        `final currentRevision ${k}: expected ${rev}, got ${cur?.revision ?? 'none'}`,
+      );
   }
   for (const [k, rel] of Object.entries(f.currentRelRevisionBySource ?? {})) {
     const [env, key] = split(k);
     const cur = await w.currentOf(env, key);
     const got = cur ? cur.revision - w.baseOf(key) : undefined;
-    if (got !== rel) problems.push(`final currentRelRevision ${k}: expected ${rel}, got ${got ?? 'none'}`);
+    if (got !== rel)
+      problems.push(
+        `final currentRelRevision ${k}: expected ${rel}, got ${got ?? 'none'}`,
+      );
   }
   for (const [label, status] of Object.entries(f.receiptStatus ?? {})) {
     const id = w.labels.get(label);
     const rec = id ? await w.receiptById(id) : null;
-    if (rec?.status !== status) problems.push(`final receiptStatus ${label}: expected ${status}, got ${rec?.status ?? 'no receipt'}`);
+    if (rec?.status !== status)
+      problems.push(
+        `final receiptStatus ${label}: expected ${status}, got ${rec?.status ?? 'no receipt'}`,
+      );
   }
   for (const [k, n] of Object.entries(f.receiptRowsBySource ?? {})) {
     const [env, key] = split(k);
     const rows = await w.receiptsOf(env, key);
-    if (rows.length !== n) problems.push(`final receiptRows ${k}: expected ${n}, got ${rows.length}`);
+    if (rows.length !== n)
+      problems.push(
+        `final receiptRows ${k}: expected ${n}, got ${rows.length}`,
+      );
   }
   for (const [label, n] of Object.entries(f.confirmationsByLabel ?? {})) {
     const id = w.labels.get(label);
     const got = id ? await w.confirmationCount(id) : -1;
-    if (got !== n) problems.push(`final confirmations ${label}: expected ${n}, got ${got}`);
+    if (got !== n)
+      problems.push(`final confirmations ${label}: expected ${n}, got ${got}`);
   }
   if (f.distinctSources !== undefined) {
     const got = await w.distinctSources();
-    if (got !== f.distinctSources) problems.push(`final distinctSources: expected ${f.distinctSources}, got ${got}`);
+    if (got !== f.distinctSources)
+      problems.push(
+        `final distinctSources: expected ${f.distinctSources}, got ${got}`,
+      );
   }
   if (f.newObservationReceipts !== undefined) {
     const got = await w.newReceiptsSinceSeed();
-    if (got !== f.newObservationReceipts) problems.push(`final newObservationReceipts: expected ${f.newObservationReceipts}, got ${got}`);
+    if (got !== f.newObservationReceipts)
+      problems.push(
+        `final newObservationReceipts: expected ${f.newObservationReceipts}, got ${got}`,
+      );
   }
   for (const [key, delta] of Object.entries(f.configVersionDelta ?? {})) {
     const got = (await w.configVersion(key)) ?? 0;
     const base = w.bases?.entries.get(key) ?? 0;
-    if (got - base !== delta) problems.push(`final configVersionDelta ${key}: expected ${delta}, got ${got - base}`);
+    if (got - base !== delta)
+      problems.push(
+        `final configVersionDelta ${key}: expected ${delta}, got ${got - base}`,
+      );
   }
   for (const [key, value] of Object.entries(f.configValue ?? {})) {
     const got = await w.configValue(key);
-    if (got !== value) problems.push(`final configValue ${key}: expected ${JSON.stringify(value)}, got ${JSON.stringify(got)}`);
+    if (got !== value)
+      problems.push(
+        `final configValue ${key}: expected ${JSON.stringify(value)}, got ${JSON.stringify(got)}`,
+      );
   }
   if (f.modelClaimFindings !== undefined) {
     const got = await w.newFindingsSinceSeed();
-    if (got !== f.modelClaimFindings) problems.push(`final modelClaimFindings: expected ${f.modelClaimFindings}, got ${got}`);
+    if (got !== f.modelClaimFindings)
+      problems.push(
+        `final modelClaimFindings: expected ${f.modelClaimFindings}, got ${got}`,
+      );
   }
 }
 
@@ -148,18 +222,29 @@ async function runLedgerCase(c: LedgerCase) {
     try {
       for (let i = 0; i < c.ops.length; i += 1) {
         const op = c.ops[i];
-        if (op.op !== 'seed_config') await w.snapshotBases().catch((e) => problems.push(`snapshot: ${(e as Error).message.split('\n')[0]}`));
+        if (op.op !== 'seed_config')
+          await w
+            .snapshotBases()
+            .catch((e) =>
+              problems.push(`snapshot: ${(e as Error).message.split('\n')[0]}`),
+            );
         let got: OpResult;
         try {
           got = await exec(w, op);
         } catch (error) {
-          problems.push(`op ${i} (${op.op}) threw: ${(error as Error).message.split('\n')[0]}`);
+          problems.push(
+            `op ${i} (${op.op}) threw: ${(error as Error).message.split('\n')[0]}`,
+          );
           continue;
         }
         const expected = c.expected.outcomes[i];
         if (expected) checkOutcome(i, op, got, w, expected, problems);
-        else if (!got.ok && op.op !== 'register') problems.push(`op ${i} (${op.op}) failed unexpectedly: ${got.error}`);
-        else if (!got.ok && op.op === 'register') problems.push(`op ${i} (register ${op.label}) failed unexpectedly: ${got.error}`);
+        else if (!got.ok && op.op !== 'register')
+          problems.push(`op ${i} (${op.op}) failed unexpectedly: ${got.error}`);
+        else if (!got.ok && op.op === 'register')
+          problems.push(
+            `op ${i} (register ${op.label}) failed unexpectedly: ${got.error}`,
+          );
       }
       await w.snapshotBases();
       await checkFinal(w, c, problems);
@@ -171,7 +256,9 @@ async function runLedgerCase(c: LedgerCase) {
 }
 
 describe('gate 1 ledger cases (frozen oracle LG-*)', () => {
-  it.each(LEDGER_CASES.map((c) => [`${gateTag(c)} ${c.id} ${c.title}`, c] as const))('%s', async (_name, c) => {
+  it.each(
+    LEDGER_CASES.map((c) => [`${gateTag(c)} ${c.id} ${c.title}`, c] as const),
+  )('%s', async (_name, c) => {
     await runLedgerCase(c);
   });
 });

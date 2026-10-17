@@ -23,6 +23,7 @@ import { loadConfig, roleUrl } from './runtime-env.js';
 import {
   advanceConfig,
   advanceConfigUnconditionally,
+  lockConfigRows,
   type ConfigScalar,
 } from './version-authority.js';
 
@@ -30,6 +31,17 @@ export const SEED_ORDER_COUNT = 200;
 export const SEED_PRODUCT_COUNT = 24;
 /** Seed orders are placed on this base date (all older than any recent-orders window). */
 const SEED_EPOCH_MS = Date.UTC(2026, 0, 1, 0, 0, 0);
+/**
+ * The lagging replica (fault class F4) is a snapshot taken before the last
+ * REPLICA_LAG_ORDERS seed orders were placed, so for every SKU those orders
+ * touched it reports MORE stock than the primary. The scarce SKU additionally
+ * lags by SCARCE_REPLICA_LAG units (reservations the replica never saw). With
+ * zero customer traffic, routing inventory reads to the replica therefore
+ * already makes the authority and the API view disagree and lets orders oversell.
+ */
+export const REPLICA_LAG_ORDERS = 80;
+export const SCARCE_SKU = 'SKU-0024';
+export const SCARCE_REPLICA_LAG = 2;
 
 /** Healthy configuration baseline. Do not import from team/** or runbooks. */
 export const HEALTHY_BASELINE: Readonly<Record<string, ConfigScalar>> =
@@ -77,7 +89,10 @@ export interface SeedProduct {
   category: string;
   priceCents: number;
   listed: boolean;
+  /** Primary stock. */
   quantity: number;
+  /** Stock the (lagging) replica snapshot reports. */
+  replicaQuantity: number;
 }
 export interface SeedOrder {
   id: string;
@@ -111,6 +126,7 @@ export function generateSeedData(): {
     listed: true,
     // SKU-0024 is deliberately scarce: stale-replica oversell is visible on it.
     quantity: i === SEED_PRODUCT_COUNT - 1 ? 3 : 120 + ((i * 37) % 180),
+    replicaQuantity: 0, // set below, once the orders are known
   }));
   products.push({
     sku: PROBE_SKU,
@@ -119,6 +135,7 @@ export function generateSeedData(): {
     priceCents: 100,
     listed: false,
     quantity: PROBE_SKU_STOCK,
+    replicaQuantity: PROBE_SKU_STOCK,
   });
   const bySku = new Map(products.map((p) => [p.sku, p]));
   const orders: SeedOrder[] = [];
@@ -145,6 +162,13 @@ export function generateSeedData(): {
       items,
     });
   }
+  const lag = new Map<string, number>();
+  for (const order of orders.slice(SEED_ORDER_COUNT - REPLICA_LAG_ORDERS))
+    for (const item of order.items)
+      lag.set(item.sku, (lag.get(item.sku) ?? 0) + item.quantity);
+  lag.set(SCARCE_SKU, (lag.get(SCARCE_SKU) ?? 0) + SCARCE_REPLICA_LAG);
+  for (const product of products)
+    product.replicaQuantity = product.quantity + (lag.get(product.sku) ?? 0);
   return { products, orders };
 }
 
@@ -176,7 +200,9 @@ export async function seedCheckout(
   const { products, orders } = generateSeedData();
   const configInserted: string[] = [];
   const configRestored: string[] = [];
-  await withTransaction(pool, async (client) => {
+  await withTransaction(pool, async (client, attempt) => {
+    configInserted.length = 0; // a retry re-runs the whole callback
+    configRestored.length = 0;
     await client.query(
       `INSERT INTO checkout.products (sku, name, category, price_cents, listed)
        SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::int[], $5::boolean[])
@@ -195,12 +221,14 @@ export async function seedCheckout(
        ON CONFLICT (sku) DO NOTHING`,
       [products.map((p) => p.sku), products.map((p) => p.quantity)],
     );
-    // The replica is a snapshot of the primary at first seed; it is never
-    // refreshed by the API (it stands in for a replica that stopped replicating).
+    // The replica is a snapshot that is already behind the primary at first
+    // seed (see REPLICA_LAG_ORDERS); it is never refreshed by the API or a
+    // reseed (it stands in for a replica that stopped replicating).
     await client.query(
       `INSERT INTO checkout.inventory_replica (sku, quantity)
-       SELECT sku, quantity FROM checkout.inventory
+       SELECT * FROM unnest($1::text[], $2::int[])
        ON CONFLICT (sku) DO NOTHING`,
+      [products.map((p) => p.sku), products.map((p) => p.replicaQuantity)],
     );
     await client.query(
       `INSERT INTO checkout.orders (id, status, customer, total_cents, created_at)
@@ -237,12 +265,37 @@ export async function seedCheckout(
         ],
       );
 
-    for (const [key, value] of Object.entries(HEALTHY_BASELINE)) {
-      const existing = await client.query<{ value: ConfigScalar }>(
-        'SELECT value FROM checkout.config_entries WHERE key = $1 FOR UPDATE',
-        [key],
+    // Lock order of ARCHITECTURE 5.1 step 4-5, taken ONCE up front: the
+    // collection row first (only when a baseline key has to be inserted), then
+    // every baseline member row in sorted key order. Inserts and restores below
+    // then re-enter locks this transaction already holds, so `seed
+    // --reset-config` (a live repair tool) cannot deadlock against an action
+    // commit or the owner edit.
+    const keys = Object.keys(HEALTHY_BASELINE).sort();
+    const peek = await client.query<{ key: string }>(
+      'SELECT key FROM checkout.config_entries WHERE key = ANY($1::text[])',
+      [keys],
+    );
+    const present = new Set(peek.rows.map((r) => r.key));
+    // A retry (attempt > 1) always takes the collection: it follows a peek that
+    // raced a concurrent delete.
+    const needCollection = attempt > 1 || keys.some((k) => !present.has(k));
+    await lockConfigRows(client, { keys, collection: needCollection });
+    const rows = await client.query<{ key: string; value: ConfigScalar }>(
+      'SELECT key, value FROM checkout.config_entries WHERE key = ANY($1::text[])',
+      [keys],
+    );
+    const existing = new Map(rows.rows.map((r) => [r.key, r.value]));
+    if (!needCollection && existing.size !== keys.length)
+      // a key vanished between the peek and the member locks: restart with the
+      // collection locked first (SQLSTATE 40001 is retried by withTransaction)
+      throw Object.assign(
+        new Error('baseline key removed concurrently; retrying'),
+        { code: '40001' },
       );
-      if (!existing.rows.length) {
+    for (const key of keys) {
+      const value = HEALTHY_BASELINE[key];
+      if (!existing.has(key)) {
         await advanceConfig(client, {
           key,
           value,
@@ -251,7 +304,7 @@ export async function seedCheckout(
           causedBy: { actor: 'seed' },
         });
         configInserted.push(key);
-      } else if (options.restoreConfig && existing.rows[0].value !== value) {
+      } else if (options.restoreConfig && existing.get(key) !== value) {
         await advanceConfigUnconditionally(client, {
           key,
           value,

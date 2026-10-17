@@ -103,7 +103,10 @@ export function specCanonicalJson(value: unknown): string {
         .filter(([, v]) => v !== undefined)
         .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
       return `{${entries
-        .map(([k, v]) => `${JSON.stringify(k.normalize('NFC'))}:${specCanonicalJson(v)}`)
+        .map(
+          ([k, v]) =>
+            `${JSON.stringify(k.normalize('NFC'))}:${specCanonicalJson(v)}`,
+        )
         .join(',')}}`;
     }
     default:
