@@ -23,7 +23,15 @@ Source keys (registry-validated): `checkout.config` (membership collection: **wh
 ```ts
 SourceRef = {
   key: SourceKey,
-  sourceType: 'controlled_config' | 'controlled_collection' | 'observed_endpoint' | 'observed_store' | 'probe' | 'runbook' | 'page_snapshot' | 'memory_snapshot',
+  sourceType:
+    'controlled_config' |
+    'controlled_collection' |
+    'observed_endpoint' |
+    'observed_store' |
+    'probe' |
+    'runbook' |
+    'page_snapshot' |
+    'memory_snapshot',
   authority: 'controlled' | 'observed', // controlled: version in checkout.config_entries / config_collection ; observed: ledger-assigned
   scope: Scope,
 };
@@ -351,19 +359,19 @@ Never included: prompts, raw tool bodies, `control` data, env values, role URLs,
 
 ## 9. Route DTOs (`/api/nemodots`)
 
-| Route                                                           | Request                                                                                        | Response                                                                                                                                                                                                                                                                       |
-| --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `GET /health`                                                   |                                                                                                | `HealthStatus { mode: 'live' or 'fixture' or 'blocked', provider: { reachable, modelListed, model, host /* from OPENAI_BASE_URL */, checkedAt }, postgres: 'ok' or 'down', redis: 'ok' or 'down', checkout: { reachable, status }, intelligence: 'configured' or 'blocked', missingEnv: string[] /* names only; live needs OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL */, incidentDotIds: number /* count */ }` |
-| `POST /missions`                                                | `{ goal, constraints?: string[], mode?: 'live' or 'fixture' /* must equal server mode */, admission?: { minAgeMs } }` | `Mission` (201); 503 `{ error, missingEnv }` when blocked; 400 when `mode` disagrees with the server                                                                                                                                                                             |
-| `GET /missions`, `GET /missions/:id`                            |                                                                                                | `Mission[]`; `MissionSnapshot { mission, tasks, attempts, outputs, findings, receipts, confirmations, actions, authorizations, results, invalidations /* perMission subset */, recoveries, probe, telemetry, lastEventId }`                                                       |
-| `POST /missions/:id/{start,pause,resume,cancel}`                | `{}`                                                                                           | `Mission`; 409 on illegal transition                                                                                                                                                                                                                                             |
-| `GET /missions/:id/events`                                      | header `Last-Event-ID`                                                                         | `text/event-stream` of `MissionEvent`                                                                                                                                                                                                                                           |
-| `GET /missions/:id/{tasks,evidence,actions,recovery,telemetry}` |                                                                                                | typed arrays from the snapshot                                                                                                                                                                                                                                                  |
-| `POST /sandbox/sources/:key`                                    | `{ value, expectedVersion }`                                                                   | `{ key, version }` (owner manual edit; 409 on version mismatch)                                                                                                                                                                                                                 |
-| `POST /sandbox/injector/run`                                    | `{ scenarioClass }`                                                                            | `{ runId }` only                                                                                                                                                                                                                                                                 |
-| `GET /sandbox/checkout/health`                                  |                                                                                                | proxied checkout `/health` plus `sampledAt`                                                                                                                                                                                                                                      |
-| `GET /telemetry/summary`                                        | `?missionId`                                                                                   | `TelemetrySummary { calls, orphanedCalls, tokens: { prompt, completion, cached: { available: boolean, total: number or null } }, byModel[], byRole[], retries, errors, ttftMs: { p50, p95 } or null, prefixGroups: { prefixDigest, calls }[] }`                                   |
-| `GET /evals/report`                                             |                                                                                                | latest checked-in summary or `{ status: 'NOT_RUN' }`                                                                                                                                                                                                                             |
+| Route                                                           | Request                                                                                                               | Response                                                                                                                                                                                                                                                                                                                                                                                                           |
+| --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `GET /health`                                                   |                                                                                                                       | `HealthStatus { mode: 'live' or 'fixture' or 'blocked', provider: { reachable, modelListed, model, host /* from OPENAI_BASE_URL */, checkedAt }, postgres: 'ok' or 'down', redis: 'ok' or 'down', checkout: { reachable, status }, intelligence: 'configured' or 'blocked', missingEnv: string[] /* names only; live needs OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL */, incidentDotIds: number /* count */ }` |
+| `POST /missions`                                                | `{ goal, constraints?: string[], mode?: 'live' or 'fixture' /* must equal server mode */, admission?: { minAgeMs } }` | `Mission` (201); 503 `{ error, missingEnv }` when blocked; 400 when `mode` disagrees with the server                                                                                                                                                                                                                                                                                                               |
+| `GET /missions`, `GET /missions/:id`                            |                                                                                                                       | `Mission[]`; `MissionSnapshot { mission, tasks, attempts, outputs, findings, receipts, confirmations, actions, authorizations, results, invalidations /* perMission subset */, recoveries, probe, telemetry, lastEventId }`                                                                                                                                                                                        |
+| `POST /missions/:id/{start,pause,resume,cancel}`                | `{}`                                                                                                                  | `Mission`; 409 on illegal transition                                                                                                                                                                                                                                                                                                                                                                               |
+| `GET /missions/:id/events`                                      | header `Last-Event-ID`                                                                                                | `text/event-stream` of `MissionEvent`                                                                                                                                                                                                                                                                                                                                                                              |
+| `GET /missions/:id/{tasks,evidence,actions,recovery,telemetry}` |                                                                                                                       | typed arrays from the snapshot                                                                                                                                                                                                                                                                                                                                                                                     |
+| `POST /sandbox/sources/:key`                                    | `{ value, expectedVersion }`                                                                                          | `{ key, version }` (owner manual edit; 409 on version mismatch)                                                                                                                                                                                                                                                                                                                                                    |
+| `POST /sandbox/injector/run`                                    | `{ scenarioClass }`                                                                                                   | `{ runId }` only                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `GET /sandbox/checkout/health`                                  |                                                                                                                       | proxied checkout `/health` plus `sampledAt`                                                                                                                                                                                                                                                                                                                                                                        |
+| `GET /telemetry/summary`                                        | `?missionId`                                                                                                          | `TelemetrySummary { calls, orphanedCalls, tokens: { prompt, completion, cached: { available: boolean, total: number or null } }, byModel[], byRole[], retries, errors, ttftMs: { p50, p95 } or null, prefixGroups: { prefixDigest, calls }[] }`                                                                                                                                                                    |
+| `GET /evals/report`                                             |                                                                                                                       | latest checked-in summary or `{ status: 'NOT_RUN' }`                                                                                                                                                                                                                                                                                                                                                               |
 
 Every mutation requires `Content-Type: application/json` (upstream middleware). Model-supplied ids never select authority: `missionId`/`taskId` come from the route and from server-side tool context.
 
@@ -374,22 +382,68 @@ Every mutation requires `Content-Type: application/json` (upstream middleware). 
 ```ts
 interface SupportValidator {
   // lockMode 'share' for G2 publications, 'update' for G1 commits; controlled rows are ALWAYS locked (rev2 C9)
-  assertCurrent(client: PgClient, receiptIds: ReceiptId[], opts: { lockMode: 'share' | 'update'; freshness?: { [sourceKey: string]: number /* maxAgeMs */ } }): Promise<CheckedVector>;
+  assertCurrent(
+    client: PgClient,
+    receiptIds: ReceiptId[],
+    opts: {
+      lockMode: 'share' | 'update';
+      freshness?: { [sourceKey: string]: number /* maxAgeMs */ };
+    },
+  ): Promise<CheckedVector>;
 }
-interface SourceReaderPort { read(key: SourceKey, scope: Scope): Promise<{ normalizedValue: unknown; raw: unknown; revisionHint: number | null }>; }
+interface SourceReaderPort {
+  read(
+    key: SourceKey,
+    scope: Scope,
+  ): Promise<{
+    normalizedValue: unknown;
+    raw: unknown;
+    revisionHint: number | null;
+  }>;
+}
 interface ActionAdmissionPort {
-  propose(input: ProposeInput, ctx: AttemptContext & { modelCallId: ModelCallId; toolCallId: string }): Promise<ActionIntent>;
-  admit(actionId: ActionId, dispatcher: string): Promise<ActionIntent>;      // proposed -> admitted | blocked (rev2 C4)
-  commit(actionId: ActionId, dispatchFence: number): Promise<ActionIntent>;  // admitted -> committed | blocked ; re-runs every predicate
+  propose(
+    input: ProposeInput,
+    ctx: AttemptContext & { modelCallId: ModelCallId; toolCallId: string },
+  ): Promise<ActionIntent>;
+  admit(actionId: ActionId, dispatcher: string): Promise<ActionIntent>; // proposed -> admitted | blocked (rev2 C4)
+  commit(actionId: ActionId, dispatchFence: number): Promise<ActionIntent>; // admitted -> committed | blocked ; re-runs every predicate
   dispatch(actionId: ActionId, dispatchFence: number): Promise<ActionIntent>;
   reconcile(actionId: ActionId): Promise<ActionIntent>;
   cancelQueued(missionId: MissionId, generation: number): Promise<ActionId[]>;
 }
-interface MissionControlPort { create; start; pause; resume; cancel; snapshot(missionId); }
-interface EventSinkPort { append(client: PgClient, event: Omit<MissionEvent, 'id' | 'at'>): Promise<number>; } // takes the events advisory xact lock
-interface InferencePort { complete(req: ChatRequest, ctx: { signal; modelCallId; role }): Promise<ChatResult>; listModels(): Promise<string[]>; host(): string; }
-interface ProbePort { run(missionId): Promise<ObservationReceipt>; }
-interface RecoveryPort { onInvalidation(event: InvalidationEvent): Promise<void>; onSelfWriteSettled(actionId: ActionId, outcome: 'verified' | 'failed'): Promise<void>; }   // coordinator implements; watcher calls
+interface MissionControlPort {
+  create;
+  start;
+  pause;
+  resume;
+  cancel;
+  snapshot(missionId);
+}
+interface EventSinkPort {
+  append(
+    client: PgClient,
+    event: Omit<MissionEvent, 'id' | 'at'>,
+  ): Promise<number>;
+} // takes the events advisory xact lock
+interface InferencePort {
+  complete(
+    req: ChatRequest,
+    ctx: { signal; modelCallId; role },
+  ): Promise<ChatResult>;
+  listModels(): Promise<string[]>;
+  host(): string;
+}
+interface ProbePort {
+  run(missionId): Promise<ObservationReceipt>;
+}
+interface RecoveryPort {
+  onInvalidation(event: InvalidationEvent): Promise<void>;
+  onSelfWriteSettled(
+    actionId: ActionId,
+    outcome: 'verified' | 'failed',
+  ): Promise<void>;
+} // coordinator implements; watcher calls
 ```
 
 `AttemptContext = { missionId, taskId, attemptId, fencingToken, generation, capabilities, role }` is created by the coordinator and passed to tools as `context.context`; nothing in it comes from the model.
