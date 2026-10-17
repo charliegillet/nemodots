@@ -14,6 +14,7 @@ import {
   probeHeaderValue,
 } from '../../../src/server/nemodots/sandbox/probe-auth.js';
 import {
+  MIN_DECILE_SAMPLES,
   decile,
   normalizeHealth,
   normalizeMetrics,
@@ -103,6 +104,32 @@ describe('normalization drops volatile fields', () => {
     });
     expect(other).toEqual(value);
     expect(normalizeMetrics({}).cacheDecodeError).toBeNull();
+  });
+
+  it('ratio deciles are null below the minimum sample count, so idle and sparse traffic normalize alike', () => {
+    expect(decile(1, 9, MIN_DECILE_SAMPLES)).toBeNull();
+    expect(decile(0, 0, MIN_DECILE_SAMPLES)).toBeNull();
+    expect(decile(9, MIN_DECILE_SAMPLES, MIN_DECILE_SAMPLES)).toBe(9);
+    const sparse = (requests: number, hits: number, misses: number) =>
+      normalizeMetrics({
+        requests: { total: 99, window: requests, windowServerErrors: 0 },
+        cache: { hits: 99, misses: 99, windowHits: hits, windowMisses: misses },
+        errors: { windowClasses: [] },
+        cache_decode_error: null,
+      });
+    const idle = sparse(0, 0, 0);
+    expect(idle).toEqual({
+      errorClasses: [],
+      cacheDecodeError: null,
+      cacheHitRatioDecile: null,
+      errorRateDecile: null,
+    });
+    expect(sparse(3, 2, 1)).toEqual(idle);
+    expect(sparse(MIN_DECILE_SAMPLES - 1, 9, 0)).toEqual(idle);
+    expect(sparse(MIN_DECILE_SAMPLES, 10, 0)).toMatchObject({
+      cacheHitRatioDecile: 9,
+      errorRateDecile: 0,
+    });
   });
 
   it('redis keys group by namespace:schema suffix and skip foreign keys', () => {

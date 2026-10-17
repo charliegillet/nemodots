@@ -164,6 +164,117 @@ describe('dependent_change_after_proposal (C15)', () => {
   });
 });
 
+describe('the LISTEN connection is supervised', () => {
+  // application_name and pid are visible to every role; the LISTEN itself
+  // follows the connection within milliseconds, so tests that need a live
+  // listener re-send their NOTIFY until the step settles.
+  const waitForListener = async (s: Sandbox, notPid?: number) => {
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      const rows = await s.pools.admin.query<{ pid: number }>(
+        `SELECT pid FROM pg_stat_activity
+          WHERE application_name = 'nemodots-injector-listen'
+            AND datname = current_database()`,
+      );
+      const live = rows.rows.find((r) => r.pid !== notPid);
+      if (live) return live.pid;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    throw new Error('the injector never (re)established its LISTEN connection');
+  };
+  const killListener = (s: Sandbox) =>
+    s.pools.admin.query(
+      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+        WHERE application_name = 'nemodots-injector-listen'
+          AND datname = current_database()`,
+    );
+
+  it('reconnects after the connection is killed and still fires the dependent step', async () => {
+    await withSandbox(async (s) => {
+      const run = await s.inject('dependent_change_after_proposal', 1);
+      await run.stepSettled(0);
+      const pid = await waitForListener(s);
+      await killListener(s);
+      await waitForListener(s, pid);
+
+      const t0 = Date.now();
+      let settled = false;
+      const second = run.stepSettled(1).finally(() => {
+        settled = true;
+      });
+      while (!settled && Date.now() - t0 < 5_000) {
+        await notifyProposed(s.pools.app, 'cache.schema_version');
+        await Promise.race([second, new Promise((r) => setTimeout(r, 100))]);
+      }
+      expect(await second).toMatchObject({
+        status: 'applied',
+        key: 'cache.schema_version',
+      });
+      expect((await second).settledAt - t0).toBeLessThan(2_000);
+      const summary = await run.done;
+      expect(summary.status).toBe('completed');
+      // the gap is on record in the private control schema
+      const detail = await s.pools.verifier.query(
+        'SELECT detail FROM control.scenario_runs WHERE id = $1',
+        [run.runId],
+      );
+      expect(detail.rows[0].detail.listener).toEqual({
+        reconnects: 1,
+        lost: false,
+      });
+    });
+  });
+
+  it('fails the armed step with listener_lost, not no_matching_proposal, when the connection cannot be restored', async () => {
+    await withSandbox(async (s) => {
+      let connects = 0;
+      const injector = new Injector({
+        pool: s.pools.injector,
+        // the first connection is real, every reconnect target is unreachable
+        listenUrl: () =>
+          connects++ === 0
+            ? s.db.urls.injector
+            : 'postgres://nemodots_injector:x@127.0.0.1:1/none',
+        listenerReconnect: { attempts: 2, baseDelayMs: 20 },
+      });
+      const run = await injector.start(
+        manifest([
+          {
+            kind: 'dependent_change_after_proposal',
+            values: { 'db.pool_max': 2 },
+            timeoutMs: 60_000,
+          },
+        ]),
+        1,
+      );
+      try {
+        await waitForListener(s);
+        await killListener(s);
+        const settled = await Promise.race([
+          run.stepSettled(0),
+          new Promise<null>((r) => setTimeout(() => r(null), 5_000)),
+        ]);
+        expect(settled).toMatchObject({
+          status: 'failed',
+          error: 'listener_lost',
+        });
+        const summary = await run.done;
+        expect(summary.status).toBe('failed');
+        const row = await s.pools.verifier.query(
+          'SELECT status, error FROM control.fault_schedules WHERE run_id = $1',
+          [run.runId],
+        );
+        expect(row.rows).toEqual([
+          { status: 'failed', error: 'listener_lost' },
+        ]);
+        expect(await versionOf(s, 'db.pool_max')).toBe(1);
+      } finally {
+        await run.cancel();
+      }
+    });
+  });
+});
+
 describe('delays, prerequisites and membership steps', () => {
   it('honours delays after prerequisites and applies steps in order', async () => {
     await withSandbox(async (s) => {

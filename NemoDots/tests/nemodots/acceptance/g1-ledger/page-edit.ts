@@ -145,9 +145,15 @@ export async function realPageEdit(
   const Pages = await entry<PagesCtor>('../pages.ts', ['Pages']);
   const store = new DatabaseSync(':memory:');
   const pages = new Pages(store, (id) => id === SPACE);
+  const pageReceipts = async () =>
+    (
+      await w.admin.query(
+        `SELECT count(*)::int AS n FROM ${REC} r JOIN ${SRC} s ON s.id = r.source_id WHERE s.source_type = 'page_snapshot'`,
+      )
+    ).rows[0].n as number;
+  const pageReceiptsAtStart = await pageReceipts();
   const pending: Promise<void>[] = [];
   let hookEvents = 0;
-  let sourceKey = '';
   const register = async (page: {
     id: string;
     revision: number;
@@ -184,7 +190,7 @@ export async function realPageEdit(
     title: 'Checkout notes',
     content: 'db.pool_max is 3',
   });
-  sourceKey = `opendots.page/${created.id}`;
+  const sourceKey = `opendots.page/${created.id}`;
   await Promise.all(pending.splice(0));
   const before = await pageRevisions(w, sourceKey);
   const eventsAtCreate = hookEvents;
@@ -258,7 +264,8 @@ export async function realPageEdit(
     problems.push(
       `a page edit minted ${otherAfter - otherBefore} receipt(s) for other sources`,
     );
-  w.pageEditMinted += Math.max(0, after.length - before.length);
+  // Every page revision this helper minted (creation and edit) is excluded from the oracle's value-receipt count.
+  w.pageEditMinted += Math.max(0, (await pageReceipts()) - pageReceiptsAtStart);
   store.close();
   return {
     pageId,

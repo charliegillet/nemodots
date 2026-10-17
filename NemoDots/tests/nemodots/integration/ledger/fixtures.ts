@@ -48,7 +48,7 @@ CREATE TABLE fx_coordinator.task_attempts (
   status text NOT NULL, abort_reason text);
 CREATE TABLE fx_coordinator.task_outputs (
   id uuid PRIMARY KEY, task_id uuid NOT NULL, usable boolean NOT NULL DEFAULT true,
-  unusable_reason text);
+  unusable_reason text, dependency_vector jsonb NOT NULL DEFAULT '[]'::jsonb);
 CREATE TABLE fx_coordinator.action_intents (
   id uuid PRIMARY KEY, mission_id uuid NOT NULL, task_id uuid NOT NULL,
   status text NOT NULL, status_version integer NOT NULL DEFAULT 0,

@@ -121,8 +121,15 @@ async function runClosureOnce(c: ClosureCase): Promise<ClosureRun> {
       const e = c.expected;
       // The ledger's closure must never rewrite model-call records (they carry no mark; their membership is in the event).
       const mcAfter = await fingerprintModelCalls(w);
-      for (const [id, row] of seeded.modelCallFingerprint) if (mcAfter.get(id) !== row) problems.push(`model call record ${seeded.reverse.get(id) ?? id} was rewritten or removed by the closure`);
-      if (mcAfter.size !== seeded.modelCallFingerprint.size) problems.push(`model_call_records row count changed: ${seeded.modelCallFingerprint.size} -> ${mcAfter.size}`);
+      for (const [id, row] of seeded.modelCallFingerprint)
+        if (mcAfter.get(id) !== row)
+          problems.push(
+            `model call record ${seeded.reverse.get(id) ?? id} was rewritten or removed by the closure`,
+          );
+      if (mcAfter.size !== seeded.modelCallFingerprint.size)
+        problems.push(
+          `model_call_records row count changed: ${seeded.modelCallFingerprint.size} -> ${mcAfter.size}`,
+        );
       const real = (ids: string[]) => mapIds(seeded, ids);
 
       if (obs.eventRows !== e.invalidationEvents)
@@ -146,8 +153,14 @@ async function runClosureOnce(c: ClosureCase): Promise<ClosureRun> {
           );
       }
       // The event is a record; the rows are the effect. Both must agree with the oracle.
-      // CONTRACTS transition table: a published attempt is terminal. Closure membership flips only
-      // attempts that were still running; the published ones lose their output (usable=false) and their task.
+      // SPEC DECISION D-G1-1 (raised with the lead, see the handoff): the row effect on attempts.
+      //   ARCHITECTURE 5.2 step 4 says the closure marks affected attempts `invalidated`; ARCHITECTURE section 6
+      //   (attempt state machine) allows `invalidated` only from `running`; CONTRACTS section 6 open(e) lists
+      //   `published` among the attempt states that do NOT keep an invalidation open (the output, not the attempt,
+      //   is what loses usability). This suite therefore expects: running affected attempts -> `invalidated`;
+      //   published affected attempts stay `published` while their outputs become unusable and their tasks
+      //   `invalidated`. If the lead rules that published attempts must also flip, change the rule here and the
+      //   attempt transition table (contracts/transitions.ts) together; the oracle's affected.attemptIds is unchanged.
       const runningAffected = e.affected.attemptIds.filter(
         (id) => c.nodes.find((n) => n.id === id)?.attemptStatus === 'running',
       );
@@ -183,7 +196,10 @@ async function runClosureOnce(c: ClosureCase): Promise<ClosureRun> {
 
       // Every affected model call named by the event is a real ledger record of an attempt of the right mission.
       for (const mc of obs.union.modelCallIds) {
-        if (!seeded.modelCallFingerprint.has(mc)) problems.push(`event names model call ${seeded.reverse.get(mc) ?? mc}, which has no ledger.model_call_records row`);
+        if (!seeded.modelCallFingerprint.has(mc))
+          problems.push(
+            `event names model call ${seeded.reverse.get(mc) ?? mc}, which has no ledger.model_call_records row`,
+          );
       }
       const expectedMissions = new Set<string>();
       for (const pm of e.perMission) {
@@ -233,18 +249,36 @@ async function runClosureOnce(c: ClosureCase): Promise<ClosureRun> {
       try {
         await deliverInvalidations(w);
         const recorded = await recordedEventsByMission(w);
-        const kinds = (await w.admin.query('SELECT kind, count(*)::int AS n FROM coordinator.events GROUP BY kind ORDER BY kind')).rows;
+        const kinds = (
+          await w.admin.query(
+            'SELECT kind, count(*)::int AS n FROM coordinator.events GROUP BY kind ORDER BY kind',
+          )
+        ).rows;
         const present = `coordinator.events after delivery: ${kinds.map((k) => `${k.kind}=${k.n}`).join(', ') || 'none'}`;
-        if (recorded.size === 0 && expectedMissions.size > 0) r5.push(`R5: no invalidation.recorded event was written for any mission (${present})`);
+        if (recorded.size === 0 && expectedMissions.size > 0)
+          r5.push(
+            `R5: no invalidation.recorded event was written for any mission (${present})`,
+          );
         for (const [oracleMission, mid] of seeded.missions) {
           const got = recorded.get(mid) ?? 0;
           const affected = expectedMissions.has(mid);
-          if (!affected && got !== 0) r5.push(`R5: unaffected mission ${oracleMission} received ${got} invalidation.recorded event(s)`);
-          if (affected && got < 1) r5.push(`R5: affected mission ${oracleMission} received no invalidation.recorded event`);
-          if (affected && c.changes.length === 1 && got !== 1) r5.push(`R5: affected mission ${oracleMission} received ${got} invalidation.recorded events for one changed receipt, expected 1`);
+          if (!affected && got !== 0)
+            r5.push(
+              `R5: unaffected mission ${oracleMission} received ${got} invalidation.recorded event(s)`,
+            );
+          if (affected && got < 1)
+            r5.push(
+              `R5: affected mission ${oracleMission} received no invalidation.recorded event`,
+            );
+          if (affected && c.changes.length === 1 && got !== 1)
+            r5.push(
+              `R5: affected mission ${oracleMission} received ${got} invalidation.recorded events for one changed receipt, expected 1`,
+            );
         }
       } catch (error) {
-        r5.push(`R5: delivering the invalidation events to coordinator recovery failed: ${(error as Error).message.split('\n')[0]}`);
+        r5.push(
+          `R5: delivering the invalidation events to coordinator recovery failed: ${(error as Error).message.split('\n')[0]}`,
+        );
       }
 
       // G1.10 quantification: false invalidations (rows invalidated that the oracle preserves).
@@ -305,7 +339,11 @@ describe('gate 1 invalidation closures (frozen oracle CL-*)', () => {
   // coordinator invalidation.recorded event per affected mission, which is not part of the ledger transaction.
   it.each(
     CLOSURE_CASES.map(
-      (c) => [`[G1.8] ${c.id} R5 coordinator events per affected mission`, c] as const,
+      (c) =>
+        [
+          `[G1.8] ${c.id} R5 coordinator events per affected mission`,
+          c,
+        ] as const,
     ),
   )('%s', async (_name, c) => {
     expect((await runClosure(c)).r5, `${c.id} ${c.title}`).toEqual([]);
@@ -598,9 +636,9 @@ describe('gate 1 cycle and cap rejections (frozen oracle RJ-*)', () => {
   for (const c of REJECTION_CASES) {
     const name = `${tag(c.covers)} ${c.id} ${c.title}`;
     // RJ-1..RJ-4 (plan and delegation cycles) run through the real publishPlan/delegate in publication.test.ts.
-    if (c.operation.kind === 'plan' || c.operation.kind === 'delegate') continue;
-    if (c.operation.kind === 'edge')
-      it(name, () => edgeRejection(c as never));
+    if (c.operation.kind === 'plan' || c.operation.kind === 'delegate')
+      continue;
+    if (c.operation.kind === 'edge') it(name, () => edgeRejection(c as never));
     else it(name, () => generatedRejection(c as never), 300_000);
   }
 

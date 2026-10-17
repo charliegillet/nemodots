@@ -66,7 +66,7 @@ export function acceptanceNormalizedValue(result: ProbeResult) {
 }
 
 /** Advisory-lock key serializing probe runs across processes. */
-const PROBE_LOCK_KEY = 'nemodots.acceptance-probe';
+export const PROBE_LOCK_KEY = 'nemodots.acceptance-probe';
 
 export interface ProbeDeps {
   /**

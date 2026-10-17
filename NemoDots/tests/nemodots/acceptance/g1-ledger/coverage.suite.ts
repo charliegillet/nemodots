@@ -46,7 +46,11 @@ describe('[G1] coverage of TEST_PROMPT gate 1', () => {
     expect(sources).toContain('for (const c of REJECTION_CASES)');
     // RJ-1..RJ-4 run through the real publishPlan/delegate in publication.suite.ts.
     for (const kind of ['plan', 'delegate'])
-      expect(sources).toMatch(new RegExp(`REJECTION_CASES\\.filter\\(\\s*\\(c\\)\\s*=>\\s*c\\.operation\\.kind\\s*===\\s*'${kind}',?\\s*\\)`));
+      expect(sources).toMatch(
+        new RegExp(
+          `REJECTION_CASES\\.filter\\(\\s*\\(c\\)\\s*=>\\s*c\\.operation\\.kind\\s*===\\s*'${kind}',?\\s*\\)`,
+        ),
+      );
     expect(LEDGER_CASES.length).toBeGreaterThanOrEqual(16);
     expect(CLOSURE_CASES.length).toBeGreaterThanOrEqual(11);
     expect(REJECTION_CASES.length).toBeGreaterThanOrEqual(7);

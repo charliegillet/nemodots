@@ -494,10 +494,11 @@ describe('G0.4e seeded checkout API', () => {
 
   it('[G0.4] a neighbouring acc0 database (migrated and seeded) is readable and non-empty before the target is seeded', async () => {
     requireEntry(SEED, 'seed script');
-    neighbour = await createAccDb();
+    const nb = await createAccDb();
+    neighbour = nb;
     const m = await run('node', ['--import', 'tsx', MIGRATE], {
       cwd: APP_ROOT,
-      env: cleanEnv({ NEMODOTS_PG_URL_ADMIN: neighbour.urls.admin }),
+      env: cleanEnv({ NEMODOTS_PG_URL_ADMIN: nb.urls.admin }),
       logName: 'g0-neighbour-migrate.log',
       timeoutMs: 120_000,
       redact,
@@ -506,12 +507,12 @@ describe('G0.4e seeded checkout API', () => {
     const seed = await runSeed(neighbour, 'g0-neighbour-seed.log');
     expect(seed.code, `neighbour seed exit ${seed.code}: ${seed.tail}`).toBe(0);
     const digest = await (async () => {
-      const url = withDb(db.stack.roleUrls.verifier, neighbour.name);
+      const url = withDb(db.stack.roleUrls.verifier, nb.name);
       const tables = await query<{ n: string }>(
         url,
         "SELECT count(*)::text AS n FROM pg_tables WHERE schemaname IN ('ledger','coordinator','checkout','control')",
       );
-      const d = await digestDatabase(neighbour.name);
+      const d = await digestDatabase(nb.name);
       expect(Object.keys(d).length, 'every table readable').toBe(
         Number(tables[0].n),
       );
@@ -523,7 +524,7 @@ describe('G0.4e seeded checkout API', () => {
     appendManifest({
       gate: 0,
       step: 'seed-neighbour',
-      neighbour: neighbour.name,
+      neighbour: nb.name,
       tables: Object.keys(digest).length,
       nonEmptyTables: nonEmptyTables(digest),
     });

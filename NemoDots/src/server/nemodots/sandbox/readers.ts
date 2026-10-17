@@ -266,7 +266,7 @@ export function createSourceReaders(deps: ReaderDeps): SourceReaderPort {
    */
   async function readInventory(sku: string): Promise<ReadResult> {
     let before = await authoritySnapshot(sku);
-    let api: Record<string, unknown> = {};
+    let api: Record<string, unknown>;
     for (let attempt = 1; ; attempt += 1) {
       api = asRecord(await http(`/inventory/${encodeURIComponent(sku)}`));
       const after = await authoritySnapshot(sku);

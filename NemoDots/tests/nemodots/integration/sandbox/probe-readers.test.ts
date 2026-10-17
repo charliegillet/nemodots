@@ -7,6 +7,7 @@ import type {
 } from '../../../../src/server/nemodots/contracts/ids.js';
 import type { MissionId } from '../../../../src/server/nemodots/contracts/ids.js';
 import {
+  PROBE_LOCK_KEY,
   createProbe,
   acceptanceNormalizedValue,
 } from '../../../../src/server/nemodots/sandbox/probe.js';
@@ -447,6 +448,234 @@ describe('acceptance probe', () => {
       await expect(
         probeFor(s).run('22222222-2222-4222-8222-222222222222' as MissionId),
       ).rejects.toThrow(/registrar/);
+    });
+  });
+});
+
+type InventoryValue = {
+  sku: string;
+  authorityQuantity: number | null;
+  apiQuantity: number | null;
+  consistent: boolean;
+};
+const inventoryOf = async (s: Sandbox, sku: string) =>
+  (await read(s, `checkout.inventory/${sku}`))
+    .normalizedValue as InventoryValue;
+
+describe('readers: F4 is diagnosable from read-only observables on a fresh seed', () => {
+  it('after stale_replica, with no order ever placed, at least one SKU reads consistent:false while /health is ok', async () => {
+    await withSandbox(async (s) => {
+      const skus = await s.pools.verifier.query<{ sku: string }>(
+        'SELECT sku FROM checkout.inventory ORDER BY sku',
+      );
+      for (const { sku } of skus.rows)
+        expect((await inventoryOf(s, sku)).consistent).toBe(true);
+      await (
+        await s.inject('stale_replica')
+      ).done;
+      s.reloadConfig();
+      expect((await s.request('/health')).body.status).toBe('ok');
+      const values = await Promise.all(
+        skus.rows.map(({ sku }) => inventoryOf(s, sku)),
+      );
+      const diverging = values.filter((v) => !v.consistent);
+      expect(diverging.length).toBeGreaterThanOrEqual(10);
+      expect(diverging.map((v) => v.sku)).toContain('SKU-0024');
+      // the probe's own reservation line never diverges
+      expect(values.find((v) => v.sku === 'PROBE-SKU')?.consistent).toBe(true);
+    });
+  });
+});
+
+describe('readers: inventory is read as a stable pair', () => {
+  /** A fetch that commits one order the first time the inventory view is read. */
+  const racing = (s: Sandbox, place: () => Promise<unknown>): typeof fetch => {
+    let fired = false;
+    return async (input, init) => {
+      if (!fired && String(input).includes('/inventory/')) {
+        fired = true;
+        await place();
+      }
+      return s.fetch(input, init);
+    };
+  };
+  const readerWith = (s: Sandbox, fetchImpl: typeof fetch) =>
+    createSourceReaders({
+      pg: s.pools.app,
+      redis: s.redis.client,
+      redisPrefix: s.redis.prefix,
+      checkoutUrl: 'http://checkout.invalid',
+      fetch: fetchImpl,
+      now: s.clock.now,
+    });
+
+  it('a probe order committing between the authority read and the API read leaves the normalized value unchanged', async () => {
+    await withSandbox(async (s) => {
+      const baseline = await inventoryOf(s, 'PROBE-SKU');
+      expect(baseline.consistent).toBe(true);
+      const reader = readerWith(
+        s,
+        racing(s, () =>
+          s.request('/orders', {
+            body: { items: [{ sku: 'PROBE-SKU', quantity: 1 }] },
+            headers: s.probeHeader('probe-run-race-0001'),
+          }),
+        ),
+      );
+      const raced = await reader.read(
+        'checkout.inventory/PROBE-SKU' as SourceKey,
+        scope,
+      );
+      expect(raced.normalizedValue).toEqual(baseline);
+    });
+  });
+
+  it('a customer order between the two reads is a plain update, never a spurious inconsistency', async () => {
+    await withSandbox(async (s) => {
+      const before = await inventoryOf(s, 'SKU-0001');
+      const reader = readerWith(
+        s,
+        racing(s, () =>
+          s.request('/orders', {
+            body: { items: [{ sku: 'SKU-0001', quantity: 2 }] },
+          }),
+        ),
+      );
+      const raced = (
+        await reader.read('checkout.inventory/SKU-0001' as SourceKey, scope)
+      ).normalizedValue as InventoryValue;
+      expect(raced.consistent).toBe(true);
+      expect(raced.authorityQuantity).toBe(before.authorityQuantity! - 2);
+    });
+  });
+
+  it('probe orders racing the reader for real never change the normalized value', async () => {
+    await withSandbox(async (s) => {
+      const baseline = await inventoryOf(s, 'PROBE-SKU');
+      for (let i = 0; i < 12; i += 1) {
+        const [value] = await Promise.all([
+          inventoryOf(s, 'PROBE-SKU'),
+          s.request('/orders', {
+            body: { items: [{ sku: 'PROBE-SKU', quantity: 1 }] },
+            headers: s.probeHeader(
+              `probe-run-real-${String(i).padStart(4, '0')}`,
+            ),
+          }),
+        ]);
+        expect(value).toEqual(baseline);
+      }
+    });
+  });
+});
+
+describe('the acceptance probe does not move the normalized checkout.metrics (D2)', () => {
+  const normalizedMetrics = async (s: Sandbox) =>
+    (await read(s, 'checkout.metrics')).normalizedValue;
+  const counters = async (s: Sandbox) => {
+    const body = (await s.request('/metrics')).body;
+    return {
+      requests: body.requests,
+      cache: body.cache,
+      byClass: body.errors.byClass,
+    };
+  };
+
+  it('on an idle checkout, even after the metrics window empties', async () => {
+    await withSandbox(async (s) => {
+      s.clock.advance(31_000);
+      expect((await s.request('/health')).body.status).toBe('ok');
+      const before = await normalizedMetrics(s);
+      const rawBefore = await counters(s);
+      expect((await probeFor(s).execute()).verdict).toBe('pass');
+      s.clock.advance(31_000);
+      expect((await s.request('/health')).body.status).toBe('ok');
+      expect(await normalizedMetrics(s)).toEqual(before);
+      expect(await counters(s)).toEqual(rawBefore);
+    });
+  });
+
+  it('on a busy checkout the request and cache counters are identical before and after a probe run', async () => {
+    await withSandbox(async (s) => {
+      for (let i = 0; i < 14; i += 1)
+        expect((await s.request('/products')).status).toBe(200);
+      const before = await normalizedMetrics(s);
+      const rawBefore = await counters(s);
+      expect(rawBefore.requests.window).toBe(14);
+      expect((await probeFor(s).execute()).verdict).toBe('pass');
+      expect(await counters(s)).toEqual(rawBefore);
+      expect(await normalizedMetrics(s)).toEqual(before);
+    });
+  });
+
+  it('sparse traffic and an empty window normalize to the same value (below the minimum sample count)', async () => {
+    await withSandbox(async (s) => {
+      s.clock.advance(31_000);
+      const idle = await normalizedMetrics(s);
+      expect(await s.request('/products')).toMatchObject({ status: 200 });
+      expect(await s.request('/products')).toMatchObject({ status: 200 });
+      expect(await normalizedMetrics(s)).toEqual(idle);
+    });
+  });
+
+  it('probe requests carrying a forged tag are rejected on every business route', async () => {
+    await withSandbox(async (s) => {
+      for (const path of ['/products', '/inventory/SKU-0001'])
+        expect(
+          (
+            await s.request(path, {
+              headers: {
+                'x-nemodots-probe': 'probe-run-forged-0001.' + '0'.repeat(64),
+              },
+            })
+          ).status,
+        ).toBe(403);
+    });
+  });
+});
+
+describe('acceptance probe runs are serialized', () => {
+  it('two overlapping runs on a healthy checkout both pass', async () => {
+    await withSandbox(async (s) => {
+      const [a, b] = await Promise.all([
+        probeFor(s).execute(),
+        probeFor(s).execute(),
+      ]);
+      expect(a.verdict).toBe('pass');
+      expect(b.verdict).toBe('pass');
+      const orders = await s.pools.verifier.query(
+        'SELECT count(*) AS n FROM checkout.orders WHERE probe_run_id IS NOT NULL',
+      );
+      expect(orders.rows[0].n).toBe('2');
+    });
+  });
+
+  it('a run waits for the cross-process advisory lock held by another probe', async () => {
+    await withSandbox(async (s) => {
+      const other = await s.pools.verifier.connect();
+      try {
+        await other.query('SELECT pg_advisory_lock(hashtext($1))', [
+          PROBE_LOCK_KEY,
+        ]);
+        let finished = false;
+        const run = probeFor(s)
+          .execute()
+          .then((result) => {
+            finished = true;
+            return result;
+          });
+        await new Promise((r) => setTimeout(r, 500));
+        expect(finished).toBe(false);
+        const orders = await s.pools.verifier.query(
+          'SELECT count(*) AS n FROM checkout.orders WHERE probe_run_id IS NOT NULL',
+        );
+        expect(orders.rows[0].n).toBe('0');
+        await other.query('SELECT pg_advisory_unlock(hashtext($1))', [
+          PROBE_LOCK_KEY,
+        ]);
+        expect((await run).verdict).toBe('pass');
+      } finally {
+        other.release();
+      }
     });
   });
 });

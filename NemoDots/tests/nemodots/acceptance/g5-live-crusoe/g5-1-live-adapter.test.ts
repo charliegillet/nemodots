@@ -187,20 +187,28 @@ describe('G5.2 text, tool call + continuation, streaming, cancellation', () => {
   });
 
   it('G5.2d cancellation mid-stream: outcome aborted, finish cancelled, attempt usage ALL null, no retry, no tool calls', async () => {
-    const controller = new AbortController();
-    const pending = adapter.complete(
-      chat(
-        live.model,
-        'Count from 1 to 600, one number per line, no other text.',
-        {
-          stream: true,
-          maxTokens: 2000,
-        },
-      ),
-      ctx('worker', controller.signal),
-    );
-    setTimeout(() => controller.abort(), 1500);
-    const r = await pending;
+    // Cancellation can only be judged once a stream is open. Under shared-quota
+    // 429s the cancel lands in a rate_limit backoff instead, which is provider
+    // saturation, not an adapter result: repeat the scenario (still real inference).
+    let r!: Awaited<ReturnType<typeof adapter.complete>>;
+    for (let i = 0; i < 4; i++) {
+      const controller = new AbortController();
+      const pending = adapter.complete(
+        chat(
+          live.model,
+          'Count from 1 to 600, one number per line, no other text.',
+          {
+            stream: true,
+            maxTokens: 2000,
+          },
+        ),
+        ctx('worker', controller.signal),
+      );
+      setTimeout(() => controller.abort(), 1500);
+      r = await pending;
+      if (r.attempts[0]?.error?.class !== 'rate_limited') break;
+      await new Promise((res) => setTimeout(res, 8000 * (i + 1)));
+    }
     expect(r.outcome).toBe('aborted');
     expect(r.finishReason).toBe('cancelled');
     expect(r.toolCalls).toEqual([]);

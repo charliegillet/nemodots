@@ -111,8 +111,21 @@ export async function seedGraph(
     if (n.missionId !== 'shared' && !missions.has(n.missionId)) {
       const id = randomUUID();
       await insertRow(w.admin, w.schema, T.missions, {
-        id, status: 'running', owner_id: OWNER_ID, space_id: null, environment: 'test', resource: 'checkout', goal: 'acceptance goal',
-        mode: 'fixture', generation: 0, budgets: BUDGETS, provider: { host: 'fixture.local', plannerModel: 'fx', workerModel: 'fx' },
+        id,
+        status: 'running',
+        owner_id: OWNER_ID,
+        space_id: null,
+        environment: 'test',
+        resource: 'checkout',
+        goal: 'acceptance goal',
+        mode: 'fixture',
+        generation: 0,
+        budgets: BUDGETS,
+        provider: {
+          host: 'fixture.local',
+          plannerModel: 'fx',
+          workerModel: 'fx',
+        },
       });
       missions.set(n.missionId, id);
     }
@@ -255,7 +268,20 @@ export async function seedGraph(
         await w.admin.query(
           `INSERT INTO ledger.model_call_records (id, scope, mission_id, task_id, attempt_id, role, model_requested, model_returned, provider_host, provider_mode, context_snapshot_id, outcome, output_digest, output_dependency_vector, tool_calls, created_at)
            VALUES ($1, $2::jsonb, $3, $4, $5, 'worker', 'acc-model', 'acc-model', 'fixture.local', 'fixture', $6, 'completed', repeat('d', 64), '[]'::jsonb, '[]'::jsonb, now())`,
-          [id, JSON.stringify({ ownerId: OWNER_ID, missionId: mission, spaceId: null, environment: 'test', resource: 'checkout' }), mission, task, attempt, snapshotId],
+          [
+            id,
+            JSON.stringify({
+              ownerId: OWNER_ID,
+              missionId: mission,
+              spaceId: null,
+              environment: 'test',
+              resource: 'checkout',
+            }),
+            mission,
+            task,
+            attempt,
+            snapshotId,
+          ],
         );
         break;
       }
@@ -333,8 +359,12 @@ export async function seedGraph(
 }
 
 /** id -> full row text of every ledger.model_call_records row. */
-export async function fingerprintModelCalls(w: World): Promise<Map<string, string>> {
-  const r = await w.admin.query(`SELECT id, to_jsonb(m)::text AS row FROM ${T.models} m ORDER BY id`);
+export async function fingerprintModelCalls(
+  w: World,
+): Promise<Map<string, string>> {
+  const r = await w.admin.query(
+    `SELECT id, to_jsonb(m)::text AS row FROM ${T.models} m ORDER BY id`,
+  );
   return new Map(r.rows.map((x) => [x.id as string, x.row as string]));
 }
 
@@ -396,7 +426,12 @@ export async function applyAuthority(w: World, c: ClosureCase, index: number) {
 }
 
 /** Registers the changed source through the production path, which supersedes and runs the closure. */
-export async function registerChange(w: World, c: ClosureCase, index: number, options?: Record<string, unknown>) {
+export async function registerChange(
+  w: World,
+  c: ClosureCase,
+  index: number,
+  options?: Record<string, unknown>,
+) {
   const change = c.changes[index];
   const node = c.nodes.find((n) => n.id === change.oldReceipt)!;
   const env = (node.environment ?? 'test') as Env;
@@ -413,7 +448,11 @@ export async function registerChange(w: World, c: ClosureCase, index: number, op
         : {
             normalizedValue:
               key === 'checkout.health'
-                ? { ...HEALTH_OK, status: 'degraded', errorClasses: ['changed'] }
+                ? {
+                    ...HEALTH_OK,
+                    status: 'degraded',
+                    errorClasses: ['changed'],
+                  }
                 : { changed: index + 1 },
           }),
     },
@@ -592,11 +631,14 @@ export { errorCode, fillRow, insertValues };
  * does with a registration's event. Returns the number of events delivered.
  */
 export async function deliverInvalidations(w: World): Promise<number> {
-  const { createRecovery } = await import('../../../../src/server/nemodots/coordinator/recovery.js');
+  const { createRecovery } =
+    await import('../../../../src/server/nemodots/coordinator/recovery.js');
   const { composeDeps } = await import('./compose.js');
   const deps = composeDeps(w);
   const recovery = createRecovery(deps, {});
-  const rows = await w.admin.query(`SELECT * FROM ${T.invalidations} ORDER BY created_at, id`);
+  const rows = await w.admin.query(
+    `SELECT * FROM ${T.invalidations} ORDER BY created_at, id`,
+  );
   for (const row of rows.rows) {
     await recovery.onInvalidation({
       id: row.id,
@@ -610,7 +652,9 @@ export async function deliverInvalidations(w: World): Promise<number> {
       affected: row.affected,
       perMission: row.per_mission,
       closure: row.closure,
-      resolvedAt: row.resolved_at ? new Date(row.resolved_at).toISOString() : null,
+      resolvedAt: row.resolved_at
+        ? new Date(row.resolved_at).toISOString()
+        : null,
       createdAt: new Date(row.created_at).toISOString(),
     } as never);
   }
@@ -618,9 +662,13 @@ export async function deliverInvalidations(w: World): Promise<number> {
 }
 
 /** coordinator.events rows of kind invalidation.recorded, per mission. */
-export async function recordedEventsByMission(w: World): Promise<Map<string, number>> {
+export async function recordedEventsByMission(
+  w: World,
+): Promise<Map<string, number>> {
   const out = new Map<string, number>();
-  const r = await w.admin.query(`SELECT mission_id, count(*)::int AS n FROM ${T.events} WHERE kind = 'invalidation.recorded' GROUP BY mission_id`);
+  const r = await w.admin.query(
+    `SELECT mission_id, count(*)::int AS n FROM ${T.events} WHERE kind = 'invalidation.recorded' GROUP BY mission_id`,
+  );
   for (const row of r.rows) out.set(row.mission_id, row.n);
   return out;
 }

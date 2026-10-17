@@ -105,13 +105,31 @@ async function world(): Promise<World> {
       { ledger: FX, marker: null },
     ),
   );
+  const inheritedOutputId = randomUUID();
+  // The inherited output exists in the coordinator, is usable and rests on
+  // the member receipt (what the context compiler lists as its dependency).
+  await getDb().admin.query(
+    `INSERT INTO fx_coordinator.task_outputs (id, task_id, usable, dependency_vector)
+     VALUES ($1, $2, true, $3::jsonb)`,
+    [
+      inheritedOutputId,
+      randomUUID(),
+      JSON.stringify([
+        {
+          sourceKey: member.receipt.source.key,
+          sourceRevision: member.receipt.sourceRevision,
+          receiptId: member.receipt.id,
+        },
+      ]),
+    ],
+  );
   return {
     scope: sourceRef(base, 'checkout.health').scope,
     taskId: randomUUID(),
     attemptId: randomUUID(),
     member: member.receipt,
     health: health.receipt,
-    inheritedOutputId: randomUUID(),
+    inheritedOutputId,
   };
 }
 
@@ -443,6 +461,72 @@ describe('recordModelCall (fenced path)', () => {
     expect(error).toBeInstanceOf(SupportError);
     expect((error as SupportError).reason).toBe('stale_version');
     expect(await counts()).toEqual(before);
+  });
+
+  it('refuses an inherited output that is no longer usable and stores nothing', async () => {
+    const w = await world();
+    await getDb().admin.query(
+      `UPDATE fx_coordinator.task_outputs SET usable = false, unusable_reason = 'invalidated:test' WHERE id = $1`,
+      [w.inheritedOutputId],
+    );
+    const { snapshot, record } = build(w);
+    const before = await counts();
+    const error = await inTx(getDb().app, (client) =>
+      recordModelCall(client, { record, snapshot }, FX),
+    ).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(SupportError);
+    expect((error as SupportError).reason).toBe('stale_version');
+    expect(await counts()).toEqual(before);
+  });
+
+  it('refuses an inherited output that rests on receipts the call does not cite, whatever the caller lists', async () => {
+    const w = await world();
+    const other = await inTx(getDb().app, (client) =>
+      registerObservation(
+        client,
+        {
+          source: sourceRef(newScope(), 'checkout.metrics'),
+          normalizedValue: { errors: [] },
+          provenance: { kind: 'watcher' },
+        },
+        { ledger: FX, marker: null },
+      ),
+    );
+    await getDb().admin.query(
+      `UPDATE fx_coordinator.task_outputs SET dependency_vector = $2::jsonb WHERE id = $1`,
+      [
+        w.inheritedOutputId,
+        JSON.stringify([
+          {
+            sourceKey: 'checkout.metrics',
+            sourceRevision: 1,
+            receiptId: other.receipt.id,
+          },
+        ]),
+      ],
+    );
+    const { snapshot, record } = build(w);
+    const before = await counts();
+    await expect(
+      inTx(getDb().app, (client) =>
+        recordModelCall(client, { record, snapshot }, FX),
+      ),
+    ).rejects.toMatchObject({ code: 'model_call_invalid' });
+    expect(await counts()).toEqual(before);
+  });
+
+  it('refuses an inherited output that does not exist', async () => {
+    const w = await world();
+    await getDb().admin.query(
+      'DELETE FROM fx_coordinator.task_outputs WHERE id = $1',
+      [w.inheritedOutputId],
+    );
+    const { snapshot, record } = build(w);
+    await expect(
+      inTx(getDb().app, (client) =>
+        recordModelCall(client, { record, snapshot }, FX),
+      ),
+    ).rejects.toMatchObject({ code: 'model_call_invalid' });
   });
 
   it('refuses a publication when the authority advanced before the watcher registered it (G3)', async () => {
