@@ -81,8 +81,7 @@ function encode(value: unknown, path: string, seen: Set<object>): string {
 
 /** Canonical JSON text of a JSON-compatible value. Throws CanonicalJsonError otherwise. */
 export function canonicalJson(value: unknown): string {
-  if (value === undefined)
-    throw new CanonicalJsonError('undefined value', '');
+  if (value === undefined) throw new CanonicalJsonError('undefined value', '');
   return encode(value, '', new Set());
 }
 

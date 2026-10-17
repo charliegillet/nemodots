@@ -17,6 +17,7 @@ The finished product's reasoning runs on **NVIDIA Nemotron through Crusoe Manage
 </mission>
 
 <execution_contract>
+
 - Implement the complete working vertical slice, then harden it against the acceptance tests below. Keep going through integration and regression fixes. A design document, scaffold, pretty animation, prerecorded conversation, or mocked provider response is insufficient completion.
 - Preserve user changes and upstream attribution. Read applicable AGENTS.md and CLAUDE.md instructions before editing. Inspect the actual checkout instead of assuming APIs from this prompt still match.
 - Make routine reversible engineering choices yourself. Ask only for genuinely missing credentials, an external account interaction, an unavailable requested model, or a decision that cannot be resolved from the existing requirements. Continue independent implementation while those dependencies are unavailable.
@@ -25,7 +26,7 @@ The finished product's reasoning runs on **NVIDIA Nemotron through Crusoe Manage
 - Keep secrets on the server. Do not print .env values, commit credentials, expose database administrator credentials to model tools, or place API keys in screenshots, browser bundles, fixtures, or reports.
 - Do not deploy publicly, publish a repository, push to CopilotKit upstream, or send email/Slack messages as part of this build assignment. Produce a locally reviewable application and reproducible evidence.
 - Use explicit outcomes: PASS, FAIL, BLOCKED, or NOT_RUN. A skipped credential-dependent test is not PASS.
-</execution_contract>
+  </execution_contract>
 
 <models_and_team>
 (Engineering-team model assignments are overridden by LEAD_NOTES.md: Fable for planning/review/verification, Opus for implementation.)
@@ -57,7 +58,7 @@ Handoff shape:
   "status": "PASS|FAIL|BLOCKED|NOT_RUN",
   "changedFiles": [],
   "contractVersion": "v1",
-  "checks": [{"command": "...", "exitCode": 0, "artifact": "..."}],
+  "checks": [{ "command": "...", "exitCode": 0, "artifact": "..." }],
   "findings": [],
   "dependencies": [],
   "remainingRisks": []
@@ -70,6 +71,7 @@ Before production implementation or evaluation tuning, the independent verifier 
 </models_and_team>
 
 <sources_and_repository>
+
 - OpenDots starting revision: `ab39f2508f3fd23a949837622456f3d61a108e9a` (imported as the `NemoDots/` subtree).
 - OpenBot reference checkout: `../.references/OpenBot` (relative to NemoDots/), reference HEAD `12c3a69406b2ca32bcb117c0329c9c6d9359565d`.
 - OpenDots' supported computer-service build is pinned separately to OpenBot `b6932d31a8d6e7896c15139dfc27a6c6911deb27`. Do not silently change this service pin.
@@ -154,6 +156,7 @@ Separate authoring and dispatch lease lifecycles: validate the author's fence at
 **Invalidation / RecoveryEvent**: source change, old/new receipt IDs, reason, graph snapshot/version, affected attempts/outputs/actions, preserved branches, scheduled repairs, idempotent event ID. Immediate eligibility checks are transactional; closure materialization and repair scheduling may be async provided every publication/reuse/delegation/commit independently rejects obsolete support. Default conservatively when support sufficiency is unknown.
 
 Invariants:
+
 1. Operational authority is the typed ledger, not editable page text.
 2. No untracked model-visible observation or writable tool path exists inside the claimed controlled scope.
 3. An invalid attempt cannot authorize an action, publish a usable decision, or enqueue child work after losing its lease/generation.
@@ -162,7 +165,7 @@ Invariants:
 6. Output claims include evidence references but cannot mint authoritative observation receipts.
 7. A mission is successful only after independent live acceptance passes.
 8. Cancellation, retries, crashes, and duplicate events produce inspectable states rather than fabricated success.
-</contracts_and_invariants>
+   </contracts_and_invariants>
 
 <atomicity_and_action_boundary>
 For **controlled sandbox configuration mutations**, put the source/version authority and supported configuration targets under the same PostgreSQL transactional boundary. All controlled writers, including the fault injector, update the authoritative versions consistently.
@@ -258,6 +261,7 @@ Preserve upstream `npm run typecheck`, `npm run lint`, `npm test`, `npm run buil
 Required deterministic checks: source scoping, supersession/conflicts, transitive invalidation, independent support/preservation, inherited and replayed-context provenance, approval-then-change, racing commits, lease fencing, duplicate/unknown outcomes, unauthorized direct service paths, model output validation, prompt injection as data, UI event ordering and reconnect.
 
 Evaluation separates correctness from efficiency:
+
 1. **Strong temporal-memory + broad-restart baseline** with identical tools, policies, checks, model, budget; reruns broad affected work on change.
 2. **Simple dependent-task restart baseline** with a conventional task DAG and the same admission checks.
 3. **NemoDots selective repair**.

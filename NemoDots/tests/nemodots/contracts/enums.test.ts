@@ -14,7 +14,10 @@ function docEnum(name: string): string[] {
   const match = new RegExp(`^\\s*${name}\\s*=\\s*(.*)$`, 'm').exec(doc);
   if (!match) throw new Error(`enum ${name} not found in CONTRACTS.md`);
   const lines = [match[1]];
-  const rest = doc.slice(match.index + match[0].length).split('\n').slice(1);
+  const rest = doc
+    .slice(match.index + match[0].length)
+    .split('\n')
+    .slice(1);
   for (const line of rest) {
     if (!/^\s*\|/.test(line)) break;
     lines.push(line);
@@ -112,7 +115,11 @@ const inline: [string, readonly string[], string[]][] = [
     C.TaskOutputKindSchema.options,
     ['finding', 'handoff', 'plan', 'verification'],
   ],
-  ['adapter', C.ActionAdapterSchema.options, ['checkout_config', 'redis_cache']],
+  [
+    'adapter',
+    C.ActionAdapterSchema.options,
+    ['checkout_config', 'redis_cache'],
+  ],
   [
     'Authorization.stage',
     C.AuthorizationStageSchema.options,
@@ -157,7 +164,11 @@ const inline: [string, readonly string[], string[]][] = [
       'mission_paused_closure_cap',
     ],
   ],
-  ['Finding.confidence', C.FindingConfidenceSchema.options, ['low', 'medium', 'high']],
+  [
+    'Finding.confidence',
+    C.FindingConfidenceSchema.options,
+    ['low', 'medium', 'high'],
+  ],
 ];
 
 describe('enums match CONTRACTS.md exactly', () => {
@@ -176,7 +187,9 @@ describe('enums match CONTRACTS.md exactly', () => {
     expect(C.BlockReasonSchema.options).toContain('evidence_too_old');
     expect(C.BlockReasonSchema.options).toContain('citation_out_of_scope');
     expect(C.RecoveryKindSchema.options).toContain('invalidation_resolved');
-    expect(C.RecoveryKindSchema.options).toContain('mission_paused_closure_cap');
+    expect(C.RecoveryKindSchema.options).toContain(
+      'mission_paused_closure_cap',
+    );
   });
 
   it('LIVE_STATUSES equals the documented list', () => {
@@ -186,13 +199,20 @@ describe('enums match CONTRACTS.md exactly', () => {
     expect([...C.LIVE_STATUSES]).toEqual(expected);
     for (const status of C.LIVE_STATUSES)
       expect(C.ActionStatusSchema.options).toContain(status);
-    for (const closed of ['blocked', 'failed', 'cancelled', 'verified'] as const)
+    for (const closed of [
+      'blocked',
+      'failed',
+      'cancelled',
+      'verified',
+    ] as const)
       expect(C.isLiveStatus(closed)).toBe(false);
   });
 
   it('EventKind covers every kind listed in CONTRACTS section 8 and nothing else', () => {
     const section = doc.slice(doc.indexOf('## 8.'), doc.indexOf('## 9.'));
-    const expected = [...section.matchAll(/\|\s*\{\s*kind:\s*'([^']+)'/g)].map((m) => m[1]);
+    const expected = [...section.matchAll(/\|\s*\{\s*kind:\s*'([^']+)'/g)].map(
+      (m) => m[1],
+    );
     expect(expected.length).toBe(28);
     expect([...C.EventKindSchema.options].sort()).toEqual([...expected].sort());
   });

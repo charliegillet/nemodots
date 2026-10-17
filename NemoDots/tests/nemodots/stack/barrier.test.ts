@@ -1,9 +1,5 @@
 import { expect, it } from 'vitest';
-import {
-  barrier,
-  latch,
-  withTimeout,
-} from '../helpers/barrier.js';
+import { barrier, latch, withTimeout } from '../helpers/barrier.js';
 
 it('a latch holds waiters until opened, once', async () => {
   const gate = latch<number>();

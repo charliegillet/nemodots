@@ -132,19 +132,28 @@ describe('transition tables (allowed and forbidden)', () => {
     });
 
     it(`${kind}: table has exactly the expected edges and a row per status`, () => {
-      const table = C.TRANSITION_TABLES[kind] as Readonly<Record<string, readonly string[]>>;
+      const table = C.TRANSITION_TABLES[kind] as Readonly<
+        Record<string, readonly string[]>
+      >;
       expect(Object.keys(table).sort()).toEqual([...statuses].sort());
-      const actual = Object.entries(table).flatMap(([from, tos]) => tos.map((to) => `${from}>${to}`));
+      const actual = Object.entries(table).flatMap(([from, tos]) =>
+        tos.map((to) => `${from}>${to}`),
+      );
       expect(actual.sort()).toEqual([...edges].sort());
     });
 
     it(`${kind}: terminal states`, () => {
-      const actual = statuses.filter((status) => C.isTerminal(kind, status as never));
+      const actual = statuses.filter((status) =>
+        C.isTerminal(kind, status as never),
+      );
       expect(actual.sort()).toEqual([...terminal[kind]].sort());
       // Only the succeeded task may leave a terminal state (succeeded -> invalidated).
-      const table = C.TRANSITION_TABLES[kind] as Readonly<Record<string, readonly string[]>>;
+      const table = C.TRANSITION_TABLES[kind] as Readonly<
+        Record<string, readonly string[]>
+      >;
       for (const status of actual)
-        if (!(kind === 'task' && status === 'succeeded')) expect(table[status]).toEqual([]);
+        if (!(kind === 'task' && status === 'succeeded'))
+          expect(table[status]).toEqual([]);
     });
   }
 
@@ -158,12 +167,16 @@ describe('transition tables (allowed and forbidden)', () => {
     expect(() => C.assertTransition('action', 'blocked', 'admitted')).toThrow(
       C.IllegalTransitionError,
     );
-    expect(() => C.assertTransition('action', 'proposed', 'admitted')).not.toThrow();
+    expect(() =>
+      C.assertTransition('action', 'proposed', 'admitted'),
+    ).not.toThrow();
   });
 
   it('tables are frozen', () => {
     expect(Object.isFrozen(C.ACTION_TRANSITIONS)).toBe(true);
     expect(Object.isFrozen(C.ACTION_TRANSITIONS.proposed)).toBe(true);
-    expect(() => (C.ACTION_TRANSITIONS.blocked as string[]).push('admitted')).toThrow();
+    expect(() =>
+      (C.ACTION_TRANSITIONS.blocked as string[]).push('admitted'),
+    ).toThrow();
   });
 });

@@ -204,7 +204,11 @@ describe('resolveInference', () => {
         NEMODOTS_INFERENCE_MODE: 'fixture',
         NEMODOTS_FIXTURE_PATH: 'evals/x.jsonl',
       }),
-    ).toEqual({ mode: 'fixture', missingEnv: [], fixturePath: 'evals/x.jsonl' });
+    ).toEqual({
+      mode: 'fixture',
+      missingEnv: [],
+      fixturePath: 'evals/x.jsonl',
+    });
     expect(
       resolveInference({ ...live, NEMODOTS_INFERENCE_MODE: 'blocked' }),
     ).toMatchObject({ mode: 'blocked', reason: 'requested', missingEnv: [] });

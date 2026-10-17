@@ -20,7 +20,10 @@ import {
 // task and attempt ids come from AttemptContext server-side; model-supplied
 // receipt ids are citations checked against scope, never authority.
 
-export const DELEGABLE_ROLES = TaskRoleSchema.exclude(['planner', 'postcondition']);
+export const DELEGABLE_ROLES = TaskRoleSchema.exclude([
+  'planner',
+  'postcondition',
+]);
 
 /**
  * propose_action exposes a top-level object (function parameters must be an
@@ -67,7 +70,9 @@ export const TEAM_TOOL_INPUTS = Object.freeze({
 });
 
 export type TeamToolName = keyof typeof TEAM_TOOL_INPUTS;
-export type TeamToolInput<N extends TeamToolName> = z.infer<(typeof TEAM_TOOL_INPUTS)[N]>;
+export type TeamToolInput<N extends TeamToolName> = z.infer<
+  (typeof TEAM_TOOL_INPUTS)[N]
+>;
 
 /** Stable order of the tool schemas in every context prefix. */
 export const TEAM_TOOL_ORDER = Object.freeze([
@@ -89,13 +94,16 @@ const DESCRIPTIONS: Readonly<Record<TeamToolName, string>> = Object.freeze({
   read_runbook: 'Read one runbook by catalogue id.',
   delegate_task:
     'Create a child task for another role. Capabilities are derived from the role and your own; depth, breadth and total task limits apply.',
-  get_task_status: 'Get the status and published output summary of a task in this mission.',
-  wait_for_children: 'Wait until your delegated child tasks finish, then continue with their outputs.',
+  get_task_status:
+    'Get the status and published output summary of a task in this mission.',
+  wait_for_children:
+    'Wait until your delegated child tasks finish, then continue with their outputs.',
   publish_finding:
     'Publish a claim with the receipt ids that support it. Findings are model claims, never evidence.',
   propose_action:
     'Propose a bounded remediation. The server derives the dependency vector, target version and required sources and admits or blocks it against current evidence.',
-  request_replan: 'Ask the planner to replan the mission because the current plan no longer fits the evidence.',
+  request_replan:
+    'Ask the planner to replan the mission because the current plan no longer fits the evidence.',
 });
 
 export type ToolSchema = {

@@ -7,7 +7,12 @@ import {
 } from './action.js';
 import { DigestSchema } from './digest.js';
 import { FindingSchema } from './finding.js';
-import { CountSchema, IsoTimeSchema, RevisionSchema, SourceKeySchema } from './ids.js';
+import {
+  CountSchema,
+  IsoTimeSchema,
+  RevisionSchema,
+  SourceKeySchema,
+} from './ids.js';
 import { ModelRoleSchema, ProviderModeSchema } from './model-call.js';
 import {
   ObservationReceiptSchema,
@@ -48,7 +53,10 @@ export const HealthStatusSchema = z
     postgres: ServiceStateSchema,
     redis: ServiceStateSchema,
     checkout: z
-      .object({ reachable: z.boolean(), status: CheckoutStatusSchema.nullable() })
+      .object({
+        reachable: z.boolean(),
+        status: CheckoutStatusSchema.nullable(),
+      })
       .strict(),
     intelligence: z.enum(['configured', 'blocked']),
     /** names only, never values */
@@ -69,7 +77,9 @@ export const CreateMissionRequestSchema = z
   .strict();
 export type CreateMissionRequest = z.infer<typeof CreateMissionRequestSchema>;
 
-export const ErrorResponseSchema = z.object({ error: z.string().min(1) }).strict();
+export const ErrorResponseSchema = z
+  .object({ error: z.string().min(1) })
+  .strict();
 export type ErrorResponse = z.infer<typeof ErrorResponseSchema>;
 export const BlockedResponseSchema = z
   .object({ error: z.string().min(1), missingEnv: z.array(z.string()) })
@@ -83,7 +93,9 @@ export const MissionLifecycleActionSchema = z.enum([
   'resume',
   'cancel',
 ]);
-export type MissionLifecycleAction = z.infer<typeof MissionLifecycleActionSchema>;
+export type MissionLifecycleAction = z.infer<
+  typeof MissionLifecycleActionSchema
+>;
 
 export const TelemetrySummarySchema = z
   .object({
@@ -189,7 +201,9 @@ export const CheckoutHealthResponseSchema = z
     sampledAt: IsoTimeSchema,
   })
   .strict();
-export type CheckoutHealthResponse = z.infer<typeof CheckoutHealthResponseSchema>;
+export type CheckoutHealthResponse = z.infer<
+  typeof CheckoutHealthResponseSchema
+>;
 
 export const EvalsReportResponseSchema = z.union([
   z.object({ status: z.literal('NOT_RUN') }).strict(),

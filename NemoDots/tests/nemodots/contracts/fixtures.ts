@@ -38,7 +38,11 @@ export const scope = () => ({
 });
 
 export const vector = () => [
-  { sourceKey: 'checkout.config/cache.namespace', sourceRevision: 3, receiptId: ids.receipt },
+  {
+    sourceKey: 'checkout.config/cache.namespace',
+    sourceRevision: 3,
+    receiptId: ids.receipt,
+  },
   { sourceKey: 'checkout.health', sourceRevision: 7, receiptId: ids.receipt2 },
 ];
 
@@ -83,7 +87,10 @@ export const collectionReceipt = () => ({
     scope: scope(),
   },
   collectionRevision: null,
-  normalizedValue: { keys: ['cache.namespace', 'db.pool_max'], collectionVersion: 1 },
+  normalizedValue: {
+    keys: ['cache.namespace', 'db.pool_max'],
+    collectionVersion: 1,
+  },
 });
 
 export const confirmation = () => ({
@@ -142,13 +149,20 @@ export const contextSnapshot = () => ({
       },
     ],
     inheritedArtifacts: [
-      { kind: 'handoff', id: ids.output, digest: D, dependencyReceiptIds: [ids.receipt2] },
+      {
+        kind: 'handoff',
+        id: ids.output,
+        digest: D,
+        dependencyReceiptIds: [ids.receipt2],
+      },
     ],
     runbooks: [{ id: 'cache-recovery', digest: D }],
     pageSnapshots: [],
     memories: [],
     invalidationEvents: [invalidationId],
-    historyItems: [{ role: 'tool', digest: D, dependencyReceiptIds: [ids.receipt] }],
+    historyItems: [
+      { role: 'tool', digest: D, dependencyReceiptIds: [ids.receipt] },
+    ],
   },
   dependencyVector: vector(),
   volatile: { nowIso: T0 },
@@ -170,7 +184,9 @@ export const modelCall = () => ({
   outcome: 'tool_calls',
   outputDigest: D,
   outputDependencyVector: vector(),
-  toolCalls: [{ toolCallId: 'call_1', name: 'propose_action', argumentsDigest: D }],
+  toolCalls: [
+    { toolCallId: 'call_1', name: 'propose_action', argumentsDigest: D },
+  ],
   createdAt: T1,
 });
 
@@ -307,7 +323,11 @@ export const intent = () => ({
   generation: 0,
   action: 'set_config',
   adapter: 'checkout_config',
-  payload: { key: 'cache.namespace', value: 'orders-b', expectedCurrentValueDigest: D },
+  payload: {
+    key: 'cache.namespace',
+    value: 'orders-b',
+    expectedCurrentValueDigest: D,
+  },
   payloadHash: D,
   target: {
     resource: 'checkout',
@@ -378,7 +398,11 @@ export const resultReceipt = () => ({
     fenceBefore: 2,
     fenceAfter: 3,
   },
-  postcondition: { kind: 'observation', receiptId: ids.receipt2, configVersion: null },
+  postcondition: {
+    kind: 'observation',
+    receiptId: ids.receipt2,
+    configVersion: null,
+  },
   recordedAt: T1,
 });
 
@@ -414,7 +438,13 @@ export const invalidation = () => ({
   selfWrite: 'none',
   graphVersion: 9,
   affected: affected(),
-  perMission: [{ missionId: ids.mission, affected: affected(), preserved: { taskIds: [ids.task2] } }],
+  perMission: [
+    {
+      missionId: ids.mission,
+      affected: affected(),
+      preserved: { taskIds: [ids.task2] },
+    },
+  ],
   closure: { depth: 2, nodes: 4, capped: false },
   resolvedAt: null,
   createdAt: T1,
@@ -436,7 +466,11 @@ export const recovery = () => ({
 export const telemetry = () => ({
   calls: 3,
   orphanedCalls: 0,
-  tokens: { prompt: 3000, completion: 200, cached: { available: false, total: null } },
+  tokens: {
+    prompt: 3000,
+    completion: 200,
+    cached: { available: false, total: null },
+  },
   byModel: [
     {
       model: 'nvidia/NVIDIA-Nemotron-3-Super-120B-A12B',
@@ -446,7 +480,9 @@ export const telemetry = () => ({
       cachedTokens: null,
     },
   ],
-  byRole: [{ role: 'worker', calls: 3, promptTokens: 3000, completionTokens: 200 }],
+  byRole: [
+    { role: 'worker', calls: 3, promptTokens: 3000, completionTokens: 200 },
+  ],
   retries: 0,
   errors: 0,
   ttftMs: { p50: 420, p95: 900 },
@@ -491,7 +527,12 @@ export const snapshotDto = () => ({
 /** One valid payload per EventKind. */
 export const eventPayloads = (): Record<string, Record<string, unknown>> => ({
   'mission.created': { kind: 'mission.created', mission: mission() },
-  'mission.status': { kind: 'mission.status', from: 'created', to: 'running', reason: null },
+  'mission.status': {
+    kind: 'mission.status',
+    from: 'created',
+    to: 'running',
+    reason: null,
+  },
   'task.created': {
     kind: 'task.created',
     task: {
@@ -506,7 +547,13 @@ export const eventPayloads = (): Record<string, Record<string, unknown>> => ({
       createdByModelCallId: ids.modelCall,
     },
   },
-  'task.status': { kind: 'task.status', taskId: ids.task, from: 'runnable', to: 'leased', reason: null },
+  'task.status': {
+    kind: 'task.status',
+    taskId: ids.task,
+    from: 'runnable',
+    to: 'leased',
+    reason: null,
+  },
   'attempt.started': {
     kind: 'attempt.started',
     attemptId: ids.attempt2,

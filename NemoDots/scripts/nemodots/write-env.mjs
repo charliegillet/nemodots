@@ -19,7 +19,8 @@ const APP_ROOT = path.resolve(
   '..',
   '..',
 );
-const BEGIN = '# >>> nemodots (scripts/nemodots/write-env.mjs; non-secret values only)';
+const BEGIN =
+  '# >>> nemodots (scripts/nemodots/write-env.mjs; non-secret values only)';
 const END = '# <<< nemodots';
 const FORBIDDEN_PORTS = new Set([5432, 6379]);
 const SECRET_NAMES = /^NEMODOTS_(PG_URL_|PROBE_SECRET)/;
@@ -33,7 +34,14 @@ function parseArgs(argv) {
   const flags = {};
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
-    const names = ['--instance', '--pg-port', '--redis-port', '--checkout-port', '--mode', '--file'];
+    const names = [
+      '--instance',
+      '--pg-port',
+      '--redis-port',
+      '--checkout-port',
+      '--mode',
+      '--file',
+    ];
     if (!names.includes(arg)) fail(`unknown argument ${arg}`);
     if (argv[i + 1] === undefined) fail(`${arg} needs a value`);
     flags[arg.slice(2)] = argv[i + 1];
@@ -47,7 +55,9 @@ function port(name, raw, fallback) {
   if (!Number.isInteger(value) || value < 1 || value > 65535)
     fail(`${name} must be a port number`);
   if (FORBIDDEN_PORTS.has(value))
-    fail(`${name} ${value} is refused: 5432/6379 belong to the user's own PostgreSQL/Redis`);
+    fail(
+      `${name} ${value} is refused: 5432/6379 belong to the user's own PostgreSQL/Redis`,
+    );
   return value;
 }
 
@@ -61,11 +71,26 @@ if (!['live', 'fixture', 'blocked'].includes(mode))
 
 // Ports default to what stack.mjs recorded for the instance, if it exists.
 let meta = {};
-const metaFile = path.join(APP_ROOT, '.local', instance, 'stack', 'instance.json');
-if (fs.existsSync(metaFile)) meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
+const metaFile = path.join(
+  APP_ROOT,
+  '.local',
+  instance,
+  'stack',
+  'instance.json',
+);
+if (fs.existsSync(metaFile))
+  meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
 const pgPort = port('--pg-port', flags['pg-port'], meta.pgPort ?? 55432);
-const redisPort = port('--redis-port', flags['redis-port'], meta.redisPort ?? 56379);
-const checkoutPort = port('--checkout-port', flags['checkout-port'], meta.checkoutPort ?? 4510);
+const redisPort = port(
+  '--redis-port',
+  flags['redis-port'],
+  meta.redisPort ?? 56379,
+);
+const checkoutPort = port(
+  '--checkout-port',
+  flags['checkout-port'],
+  meta.checkoutPort ?? 4510,
+);
 
 const values = {
   NEMODOTS_INSTANCE: instance,
@@ -94,7 +119,11 @@ for (const line of lines) {
   else if (line === END && inBlock) inBlock = false;
   else if (!inBlock) kept.push(line);
 }
-if (inBlock) fail(`${path.basename(file)} has an unterminated nemodots block; fix it by hand`, 1);
+if (inBlock)
+  fail(
+    `${path.basename(file)} has an unterminated nemodots block; fix it by hand`,
+    1,
+  );
 
 // A name the user set outside the block wins; it is reported, not overwritten.
 const userNames = new Set(

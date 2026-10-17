@@ -47,7 +47,11 @@ import {
   InvalidationReasonSchema,
   RecoveryEventSchema,
 } from './recovery.js';
-import { CheckoutStatusSchema, ServiceStateSchema, TelemetrySummarySchema } from './routes.js';
+import {
+  CheckoutStatusSchema,
+  ServiceStateSchema,
+  TelemetrySummarySchema,
+} from './routes.js';
 import {
   AbortReasonSchema,
   AttemptKindSchema,
@@ -97,8 +101,10 @@ export const EventKindSchema = z.enum([
 ]);
 export type EventKind = z.infer<typeof EventKindSchema>;
 
-const variant = <K extends EventKind, S extends z.ZodRawShape>(kind: K, shape: S) =>
-  z.object({ kind: z.literal(kind), ...shape }).strict();
+const variant = <K extends EventKind, S extends z.ZodRawShape>(
+  kind: K,
+  shape: S,
+) => z.object({ kind: z.literal(kind), ...shape }).strict();
 
 const reason = z.string().nullable();
 
@@ -154,9 +160,14 @@ export const EventPayloadSchema = z.discriminatedUnion('kind', [
     taskId: TaskIdSchema,
     role: ModelRoleSchema,
     model: z
-      .object({ requested: z.string().min(1), returned: z.string().min(1).nullable() })
+      .object({
+        requested: z.string().min(1),
+        returned: z.string().min(1).nullable(),
+      })
       .strict(),
-    provider: z.object({ host: z.string().min(1), mode: ProviderModeSchema }).strict(),
+    provider: z
+      .object({ host: z.string().min(1), mode: ProviderModeSchema })
+      .strict(),
     outcome: ModelCallOutcomeSchema,
     prefixDigest: DigestSchema,
     contextDigest: DigestSchema,
@@ -228,7 +239,9 @@ export const EventPayloadSchema = z.discriminatedUnion('kind', [
     blockReason: BlockReasonSchema.nullable(),
     blockDetail: z.string().nullable(),
     checkedVector: CheckedVectorSchema,
-    targetVersion: z.object({ expected: RevisionSchema, live: RevisionSchema }).strict(),
+    targetVersion: z
+      .object({ expected: RevisionSchema, live: RevisionSchema })
+      .strict(),
     dispatchFence: z
       .object({ token: CountSchema, valid: z.boolean() })
       .strict()
@@ -295,7 +308,10 @@ export const EventPayloadSchema = z.discriminatedUnion('kind', [
   variant('heartbeat', {}),
 ]);
 export type EventPayload = z.infer<typeof EventPayloadSchema>;
-export type EventPayloadOf<K extends EventKind> = Extract<EventPayload, { kind: K }>;
+export type EventPayloadOf<K extends EventKind> = Extract<
+  EventPayload,
+  { kind: K }
+>;
 
 export const MissionEventSchema = z
   .object({

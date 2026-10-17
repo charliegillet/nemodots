@@ -2,7 +2,13 @@
 // run without a stack and never contact a port.
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, expect, it } from 'vitest';
@@ -11,7 +17,8 @@ const execFileAsync = promisify(execFile);
 const SCRIPT = path.resolve('scripts/nemodots/stack.mjs');
 const created: string[] = [];
 afterEach(() => {
-  for (const dir of created.splice(0)) rmSync(dir, { recursive: true, force: true });
+  for (const dir of created.splice(0))
+    rmSync(dir, { recursive: true, force: true });
 });
 
 async function stack(args: string[], env: Record<string, string> = {}) {

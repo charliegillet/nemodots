@@ -206,7 +206,8 @@ export const ActionIntentSchema = z
       });
     if (
       payloadOk &&
-      intent.target.sourceKey !== actionTargetSourceKey(intent.action, intent.payload)
+      intent.target.sourceKey !==
+        actionTargetSourceKey(intent.action, intent.payload)
     )
       ctx.addIssue({
         code: 'custom',
@@ -268,7 +269,11 @@ export const ProposeInputSchema = z.discriminatedUnion('action', [
 ]);
 export type ProposeInput = z.infer<typeof ProposeInputSchema>;
 
-export const AuthorizationStageSchema = z.enum(['admission', 'commit', 'dispatch']);
+export const AuthorizationStageSchema = z.enum([
+  'admission',
+  'commit',
+  'dispatch',
+]);
 export type AuthorizationStage = z.infer<typeof AuthorizationStageSchema>;
 export const AuthorizationDecisionSchema = z.enum([
   'admitted',
@@ -317,7 +322,10 @@ export const AuthorizationSchema = z
   })
   .strict()
   .superRefine((authorization, ctx) => {
-    if ((authorization.decision === 'blocked') !== (authorization.blockReason !== null))
+    if (
+      (authorization.decision === 'blocked') !==
+      (authorization.blockReason !== null)
+    )
       ctx.addIssue({
         code: 'custom',
         path: ['blockReason'],
@@ -335,7 +343,11 @@ export const AuthorizationSchema = z
   });
 export type Authorization = z.infer<typeof AuthorizationSchema>;
 
-export const ScriptResultSchema = z.enum(['applied', 'already_applied', 'fence_newer']);
+export const ScriptResultSchema = z.enum([
+  'applied',
+  'already_applied',
+  'fence_newer',
+]);
 export type ScriptResult = z.infer<typeof ScriptResultSchema>;
 
 export const PostconditionSchema = z
@@ -353,7 +365,13 @@ export const ResultReceiptSchema = z
     actionId: ActionIdSchema,
     idempotencyKey: DigestSchema,
     payloadHash: DigestSchema,
-    outcome: z.enum(['committed', 'dispatched', 'verified', 'failed', 'outcome_unknown']),
+    outcome: z.enum([
+      'committed',
+      'dispatched',
+      'verified',
+      'failed',
+      'outcome_unknown',
+    ]),
     controlPlane: z
       .object({
         targetVersionBefore: RevisionSchema,

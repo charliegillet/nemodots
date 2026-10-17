@@ -19,12 +19,7 @@
 // Never prints a value from roles.env or .env. Refuses ports 5432 and 6379
 // (the user's own PostgreSQL and Redis) and data directories it did not create.
 import { spawn, spawnSync } from 'node:child_process';
-import {
-  createHash,
-  createHmac,
-  pbkdf2Sync,
-  randomBytes,
-} from 'node:crypto';
+import { createHash, createHmac, pbkdf2Sync, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
@@ -69,9 +64,13 @@ function parseArgs(argv) {
     }
     if (arg === '--yes') out.flags.yes = true;
     else if (
-      ['--instance', '--pg-port', '--redis-port', '--checkout-port', '--entry'].includes(
-        arg,
-      )
+      [
+        '--instance',
+        '--pg-port',
+        '--redis-port',
+        '--checkout-port',
+        '--entry',
+      ].includes(arg)
     ) {
       const value = argv[i + 1];
       if (value === undefined) throw new StackError(`${arg} needs a value`, 2);
@@ -98,10 +97,7 @@ function parsePort(name, raw) {
 function resolveContext(flags) {
   const instance = flags.instance ?? process.env.NEMODOTS_INSTANCE ?? 'dev';
   if (!/^[a-z0-9][a-z0-9-]{0,23}$/.test(instance))
-    throw new StackError(
-      'instance must match ^[a-z0-9][a-z0-9-]{0,23}$',
-      2,
-    );
+    throw new StackError('instance must match ^[a-z0-9][a-z0-9-]{0,23}$', 2);
   const base = path.join(APP_ROOT, '.local', instance);
   const paths = {
     base,
@@ -120,7 +116,10 @@ function resolveContext(flags) {
       `the PostgreSQL socket path under ${paths.run} would exceed the 103-byte limit; use a shorter checkout path or instance name`,
     );
   const requested = {
-    pgPort: parsePort('--pg-port', flags['pg-port'] ?? process.env.NEMODOTS_PG_PORT),
+    pgPort: parsePort(
+      '--pg-port',
+      flags['pg-port'] ?? process.env.NEMODOTS_PG_PORT,
+    ),
     redisPort: parsePort(
       '--redis-port',
       flags['redis-port'] ?? process.env.NEMODOTS_REDIS_PORT,
@@ -154,7 +153,9 @@ function readMeta(paths) {
   if (!fs.existsSync(paths.meta)) return undefined;
   const meta = JSON.parse(fs.readFileSync(paths.meta, 'utf8'));
   if (meta.createdBy !== 'scripts/nemodots/stack.mjs')
-    throw new StackError(`${paths.meta} was not written by stack.mjs; refusing`);
+    throw new StackError(
+      `${paths.meta} was not written by stack.mjs; refusing`,
+    );
   return meta;
 }
 
@@ -298,7 +299,10 @@ function writeRolesFile(ctx) {
     `NEMODOTS_PROBE_SECRET=${secret(32)}`,
     '',
   ];
-  fs.writeFileSync(ctx.paths.roles, lines.join('\n'), { mode: 0o600, flag: 'wx' });
+  fs.writeFileSync(ctx.paths.roles, lines.join('\n'), {
+    mode: 0o600,
+    flag: 'wx',
+  });
   fs.chmodSync(ctx.paths.roles, 0o600);
   return true;
 }
@@ -360,7 +364,10 @@ function writePgConf(ctx) {
     'log_min_error_statement = panic',
     '',
   ];
-  fs.writeFileSync(path.join(ctx.paths.pgdata, 'nemodots.conf'), conf.join('\n'));
+  fs.writeFileSync(
+    path.join(ctx.paths.pgdata, 'nemodots.conf'),
+    conf.join('\n'),
+  );
 }
 
 function ensureRolesAndDatabase(ctx) {
@@ -422,7 +429,16 @@ function stopPostgres(ctx) {
     say('postgres: not running');
     return;
   }
-  const result = run('pg_ctl', ['-D', ctx.paths.pgdata, '-m', 'fast', '-w', '-t', '60', 'stop']);
+  const result = run('pg_ctl', [
+    '-D',
+    ctx.paths.pgdata,
+    '-m',
+    'fast',
+    '-w',
+    '-t',
+    '60',
+    'stop',
+  ]);
   if (result.status !== 0)
     throw new StackError(`pg_ctl stop failed: ${redact(result.stderr).trim()}`);
   say('postgres: stopped');
@@ -437,7 +453,8 @@ function ownRedisPid(ctx) {
   const pid = Number(fs.readFileSync(redisPidFile(ctx), 'utf8').trim());
   if (!pid || !pidAlive(pid)) return undefined;
   const command = commandOf(pid);
-  return command.includes('redis-server') && command.includes(`:${ctx.redisPort}`)
+  return command.includes('redis-server') &&
+    command.includes(`:${ctx.redisPort}`)
     ? pid
     : undefined;
 }
@@ -481,7 +498,9 @@ async function startRedis(ctx) {
     ctx.paths.redis,
   ]);
   if (result.status !== 0)
-    throw new StackError(`redis-server failed to start (exit ${result.status})`);
+    throw new StackError(
+      `redis-server failed to start (exit ${result.status})`,
+    );
   const ready = await waitFor(
     () => redisCli(ctx, ['ping']).stdout.trim() === 'PONG',
     10_000,
@@ -537,7 +556,10 @@ function resolveCheckoutEntry(flags) {
   const entry = path.resolve(APP_ROOT, flags.entry);
   const allowed = path.join(APP_ROOT, 'tests', 'nemodots') + path.sep;
   if (!entry.startsWith(allowed) || !fs.existsSync(entry))
-    throw new StackError('--entry must name an existing file under tests/nemodots/', 2);
+    throw new StackError(
+      '--entry must name an existing file under tests/nemodots/',
+      2,
+    );
   return entry;
 }
 
@@ -579,7 +601,8 @@ async function startCheckout(ctx) {
     JSON.stringify({ pid: child.pid, entry }),
   );
   const ready = await waitFor(
-    async () => !pidAlive(child.pid) || (await portAcceptsConnections(ctx.checkoutPort)),
+    async () =>
+      !pidAlive(child.pid) || (await portAcceptsConnections(ctx.checkoutPort)),
     20_000,
   );
   if (!ready || !pidAlive(child.pid))
@@ -613,11 +636,20 @@ async function init(ctx) {
     say(`init: instance ${ctx.instance} already initialised`);
     return 0;
   }
-  if (!ctx.meta && fs.existsSync(ctx.paths.base) && fs.readdirSync(ctx.paths.base).length)
+  if (
+    !ctx.meta &&
+    fs.existsSync(ctx.paths.base) &&
+    fs.readdirSync(ctx.paths.base).length
+  )
     throw new StackError(
       `${ctx.paths.base} exists and was not created by stack.mjs; refusing`,
     );
-  for (const dir of [ctx.paths.base, ctx.paths.stack, ctx.paths.logs, ctx.paths.redis])
+  for (const dir of [
+    ctx.paths.base,
+    ctx.paths.stack,
+    ctx.paths.logs,
+    ctx.paths.redis,
+  ])
     fs.mkdirSync(dir, { recursive: true });
   fs.mkdirSync(ctx.paths.run, { recursive: true, mode: 0o700 });
   fs.chmodSync(ctx.paths.run, 0o700);
@@ -632,7 +664,8 @@ async function init(ctx) {
     checkoutPort: ctx.checkoutPort,
     database: DATABASE,
   };
-  if (!ctx.meta) fs.writeFileSync(ctx.paths.meta, `${JSON.stringify(meta, null, 2)}\n`);
+  if (!ctx.meta)
+    fs.writeFileSync(ctx.paths.meta, `${JSON.stringify(meta, null, 2)}\n`);
   ctx.meta = meta;
   // A previous init of this (owned) instance may have stopped half-way.
   fs.rmSync(ctx.paths.pgdata, { recursive: true, force: true });
@@ -685,7 +718,9 @@ async function init(ctx) {
 async function start(ctx) {
   assertOwned(ctx);
   if (!fs.existsSync(path.join(ctx.paths.pgdata, 'PG_VERSION')))
-    throw new StackError(`instance ${ctx.instance} has no database cluster; run init`);
+    throw new StackError(
+      `instance ${ctx.instance} has no database cluster; run init`,
+    );
   await startPostgres(ctx);
   await startRedis(ctx);
   await startCheckout(ctx);
@@ -702,7 +737,14 @@ async function stop(ctx) {
 
 async function status(ctx) {
   assertOwned(ctx);
-  const pg = run('pg_isready', ['-h', '127.0.0.1', '-p', String(ctx.pgPort), '-t', '5']);
+  const pg = run('pg_isready', [
+    '-h',
+    '127.0.0.1',
+    '-p',
+    String(ctx.pgPort),
+    '-t',
+    '5',
+  ]);
   const pgOk = pg.status === 0;
   say(
     `postgres: ${pgOk ? 'accepting connections' : 'down'} on 127.0.0.1:${ctx.pgPort}`,
@@ -713,7 +755,8 @@ async function status(ctx) {
   let checkoutOk = true;
   if (fs.existsSync(path.join(APP_ROOT, CHECKOUT_ENTRY))) {
     const record = ownCheckout(ctx);
-    checkoutOk = Boolean(record) && (await portAcceptsConnections(ctx.checkoutPort));
+    checkoutOk =
+      Boolean(record) && (await portAcceptsConnections(ctx.checkoutPort));
     say(
       `checkout: ${checkoutOk ? `running (pid ${record.pid})` : 'down'} on 127.0.0.1:${ctx.checkoutPort}`,
     );
@@ -732,12 +775,19 @@ async function reset(ctx, flags) {
   const keep = { ...ctx.meta };
   fs.rmSync(ctx.paths.base, { recursive: true, force: true });
   say(`reset: removed ${ctx.paths.base}`);
-  return init({ ...ctx, meta: undefined, pgPort: keep.pgPort, redisPort: keep.redisPort, checkoutPort: keep.checkoutPort });
+  return init({
+    ...ctx,
+    meta: undefined,
+    pgPort: keep.pgPort,
+    redisPort: keep.redisPort,
+    checkoutPort: keep.checkoutPort,
+  });
 }
 
 async function resetTest(ctx) {
   assertOwned(ctx);
-  if (!pgRunning(ctx)) throw new StackError('postgres is not running; start the stack first');
+  if (!pgRunning(ctx))
+    throw new StackError('postgres is not running; start the stack first');
   const names = psql(
     ctx,
     "SELECT datname FROM pg_database WHERE datname LIKE 'nemodots\\_test\\_%' ORDER BY 1;",
@@ -745,7 +795,8 @@ async function resetTest(ctx) {
     .split('\n')
     .map((line) => line.trim())
     .filter((name) => TEST_DB_PATTERN.test(name));
-  for (const name of names) psql(ctx, `DROP DATABASE IF EXISTS ${name} WITH (FORCE);`);
+  for (const name of names)
+    psql(ctx, `DROP DATABASE IF EXISTS ${name} WITH (FORCE);`);
   let keys = 0;
   if (ownRedisPid(ctx)) {
     const scan = redisCli(ctx, ['--scan', '--pattern', 'nemodots:test:*']);
@@ -755,7 +806,9 @@ async function resetTest(ctx) {
     }
     keys = list.length;
   }
-  say(`reset-test: dropped ${names.length} test databases, unlinked ${keys} test keys`);
+  say(
+    `reset-test: dropped ${names.length} test databases, unlinked ${keys} test keys`,
+  );
   return 0;
 }
 
@@ -764,11 +817,17 @@ function execWithEnv(ctx, command, args) {
   if (!command) throw new StackError('exec needs a command after --', 2);
   const env = { ...process.env, ...readRoles(ctx), ...instanceEnv(ctx) };
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd: APP_ROOT, env, stdio: 'inherit' });
+    const child = spawn(command, args, {
+      cwd: APP_ROOT,
+      env,
+      stdio: 'inherit',
+    });
     const forward = (signal) => child.kill(signal);
     process.on('SIGINT', forward);
     process.on('SIGTERM', forward);
-    child.once('error', (error) => reject(new StackError(`${command}: ${error.message}`)));
+    child.once('error', (error) =>
+      reject(new StackError(`${command}: ${error.message}`)),
+    );
     child.once('exit', (code, signal) => {
       process.off('SIGINT', forward);
       process.off('SIGTERM', forward);
@@ -782,7 +841,10 @@ function runScript(ctx, rest) {
   if (!file) throw new StackError('run needs a script path', 2);
   const resolved = path.resolve(APP_ROOT, file);
   if (!resolved.startsWith(APP_ROOT + path.sep))
-    throw new StackError('run only executes files inside the NemoDots checkout', 2);
+    throw new StackError(
+      'run only executes files inside the NemoDots checkout',
+      2,
+    );
   if (!fs.existsSync(resolved)) {
     console.error(
       `nemodots:stack run: not implemented yet: ${file} does not exist (delivered by a later wave)`,
@@ -839,7 +901,10 @@ async function main(argv) {
   return handler(ctx, args);
 }
 
-if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
+if (
+  process.argv[1] &&
+  pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url
+) {
   main(process.argv.slice(2)).then(
     (code) => process.exit(code ?? 0),
     (error) => {

@@ -169,9 +169,7 @@ export async function migrate(options: MigrateOptions): Promise<MigrateResult> {
       result.pending = [];
       return result;
     } finally {
-      await client.query('SELECT pg_advisory_unlock($1)', [
-        MIGRATION_LOCK_KEY,
-      ]);
+      await client.query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK_KEY]);
     }
   } finally {
     await client.end();

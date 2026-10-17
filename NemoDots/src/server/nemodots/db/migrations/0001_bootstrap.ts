@@ -28,7 +28,12 @@ export const APP_ROLES = [
   'nemodots_injector',
   'nemodots_verifier',
 ] as const;
-export const SCHEMAS = ['ledger', 'coordinator', 'checkout', 'control'] as const;
+export const SCHEMAS = [
+  'ledger',
+  'coordinator',
+  'checkout',
+  'control',
+] as const;
 
 const createRole = (role: string) => `
 DO $$

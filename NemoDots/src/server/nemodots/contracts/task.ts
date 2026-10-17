@@ -50,7 +50,9 @@ export const MissionBudgetsSchema = z
   .strict();
 
 export const MissionGoalSchema = z.string().min(1).max(2000);
-export const MissionConstraintsSchema = z.array(z.string().min(1).max(500)).max(20);
+export const MissionConstraintsSchema = z
+  .array(z.string().min(1).max(500))
+  .max(20);
 
 export const MissionSchema = z
   .object({
@@ -172,7 +174,11 @@ const SPECIALIST_ROLES: readonly TaskRole[] = [
 
 /** Roles a task of `parentRole` may delegate to. Specialists delegate only 'verifier'. */
 export function delegableRoles(parentRole: TaskRole): readonly TaskRole[] {
-  if (!(ROLE_CAPABILITIES[parentRole] as readonly Capability[]).includes('delegate'))
+  if (
+    !(ROLE_CAPABILITIES[parentRole] as readonly Capability[]).includes(
+      'delegate',
+    )
+  )
     return [];
   if (SPECIALIST_ROLES.includes(parentRole)) return ['verifier'];
   return ['investigator', ...SPECIALIST_ROLES, 'verifier'];
@@ -408,7 +414,13 @@ export const DependencyEdgeSchema = z
       .strict(),
     to: z
       .object({
-        kind: z.enum(['model_call', 'attempt', 'task_output', 'task', 'action_intent']),
+        kind: z.enum([
+          'model_call',
+          'attempt',
+          'task_output',
+          'task',
+          'action_intent',
+        ]),
         id: z.string().min(1),
       })
       .strict(),
@@ -444,8 +456,11 @@ export const AttemptContextSchema = z
     role: TaskRoleSchema,
   })
   .strict()
-  .refine((context) => capabilitiesWithinRole(context.role, context.capabilities), {
-    path: ['capabilities'],
-    message: 'capabilities exceed the role',
-  });
+  .refine(
+    (context) => capabilitiesWithinRole(context.role, context.capabilities),
+    {
+      path: ['capabilities'],
+      message: 'capabilities exceed the role',
+    },
+  );
 export type AttemptContext = z.infer<typeof AttemptContextSchema>;

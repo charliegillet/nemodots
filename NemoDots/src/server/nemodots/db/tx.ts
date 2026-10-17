@@ -15,9 +15,7 @@ export const RETRYABLE_SQLSTATES: ReadonlySet<string> = new Set([
 ]);
 
 export type IsolationLevel =
-  | 'read committed'
-  | 'repeatable read'
-  | 'serializable';
+  'read committed' | 'repeatable read' | 'serializable';
 
 export interface TransactionOptions {
   isolation?: IsolationLevel;

@@ -34,7 +34,9 @@ export const TrustClassSchema = z.enum([
 ]);
 export type TrustClass = z.infer<typeof TrustClassSchema>;
 /** model_claim never appears on an ObservationReceipt; Finding reuses the enum. */
-export const ReceiptTrustClassSchema = TrustClassSchema.exclude(['model_claim']);
+export const ReceiptTrustClassSchema = TrustClassSchema.exclude([
+  'model_claim',
+]);
 
 export const TransitionReasonSchema = z.enum([
   'newer_observation',
@@ -107,7 +109,10 @@ export const ObservationReceiptSchema = z
       })
       .strict(),
     negative: z
-      .object({ predicate: z.string().min(1), collectionRevision: RevisionSchema })
+      .object({
+        predicate: z.string().min(1),
+        collectionRevision: RevisionSchema,
+      })
       .strict()
       .nullable(),
     expiresAt: IsoTimeSchema.nullable(),
@@ -127,7 +132,8 @@ export const ObservationReceiptSchema = z
       ctx.addIssue({
         code: 'custom',
         path: ['normalizedValue'],
-        message: 'collection value must be { keys: sorted string[], collectionVersion }',
+        message:
+          'collection value must be { keys: sorted string[], collectionVersion }',
       });
     if (receipt.supersedes !== null && receipt.supersedes === receipt.id)
       ctx.addIssue({

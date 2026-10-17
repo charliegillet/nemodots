@@ -55,7 +55,8 @@ export const DependencyVectorSchema = z
   .refine(
     (vector) =>
       vector.every(
-        (entry, i) => i === 0 || compareDependencyEntries(vector[i - 1], entry) < 0,
+        (entry, i) =>
+          i === 0 || compareDependencyEntries(vector[i - 1], entry) < 0,
       ),
     { message: 'dependency vector must be sorted by sourceKey and unique' },
   );
@@ -160,7 +161,9 @@ export const ContextSnapshotSchema = z
     const covered = new Set(snapshot.dependencyVector.map((e) => e.receiptId));
     const referenced = [
       ...snapshot.injected.receipts.map((r) => r.id),
-      ...snapshot.injected.inheritedArtifacts.flatMap((a) => a.dependencyReceiptIds),
+      ...snapshot.injected.inheritedArtifacts.flatMap(
+        (a) => a.dependencyReceiptIds,
+      ),
       ...snapshot.injected.historyItems.flatMap((h) => h.dependencyReceiptIds),
     ];
     for (const id of referenced)
@@ -242,7 +245,8 @@ export const InferenceAttemptSchema = z
   .strict()
   .superRefine((attempt, ctx) => {
     const cancelled =
-      attempt.finishReason === 'cancelled' || attempt.error?.class === 'cancelled';
+      attempt.finishReason === 'cancelled' ||
+      attempt.error?.class === 'cancelled';
     if (cancelled && Object.values(attempt.usage).some((v) => v !== null))
       ctx.addIssue({
         code: 'custom',
@@ -279,7 +283,10 @@ export const ModelCallRecordSchema = z
     attemptId: AttemptIdSchema,
     role: ModelRoleSchema,
     model: z
-      .object({ requested: z.string().min(1), returned: z.string().min(1).nullable() })
+      .object({
+        requested: z.string().min(1),
+        returned: z.string().min(1).nullable(),
+      })
       .strict(),
     provider: z
       .object({ host: z.string().min(1), mode: ProviderModeSchema })

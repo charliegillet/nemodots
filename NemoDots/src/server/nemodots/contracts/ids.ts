@@ -35,7 +35,8 @@ export type RecoveryEventId = z.infer<typeof RecoveryEventIdSchema>;
 export const DependencyEdgeIdSchema = uuid().brand<'DependencyEdgeId'>();
 export type DependencyEdgeId = z.infer<typeof DependencyEdgeIdSchema>;
 /** sha256(sourceKey, oldReceiptId, newReceiptId | 'null', reason); see invalidationEventId(). */
-export const InvalidationEventIdSchema = DigestSchema.brand<'InvalidationEventId'>();
+export const InvalidationEventIdSchema =
+  DigestSchema.brand<'InvalidationEventId'>();
 export type InvalidationEventId = z.infer<typeof InvalidationEventIdSchema>;
 
 /** ISO-8601 UTC timestamp (`Z` suffix) as used in every DTO. */
@@ -129,13 +130,19 @@ export const SourceRefSchema = z
         message: 'authority must be controlled exactly for controlled_* types',
       });
     const family = sourceKeyFamily(ref.key);
-    if ((family === 'checkout.config') !== (ref.sourceType === 'controlled_collection'))
+    if (
+      (family === 'checkout.config') !==
+      (ref.sourceType === 'controlled_collection')
+    )
       ctx.addIssue({
         code: 'custom',
         path: ['sourceType'],
         message: 'checkout.config is the only controlled_collection',
       });
-    if ((family === 'checkout.config/<key>') !== (ref.sourceType === 'controlled_config'))
+    if (
+      (family === 'checkout.config/<key>') !==
+      (ref.sourceType === 'controlled_config')
+    )
       ctx.addIssue({
         code: 'custom',
         path: ['sourceType'],
@@ -168,7 +175,9 @@ export function idempotencyKey(
   toolCallId: string,
 ): string {
   if (!Number.isInteger(expectedTargetVersion) || expectedTargetVersion < 0)
-    throw new RangeError('expectedTargetVersion must be a non-negative integer');
+    throw new RangeError(
+      'expectedTargetVersion must be a non-negative integer',
+    );
   if (!toolCallId) throw new RangeError('toolCallId is required');
   return digest([
     'idempotency-v1',

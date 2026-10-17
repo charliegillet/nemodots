@@ -19,16 +19,18 @@ Never skip an assertion, broaden a mock, swallow a provider exception, change th
 </verification_contract>
 
 <gate_0_reproduction>
+
 1. Inspect repository instructions, build documents, package.json, package-lock.json, migrations, configuration schema and all new operational modules.
 2. Verify Node >=24 and npm; preserve the lockfile; run `npm ci`. Record pre-existing problems accurately.
 3. Run `npm run typecheck`, `npm run lint`, `npm test`, `npm run build`, plus formatting checks on changed files. Inspect implemented scripts before invoking additional suites.
 4. Start an isolated test stack with healthy PostgreSQL, real Redis and the checkout API. Verify migrations from empty storage and a supported upgrade path without wiping existing data. Seed/reset scoped to test resources.
 5. Clean start, restart and useful setup state without Crusoe/Intelligence configuration; fixture vs live vs blocked are distinguished.
 6. Upstream MIT and copied notices remain; source refs and pins match code. Secrets absent from Git changes, frontend assets, logs and screenshots (check without dumping values).
-</gate_0_reproduction>
+   </gate_0_reproduction>
 
 <gate_1_ledger_and_lineage>
 With independently enumerated expected records/edges:
+
 1. Immutable receipt identity; revision/digest mismatch rejected; malformed and oversized inputs fail safely.
 2. Same entity/predicate in different environments/resources/Spaces/owners cannot collide or grant access.
 3. New supported observation supersedes the prior current one per source policy; contested/retracted/expired support blocks dependent actions until resolved.
@@ -42,10 +44,11 @@ With independently enumerated expected records/edges:
 11. Page edits change document revision but cannot silently mutate ledger values; consumers get traceable snapshot dependencies.
 12. Negative/collection read ('no restrictive policy exists') records a collection/range epoch; inserting a restriction makes dependent publication/admission reject the old absence observation.
 13. Advance an authoritative epoch before the watcher processes it: outputs, handoffs, child enqueues, context reuse or actions on the old epoch fail immediately; pending replacement is not permission.
-</gate_1_ledger_and_lineage>
+    </gate_1_ledger_and_lineage>
 
 <gate_2_admission_and_races>
 Deterministic barriers/latches/test hooks at real transaction boundaries, real PostgreSQL connections:
+
 1. Stale before admission: propose from r1, register r2, admit r1 → fail, no mutation.
 2. Stale between local check and commit: pause after preliminary read; register r2; resume → reject r1.
 3. Concurrent commit ordering: race registration and mutation; record serialization order; an r1 mutation serialized after must not commit.
@@ -68,6 +71,7 @@ Check authoritative versions, actual domain state and audit receipt together. Ad
 
 <gate_3_tool_and_scope_audit>
 Trace real execution paths and test service/HTTP APIs directly: incident adapter/route; computer service and owner routes; MCP read/write executors, approval creation/callback; Composio; client tools; learned skills; page edits; background/headless/channel paths.
+
 - Every enabled model-visible read produces scoped provenance; every enabled mutation has policy checks at its execution boundary; disabled paths fail clearly.
 - Permission revocation and cross-Dot/Space/resource identities; model-supplied IDs grant nothing.
 - Unknown tools and unclassified capabilities fail closed. A name containing 'read' is not proof of read-only.
@@ -75,9 +79,10 @@ Trace real execution paths and test service/HTTP APIs directly: incident adapter
 - Instruction-like text in logs/tool results/pages/runbooks stays untrusted data.
 - Approved callbacks keep payload binding and fresh evidence validation after reconnect; upstream owner approval semantics preserved.
 - Crusoe keys/Intelligence secrets server-side only (check built assets without printing values).
-</gate_3_tool_and_scope_audit>
+  </gate_3_tool_and_scope_audit>
 
 <gate_4_autonomy_and_persistence>
+
 1. Create a mission from UI/API with only goal and constraints; show model-generated tasks, tool calls, dependencies, handoffs and at least one justified recursive child delegation.
 2. Depth/total tasks/concurrency/budgets enforced server-side; children cannot expand permissions.
 3. Inject changed evidence after a branch read; the watcher discovers it; injector leaks no diagnosis.
@@ -86,9 +91,10 @@ Trace real execution paths and test service/HTTP APIs directly: incident adapter
 6. Two source changes during recovery: no unbounded repair storm or resurrection.
 7. Malformed tool JSON, refusal, timeout, rate limit, exhausted budget → explicit failure/blocking states.
 8. Reload a user conversation after a real Intelligence turn (BLOCKED without Intelligence).
-</gate_4_autonomy_and_persistence>
+   </gate_4_autonomy_and_persistence>
 
 <gate_5_live_crusoe_nemotron>
+
 - Endpoint `https://api.inference.crusoecloud.com/v1`; requested model currently available.
 - Real text, tool-call/continuation, streaming and cancellation through the app's adapter.
 - Redacted request receipts showing planner, specialists, verifier reasoning and changed-evidence replanning on Crusoe/Nemotron.
@@ -97,7 +103,7 @@ Trace real execution paths and test service/HTTP APIs directly: incident adapter
 - Stable prefix/tool-schema digests within compatible groups; changing evidence in dynamic context; missing cached tokens = unavailable.
 - Client timing measures first nonempty content; aggregate Crusoe metrics are not per-mission spans.
 - Inference and monitoring tokens are separate.
-</gate_5_live_crusoe_nemotron>
+  </gate_5_live_crusoe_nemotron>
 
 <gate_6_black_box_incident_acceptance>
 Verifier owns private scenario seeds and probes; runtime agents have no access to the manifest, expected repairs, evaluator credentials or scenario-control tools. Scenario classes: healthy control; benign unrelated change; repairable checkout fault; dependent change after proposed repair; second change during repair; conflicting observations; provider disruption; worker crash. Held-out variations in values/timing.

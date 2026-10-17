@@ -8,7 +8,11 @@ type Case = [name: string, schema: z.ZodType, sample: () => unknown];
 const cases: Case[] = [
   ['Scope', C.ScopeSchema, F.scope],
   ['ObservationReceipt', C.ObservationReceiptSchema, F.receipt],
-  ['ObservationReceipt (collection)', C.ObservationReceiptSchema, F.collectionReceipt],
+  [
+    'ObservationReceipt (collection)',
+    C.ObservationReceiptSchema,
+    F.collectionReceipt,
+  ],
   ['ReceiptConfirmation', C.ReceiptConfirmationSchema, F.confirmation],
   ['ReceiptTransition', C.ReceiptTransitionSchema, F.receiptTransition],
   ['ContextSnapshot', C.ContextSnapshotSchema, F.contextSnapshot],
@@ -36,7 +40,10 @@ const cases: Case[] = [
 const OPAQUE = new Set(['normalizedValue', 'content', 'summary']);
 
 /** Every path to a plain object inside the sample, excluding opaque fields. */
-function objectPaths(value: unknown, path: (string | number)[] = []): (string | number)[][] {
+function objectPaths(
+  value: unknown,
+  path: (string | number)[] = [],
+): (string | number)[][] {
   if (Array.isArray(value))
     return value.flatMap((item, i) => objectPaths(item, [...path, i]));
   if (value === null || typeof value !== 'object') return [];
@@ -49,7 +56,8 @@ function objectPaths(value: unknown, path: (string | number)[] = []): (string | 
 function withExtraKey(sample: unknown, path: (string | number)[], key: string) {
   const copy = structuredClone(sample) as Record<string | number, unknown>;
   let target: Record<string | number, unknown> = copy;
-  for (const step of path) target = target[step] as Record<string | number, unknown>;
+  for (const step of path)
+    target = target[step] as Record<string | number, unknown>;
   target[key] = 'x';
   return copy;
 }
@@ -60,14 +68,22 @@ describe('contract schemas', () => {
     expect(result.error?.issues ?? []).toEqual([]);
   });
 
-  it.each(cases)('%s rejects an unknown key at every object level', (_name, schema, sample) => {
-    const paths = objectPaths(sample());
-    expect(paths.length).toBeGreaterThan(0);
-    for (const path of paths) {
-      const result = schema.safeParse(withExtraKey(sample(), path, 'control'));
-      expect(result.success, `extra key accepted at ${path.join('.') || '<root>'}`).toBe(false);
-    }
-  });
+  it.each(cases)(
+    '%s rejects an unknown key at every object level',
+    (_name, schema, sample) => {
+      const paths = objectPaths(sample());
+      expect(paths.length).toBeGreaterThan(0);
+      for (const path of paths) {
+        const result = schema.safeParse(
+          withExtraKey(sample(), path, 'control'),
+        );
+        expect(
+          result.success,
+          `extra key accepted at ${path.join('.') || '<root>'}`,
+        ).toBe(false);
+      }
+    },
+  );
 
   it('CONTRACT_VERSION is v1', () => {
     expect(C.CONTRACT_VERSION).toBe('v1');
@@ -78,28 +94,51 @@ describe('invariants', () => {
   it('ids must be UUIDv4 and are not interchangeable with arbitrary strings', () => {
     expect(C.MissionIdSchema.safeParse(F.ids.mission).success).toBe(true);
     expect(C.MissionIdSchema.safeParse('not-a-uuid').success).toBe(false);
-    expect(C.MissionIdSchema.safeParse('6f1c1f9e-3c39-1a0c-9d37-6a3f0d0a1001').success).toBe(false);
+    expect(
+      C.MissionIdSchema.safeParse('6f1c1f9e-3c39-1a0c-9d37-6a3f0d0a1001')
+        .success,
+    ).toBe(false);
   });
 
   it('timestamps are ISO-8601 UTC', () => {
-    expect(C.IsoTimeSchema.safeParse('2026-10-17T18:00:00.000Z').success).toBe(true);
-    expect(C.IsoTimeSchema.safeParse('2026-10-17T18:00:00+02:00').success).toBe(false);
+    expect(C.IsoTimeSchema.safeParse('2026-10-17T18:00:00.000Z').success).toBe(
+      true,
+    );
+    expect(C.IsoTimeSchema.safeParse('2026-10-17T18:00:00+02:00').success).toBe(
+      false,
+    );
   });
 
   it('cachedTokens null means unavailable and is distinct from 0', () => {
     const unavailable = C.UsageSchema.parse(F.usage());
     expect(unavailable.cachedTokens).toBeNull();
-    expect(C.UsageSchema.parse({ ...F.usage(), cachedTokens: 0 }).cachedTokens).toBe(0);
-    expect(C.UsageSchema.safeParse({ ...F.usage(), cachedTokens: undefined }).success).toBe(false);
+    expect(
+      C.UsageSchema.parse({ ...F.usage(), cachedTokens: 0 }).cachedTokens,
+    ).toBe(0);
+    expect(
+      C.UsageSchema.safeParse({ ...F.usage(), cachedTokens: undefined })
+        .success,
+    ).toBe(false);
   });
 
   it('a cancelled inference attempt records usage as null', () => {
     const cancelled = { ...F.inferenceAttempt(), finishReason: 'cancelled' };
     expect(C.InferenceAttemptSchema.safeParse(cancelled).success).toBe(false);
-    const nulls = { promptTokens: null, completionTokens: null, cachedTokens: null, reasoningTokens: null };
-    expect(C.InferenceAttemptSchema.safeParse({ ...cancelled, usage: nulls }).success).toBe(true);
+    const nulls = {
+      promptTokens: null,
+      completionTokens: null,
+      cachedTokens: null,
+      reasoningTokens: null,
+    };
     expect(
-      C.InferenceAttemptSchema.safeParse({ ...F.inferenceAttempt(), outcome: 'orphaned_fence' }).success,
+      C.InferenceAttemptSchema.safeParse({ ...cancelled, usage: nulls })
+        .success,
+    ).toBe(true);
+    expect(
+      C.InferenceAttemptSchema.safeParse({
+        ...F.inferenceAttempt(),
+        outcome: 'orphaned_fence',
+      }).success,
     ).toBe(true);
   });
 
@@ -116,7 +155,10 @@ describe('invariants', () => {
     expect(union).toEqual([a, b]);
     expect(C.DependencyVectorSchema.safeParse(union).success).toBe(true);
     expect(() =>
-      C.unionDependencyVectors([a], [{ ...a, sourceRevision: a.sourceRevision + 1 }]),
+      C.unionDependencyVectors(
+        [a],
+        [{ ...a, sourceRevision: a.sourceRevision + 1 }],
+      ),
     ).toThrow(RangeError);
   });
 
@@ -127,17 +169,33 @@ describe('invariants', () => {
   });
 
   it('Finding.trust is always model_claim; receipts never carry model_claim', () => {
-    expect(C.FindingSchema.safeParse({ ...F.finding(), trust: 'probe' }).success).toBe(false);
-    expect(C.ObservationReceiptSchema.safeParse({ ...F.receipt(), trust: 'model_claim' }).success).toBe(false);
+    expect(
+      C.FindingSchema.safeParse({ ...F.finding(), trust: 'probe' }).success,
+    ).toBe(false);
+    expect(
+      C.ObservationReceiptSchema.safeParse({
+        ...F.receipt(),
+        trust: 'model_claim',
+      }).success,
+    ).toBe(false);
   });
 
   it('collection normalizedValue is { keys: sorted string[], collectionVersion }', () => {
     const unsorted = F.collectionReceipt();
-    unsorted.normalizedValue = { keys: ['db.pool_max', 'cache.namespace'], collectionVersion: 1 };
+    unsorted.normalizedValue = {
+      keys: ['db.pool_max', 'cache.namespace'],
+      collectionVersion: 1,
+    };
     expect(C.ObservationReceiptSchema.safeParse(unsorted).success).toBe(false);
     const withValues = F.collectionReceipt();
-    withValues.normalizedValue = { keys: ['cache.namespace'], collectionVersion: 1, values: {} } as never;
-    expect(C.ObservationReceiptSchema.safeParse(withValues).success).toBe(false);
+    withValues.normalizedValue = {
+      keys: ['cache.namespace'],
+      collectionVersion: 1,
+      values: {},
+    } as never;
+    expect(C.ObservationReceiptSchema.safeParse(withValues).success).toBe(
+      false,
+    );
   });
 
   it('normalizedValue is bounded to 16 KiB canonical', () => {
@@ -148,34 +206,51 @@ describe('invariants', () => {
 
   it('lastConfirmedAt cannot precede observedAt', () => {
     expect(
-      C.ObservationReceiptSchema.safeParse({ ...F.receipt(), lastConfirmedAt: '2026-10-17T17:00:00.000Z' }).success,
+      C.ObservationReceiptSchema.safeParse({
+        ...F.receipt(),
+        lastConfirmedAt: '2026-10-17T17:00:00.000Z',
+      }).success,
     ).toBe(false);
   });
 
   it('source types are consistent with authority and key family', () => {
     const r = F.receipt();
     expect(
-      C.SourceRefSchema.safeParse({ ...r.source, authority: 'observed' }).success,
+      C.SourceRefSchema.safeParse({ ...r.source, authority: 'observed' })
+        .success,
     ).toBe(false);
     expect(
-      C.SourceRefSchema.safeParse({ ...r.source, key: 'checkout.health' }).success,
+      C.SourceRefSchema.safeParse({ ...r.source, key: 'checkout.health' })
+        .success,
     ).toBe(false);
   });
 
   it('Task capabilities stay within ROLE_CAPABILITIES[role]; delegated tasks need a justification', () => {
     expect(
-      C.TaskSchema.safeParse({ ...F.task(), capabilities: ['observe', 'propose_config_change'] }).success,
+      C.TaskSchema.safeParse({
+        ...F.task(),
+        capabilities: ['observe', 'propose_config_change'],
+      }).success,
     ).toBe(false);
     const child = { ...F.task(), parentId: F.ids.task2, depth: 1 };
     expect(C.TaskSchema.safeParse(child).success).toBe(false);
-    expect(C.TaskSchema.safeParse({ ...child, justification: 'needs a specialist' }).success).toBe(true);
+    expect(
+      C.TaskSchema.safeParse({ ...child, justification: 'needs a specialist' })
+        .success,
+    ).toBe(true);
   });
 
   it('Mission.admission.minAgeMs is 0..60000', () => {
     for (const minAgeMs of [-1, 60001, 1.5])
-      expect(C.MissionSchema.safeParse({ ...F.mission(), admission: { minAgeMs } }).success).toBe(false);
+      expect(
+        C.MissionSchema.safeParse({ ...F.mission(), admission: { minAgeMs } })
+          .success,
+      ).toBe(false);
     for (const minAgeMs of [0, 60000])
-      expect(C.MissionSchema.safeParse({ ...F.mission(), admission: { minAgeMs } }).success).toBe(true);
+      expect(
+        C.MissionSchema.safeParse({ ...F.mission(), admission: { minAgeMs } })
+          .success,
+      ).toBe(true);
   });
 
   it('PlanSchema accepts 2..6 tasks only', () => {
@@ -186,17 +261,29 @@ describe('invariants', () => {
   });
 
   it('ActionIntent binds action, adapter, payload and target', () => {
-    expect(C.ActionIntentSchema.safeParse({ ...F.intent(), adapter: 'redis_cache' }).success).toBe(false);
+    expect(
+      C.ActionIntentSchema.safeParse({ ...F.intent(), adapter: 'redis_cache' })
+        .success,
+    ).toBe(false);
     expect(
       C.ActionIntentSchema.safeParse({
         ...F.intent(),
-        target: { ...F.intent().target, sourceKey: 'checkout.config/db.pool_max' },
+        target: {
+          ...F.intent().target,
+          sourceKey: 'checkout.config/db.pool_max',
+        },
       }).success,
     ).toBe(false);
     expect(
-      C.ActionIntentSchema.safeParse({ ...F.intent(), payload: { namespace: 'x', reason: 'y' } }).success,
+      C.ActionIntentSchema.safeParse({
+        ...F.intent(),
+        payload: { namespace: 'x', reason: 'y' },
+      }).success,
     ).toBe(false);
-    expect(C.ActionIntentSchema.safeParse({ ...F.intent(), status: 'blocked' }).success).toBe(false);
+    expect(
+      C.ActionIntentSchema.safeParse({ ...F.intent(), status: 'blocked' })
+        .success,
+    ).toBe(false);
     expect(
       C.ActionIntentSchema.safeParse({
         ...F.intent(),
@@ -204,15 +291,32 @@ describe('invariants', () => {
         blockReason: 'evidence_too_old',
       }).success,
     ).toBe(true);
-    expect(C.ActionIntentSchema.safeParse({ ...F.intent(), status: 'admitted' }).success).toBe(false);
+    expect(
+      C.ActionIntentSchema.safeParse({ ...F.intent(), status: 'admitted' })
+        .success,
+    ).toBe(false);
   });
 
   it('Authorization stage and decision agree', () => {
-    expect(C.AuthorizationSchema.safeParse({ ...F.authorization(), decision: 'committed' }).success).toBe(false);
     expect(
-      C.AuthorizationSchema.safeParse({ ...F.authorization(), decision: 'blocked', blockReason: 'citation_out_of_scope' }).success,
+      C.AuthorizationSchema.safeParse({
+        ...F.authorization(),
+        decision: 'committed',
+      }).success,
+    ).toBe(false);
+    expect(
+      C.AuthorizationSchema.safeParse({
+        ...F.authorization(),
+        decision: 'blocked',
+        blockReason: 'citation_out_of_scope',
+      }).success,
     ).toBe(true);
-    expect(C.AuthorizationSchema.safeParse({ ...F.authorization(), decision: 'blocked' }).success).toBe(false);
+    expect(
+      C.AuthorizationSchema.safeParse({
+        ...F.authorization(),
+        decision: 'blocked',
+      }).success,
+    ).toBe(false);
   });
 
   it('ProposeInput is discriminated by action', () => {
@@ -223,8 +327,13 @@ describe('invariants', () => {
       rationale: 'flush',
     };
     expect(C.ProposeInputSchema.safeParse(ok).success).toBe(true);
-    expect(C.ProposeInputSchema.safeParse({ ...ok, action: 'set_config' }).success).toBe(false);
-    expect(C.ProposeInputSchema.safeParse({ ...ok, missionId: F.ids.mission }).success).toBe(false);
+    expect(
+      C.ProposeInputSchema.safeParse({ ...ok, action: 'set_config' }).success,
+    ).toBe(false);
+    expect(
+      C.ProposeInputSchema.safeParse({ ...ok, missionId: F.ids.mission })
+        .success,
+    ).toBe(false);
   });
 
   it('MissionEvent kind must equal payload.kind', () => {
@@ -236,6 +345,9 @@ describe('invariants', () => {
       payload: { kind: 'heartbeat' },
     };
     expect(C.MissionEventSchema.safeParse(event).success).toBe(true);
-    expect(C.MissionEventSchema.safeParse({ ...event, kind: 'mission.status' }).success).toBe(false);
+    expect(
+      C.MissionEventSchema.safeParse({ ...event, kind: 'mission.status' })
+        .success,
+    ).toBe(false);
   });
 });

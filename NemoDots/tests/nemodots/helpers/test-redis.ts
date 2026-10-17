@@ -36,7 +36,8 @@ export async function unlinkByPrefix(client: TestRedisClient, prefix: string) {
     COUNT: 500,
   })) {
     batch.push(...keys);
-    while (batch.length >= 500) removed += await client.unlink(batch.splice(0, 500));
+    while (batch.length >= 500)
+      removed += await client.unlink(batch.splice(0, 500));
   }
   if (batch.length) removed += await client.unlink(batch);
   return removed;

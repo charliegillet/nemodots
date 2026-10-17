@@ -41,7 +41,10 @@ describe('withTransaction', () => {
       readOnly: true,
     });
     expect(result).toBe(42);
-    expect(log).toEqual(['BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY', 'COMMIT']);
+    expect(log).toEqual([
+      'BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY',
+      'COMMIT',
+    ]);
     expect(releases).toEqual([undefined]);
   });
 

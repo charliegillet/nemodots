@@ -128,7 +128,10 @@ export const CLOSED_INTENT_STATUSES = Object.freeze([
   'verified',
 ] as const satisfies readonly ActionStatus[]);
 
-export type OpenInvalidationAttempt = Pick<TaskAttempt, 'id' | 'status' | 'repairOf'>;
+export type OpenInvalidationAttempt = Pick<
+  TaskAttempt,
+  'id' | 'status' | 'repairOf'
+>;
 export type OpenInvalidationIntent = { id: string; status: ActionStatus };
 
 /**
@@ -154,7 +157,9 @@ export function openInvalidation(
     if (!entry) return false;
     affected = entry.affected;
   }
-  const byId = new Map(attempts.map((attempt) => [attempt.id as string, attempt]));
+  const byId = new Map(
+    attempts.map((attempt) => [attempt.id as string, attempt]),
+  );
   const successors = new Map<string, OpenInvalidationAttempt[]>();
   for (const attempt of attempts) {
     if (!attempt.repairOf) continue;
@@ -162,8 +167,15 @@ export function openInvalidation(
     list.push(attempt);
     successors.set(attempt.repairOf.attemptId, list);
   }
-  const resolved = (attempt: OpenInvalidationAttempt, seen: Set<string>): boolean => {
-    if ((CLOSED_ATTEMPT_STATUSES as readonly AttemptStatus[]).includes(attempt.status))
+  const resolved = (
+    attempt: OpenInvalidationAttempt,
+    seen: Set<string>,
+  ): boolean => {
+    if (
+      (CLOSED_ATTEMPT_STATUSES as readonly AttemptStatus[]).includes(
+        attempt.status,
+      )
+    )
       return true;
     if (attempt.status !== 'invalidated' || seen.has(attempt.id)) return false;
     seen.add(attempt.id);
@@ -182,7 +194,9 @@ export function openInvalidation(
     const intent = intentById.get(id);
     if (
       !intent ||
-      !(CLOSED_INTENT_STATUSES as readonly ActionStatus[]).includes(intent.status)
+      !(CLOSED_INTENT_STATUSES as readonly ActionStatus[]).includes(
+        intent.status,
+      )
     )
       return true;
   }

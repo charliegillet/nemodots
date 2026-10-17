@@ -16,7 +16,8 @@ const SCRIPT = path.resolve('scripts/nemodots/write-env.mjs');
 const SECRET_KEY = 'sk-test-ABCDEF0123456789secret';
 const dirs: string[] = [];
 afterEach(() => {
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  for (const dir of dirs.splice(0))
+    rmSync(dir, { recursive: true, force: true });
 });
 
 function envFile(content: string) {
@@ -28,7 +29,14 @@ function envFile(content: string) {
 }
 
 const write = (file: string, ...args: string[]) =>
-  run(process.execPath, [SCRIPT, '--file', file, '--instance', 'ci-unit', ...args]);
+  run(process.execPath, [
+    SCRIPT,
+    '--file',
+    file,
+    '--instance',
+    'ci-unit',
+    ...args,
+  ]);
 
 it('appends only non-secret NEMODOTS_* values and never echoes the file', async () => {
   const original = `OPENAI_API_KEY=${SECRET_KEY}\nOPENAI_MODEL=m\n`;
@@ -43,7 +51,9 @@ it('appends only non-secret NEMODOTS_* values and never echoes the file', async 
   expect(block).toContain('NEMODOTS_REDIS_URL=redis://127.0.0.1:56379/0\n');
   expect(block).toContain('NEMODOTS_REDIS_PREFIX=nemodots:ci-unit\n');
   expect(block).toContain('NEMODOTS_INFERENCE_MODE=fixture\n');
-  expect(block).not.toMatch(/NEMODOTS_PG_URL_|NEMODOTS_PROBE_SECRET|postgres:\/\//);
+  expect(block).not.toMatch(
+    /NEMODOTS_PG_URL_|NEMODOTS_PROBE_SECRET|postgres:\/\//,
+  );
   expect(statSync(file).mode & 0o777).toBe(0o600);
 });
 

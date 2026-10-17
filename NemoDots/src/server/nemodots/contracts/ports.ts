@@ -80,7 +80,10 @@ export interface MissionControlPort {
 
 export interface EventSinkPort {
   /** takes the events advisory xact lock; returns the event id */
-  append(client: PgClient, event: Omit<MissionEvent, 'id' | 'at'>): Promise<number>;
+  append(
+    client: PgClient,
+    event: Omit<MissionEvent, 'id' | 'at'>,
+  ): Promise<number>;
 }
 
 // Chat request/result shapes for InferencePort (OpenAI-compatible chat
@@ -137,5 +140,8 @@ export interface ProbePort {
 /** coordinator implements; watcher calls */
 export interface RecoveryPort {
   onInvalidation(event: InvalidationEvent): Promise<void>;
-  onSelfWriteSettled(actionId: ActionId, outcome: 'verified' | 'failed'): Promise<void>;
+  onSelfWriteSettled(
+    actionId: ActionId,
+    outcome: 'verified' | 'failed',
+  ): Promise<void>;
 }
