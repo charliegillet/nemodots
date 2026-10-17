@@ -28,6 +28,24 @@ export interface TxCtx {
 
 const TERMINAL: readonly TaskStatus[] = ['succeeded', 'failed', 'cancelled'];
 
+/**
+ * Serialises changes to one mission's task graph: task insertion (ordinal and
+ * the "one open postcondition task" rule) and dependency promotion. Mission row
+ * locks cannot do this alone: publications and recovery hold FOR SHARE, which
+ * is shared, and READ COMMITTED snapshots cannot see a sibling publication's
+ * uncommitted `succeeded`. Whoever takes this lock second runs its next
+ * statement after the first committed, so its snapshot includes that commit.
+ * Lock order: mission -> invalidation row -> attempt -> task -> task-graph lock.
+ */
+export async function lockTaskGraph(
+  client: pg.PoolClient,
+  missionId: MissionId | string,
+): Promise<void> {
+  await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+    `nemodots_task_graph:${missionId}`,
+  ]);
+}
+
 export interface NewTask {
   /** Pre-assigned id (plans reference tasks of the same plan before they exist). */
   id?: string;
@@ -50,12 +68,14 @@ export interface NewTask {
 }
 
 /**
- * Inserts a `pending` task with the next mission-wide ordinal (the caller holds
- * FOR UPDATE on the mission row, so ordinals never collide) and emits
- * task.created. Promote it with promoteRunnable.
+ * Inserts a `pending` task with the next mission-wide ordinal (taken under the
+ * mission's task-graph lock, so ordinals never collide whatever mission row
+ * lock the caller holds) and emits task.created. Promote it with
+ * promoteRunnable.
  */
 export async function insertTask(tx: TxCtx, task: NewTask): Promise<TaskRow> {
   const id = task.id ?? randomUUID();
+  await lockTaskGraph(tx.client, task.missionId);
   const { rows } = await tx.client.query<TaskRow>(
     `INSERT INTO coordinator.tasks (
        id, mission_id, parent_id, depth, ordinal, title, question, role,
@@ -163,34 +183,74 @@ export async function transitionTask(
   return rows[0];
 }
 
-/** pending -> runnable for every task of the mission whose prerequisites all succeeded. */
+/**
+ * Settles the dependency edges of a mission's pending tasks, under the task
+ * graph lock:
+ *  - pending -> runnable when every prerequisite succeeded;
+ *  - pending -> cancelled (reason `prerequisite_failed`) when a prerequisite
+ *    ended failed or cancelled, repeated until no more cascade, so a task that
+ *    can never become runnable does not stay pending forever.
+ * Every completing or failing publication calls it, and evaluateMission and the
+ * maintenance sweep call it again, so a promotion that raced a sibling's commit
+ * is never lost. Returns the ids promoted to runnable.
+ */
 export async function promoteRunnable(
   tx: TxCtx,
   missionId: MissionId | string,
 ): Promise<string[]> {
-  const { rows } = await tx.client.query<{ id: string }>(
-    `UPDATE coordinator.tasks t
-        SET status = 'runnable', transition_version = t.transition_version + 1
-      WHERE t.id IN (
-        SELECT c.id FROM coordinator.tasks c
-         WHERE c.mission_id = $1 AND c.status = 'pending'
-           AND NOT EXISTS (
-             SELECT 1 FROM coordinator.tasks p
-              WHERE p.id = ANY (c.prerequisites) AND p.status <> 'succeeded')
-         ORDER BY c.id
-           FOR UPDATE)
-      RETURNING t.id`,
-    [missionId],
-  );
-  for (const row of rows)
-    tx.events.add(missionId, {
-      kind: 'task.status',
-      taskId: row.id as TaskId,
-      from: 'pending',
-      to: 'runnable',
-      reason: 'prerequisites_succeeded',
-    });
-  return rows.map((row) => row.id);
+  await lockTaskGraph(tx.client, missionId);
+  const promoted: string[] = [];
+  for (let round = 0; round < 64; round += 1) {
+    const { rows } = await tx.client.query<{ id: string }>(
+      `UPDATE coordinator.tasks t
+          SET status = 'runnable', transition_version = t.transition_version + 1
+        WHERE t.id IN (
+          SELECT c.id FROM coordinator.tasks c
+           WHERE c.mission_id = $1 AND c.status = 'pending'
+             AND NOT EXISTS (
+               SELECT 1 FROM coordinator.tasks p
+                WHERE p.id = ANY (c.prerequisites) AND p.status <> 'succeeded')
+           ORDER BY c.id
+             FOR UPDATE)
+        RETURNING t.id`,
+      [missionId],
+    );
+    for (const row of rows)
+      tx.events.add(missionId, {
+        kind: 'task.status',
+        taskId: row.id as TaskId,
+        from: 'pending',
+        to: 'runnable',
+        reason: 'prerequisites_succeeded',
+      });
+    promoted.push(...rows.map((row) => row.id));
+    const cancelled = await tx.client.query<{ id: string }>(
+      `UPDATE coordinator.tasks t
+          SET status = 'cancelled', transition_version = t.transition_version + 1,
+              finished_at = now()
+        WHERE t.id IN (
+          SELECT c.id FROM coordinator.tasks c
+           WHERE c.mission_id = $1 AND c.status = 'pending'
+             AND EXISTS (
+               SELECT 1 FROM coordinator.tasks p
+                WHERE p.id = ANY (c.prerequisites)
+                  AND p.status IN ('failed', 'cancelled'))
+           ORDER BY c.id
+             FOR UPDATE)
+        RETURNING t.id`,
+      [missionId],
+    );
+    for (const row of cancelled.rows)
+      tx.events.add(missionId, {
+        kind: 'task.status',
+        taskId: row.id as TaskId,
+        from: 'pending',
+        to: 'cancelled',
+        reason: 'prerequisite_failed',
+      });
+    if (cancelled.rows.length === 0) break;
+  }
+  return promoted;
 }
 
 export interface RequeueOptions {

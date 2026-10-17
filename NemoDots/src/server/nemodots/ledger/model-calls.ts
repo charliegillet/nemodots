@@ -26,8 +26,8 @@ import {
   type Scope,
 } from '../contracts/index.js';
 import { addEdges, type EdgeInput, type NodeRef } from './edges.js';
-import { ModelCallRecordError } from './errors.js';
-import type { LedgerOptions } from './options.js';
+import { ModelCallRecordError, SupportError } from './errors.js';
+import { coordinatorSchema, type LedgerOptions } from './options.js';
 import { getReceiptRows } from './receipt-store.js';
 import { assertCurrent } from './support.js';
 
@@ -134,16 +134,94 @@ function modelCallEdges(
     edges.push({ kind: 'evidence', from: receipt, to: modelCall });
     edges.push({ kind: 'evidence', from: receipt, to: attempt });
   }
-  // Inheritance: outputs/handoffs injected into the context.
-  for (const artifact of snapshot.injected.inheritedArtifacts) {
-    if (artifact.kind !== 'task_output' && artifact.kind !== 'handoff')
-      continue;
-    if (!UUID.test(artifact.id)) continue;
-    const output: NodeRef = { kind: 'task_output', id: artifact.id };
+  // Inheritance: outputs/handoffs injected into the context (validated and
+  // locked by lockInheritedOutputs before any of this is written).
+  for (const id of inheritedOutputIds(snapshot)) {
+    const output: NodeRef = { kind: 'task_output', id };
     edges.push({ kind: 'inheritance', from: output, to: modelCall });
     edges.push({ kind: 'inheritance', from: output, to: attempt });
   }
   return edges;
+}
+
+/** Ids of the outputs and handoffs the context inherits (both live in task_outputs). */
+function inheritedOutputIds(snapshot: ContextSnapshot): string[] {
+  const ids = new Set<string>();
+  for (const artifact of snapshot.injected.inheritedArtifacts) {
+    if (artifact.kind !== 'task_output' && artifact.kind !== 'handoff')
+      continue;
+    if (!UUID.test(artifact.id))
+      throw new ModelCallRecordError(
+        'model_call_invalid',
+        `inherited ${artifact.kind} id is not a uuid`,
+      );
+    ids.add(artifact.id.toLowerCase());
+  }
+  return [...ids].sort();
+}
+
+/**
+ * Locks every inherited output FOR SHARE (id order) and refuses the call unless
+ * each exists, is still usable, and rests only on receipts the call cites. The
+ * lock is what ties the new inheritance edges to the closure: an invalidation
+ * of the output (FOR UPDATE on the same row) either committed before this read
+ * (the output is unusable, the call is refused) or waits until this transaction
+ * has written its edges and then reaches them. The stored dependency vector of
+ * the output is authoritative; the dependencyReceiptIds the caller lists in the
+ * snapshot are not trusted.
+ */
+async function lockInheritedOutputs(
+  client: PgClient,
+  ids: readonly string[],
+  cited: ReadonlySet<string>,
+  options?: LedgerOptions,
+): Promise<void> {
+  if (ids.length === 0) return;
+  const schema = coordinatorSchema(options);
+  const { rows } = await client.query<{
+    id: string;
+    usable: boolean;
+    dependency_vector: unknown;
+  }>(
+    `SELECT id, usable, dependency_vector FROM ${schema}.task_outputs
+      WHERE id = ANY($1::uuid[]) ORDER BY id FOR SHARE`,
+    [ids],
+  );
+  const found = new Map(rows.map((row) => [row.id, row]));
+  for (const id of ids) {
+    const row = found.get(id);
+    if (!row)
+      throw new ModelCallRecordError(
+        'model_call_invalid',
+        `inherited output ${id} does not exist`,
+      );
+    if (!row.usable)
+      throw new SupportError(
+        'stale_version',
+        `inherited output ${id} is no longer usable`,
+      );
+    const vector = Array.isArray(row.dependency_vector)
+      ? (row.dependency_vector as unknown[])
+      : null;
+    if (!vector)
+      throw new ModelCallRecordError(
+        'model_call_invalid',
+        `inherited output ${id} has no readable dependency vector`,
+      );
+    for (const entry of vector) {
+      const receiptId = (entry as { receiptId?: unknown } | null)?.receiptId;
+      if (typeof receiptId !== 'string')
+        throw new ModelCallRecordError(
+          'model_call_invalid',
+          `inherited output ${id} has a malformed dependency vector entry`,
+        );
+      if (!cited.has(receiptId))
+        throw new ModelCallRecordError(
+          'model_call_invalid',
+          `inherited output ${id} rests on receipt ${receiptId}, which the call does not cite`,
+        );
+    }
+  }
 }
 
 /**
@@ -195,11 +273,19 @@ export async function recordModelCall(
         'outputDependencyVector must contain the snapshot dependencyVector (citations add, never remove)',
       );
 
-  // Currency first: locks the controlled rows and observed registry rows FOR
-  // SHARE, so the edges inserted below cannot be missed by a closure.
+  // Lock order (prelock.ts): coordinator rows (the inherited outputs) first,
+  // then the ledger rows assertCurrent locks.
   const receiptIds = record.outputDependencyVector.map(
     (entry) => entry.receiptId,
   );
+  await lockInheritedOutputs(
+    client,
+    inheritedOutputIds(snapshot),
+    new Set<string>(receiptIds),
+    options,
+  );
+  // Currency: locks the controlled rows, observed registry rows and receipt
+  // rows FOR SHARE, so the edges inserted below cannot be missed by a closure.
   await assertCurrent(client, receiptIds, { lockMode: 'share' }, options);
   const stored = await getReceiptRows(client, receiptIds);
   for (const entry of record.outputDependencyVector) {

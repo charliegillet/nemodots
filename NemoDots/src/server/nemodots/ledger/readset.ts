@@ -2,11 +2,20 @@
 // receipt -> attempt (CONTRACTS.md section 4, TaskAttempt.readSetReceiptIds).
 // recordModelCall adds the edges of a call's whole vector; recordReadSet adds
 // receipts a tool read without a model call yet (observe_source results).
+//
+// recordReadSet is a publication of evidence: it asserts the receipts are
+// current under the same locks a closure conflicts with (config rows, observed
+// registry rows, the receipt rows, all FOR SHARE) BEFORE the edges are written.
+// A supersession either waits for this transaction and then sees the edges, or
+// ran first and the read set is refused. Without that, an attempt could come to
+// rest on a receipt whose closure had already been computed (a lost
+// invalidation).
 import type { BlockReason, PgClient, ReceiptId } from '../contracts/index.js';
 import { addEdges, type AddEdgesResult } from './edges.js';
 import type { LedgerOptions } from './options.js';
 import { getReceiptRows } from './receipt-store.js';
 import { liveVersion } from './sources.js';
+import { assertCurrent } from './support.js';
 
 export async function recordReadSet(
   client: PgClient,
@@ -16,7 +25,15 @@ export async function recordReadSet(
     attemptId: string;
     receiptIds: readonly string[];
   },
+  options?: LedgerOptions,
 ): Promise<AddEdgesResult> {
+  const receiptIds = [...new Set(input.receiptIds)];
+  await assertCurrent(
+    client,
+    receiptIds as ReceiptId[],
+    { lockMode: 'share' },
+    options,
+  );
   const attempt = {
     kind: 'attempt' as const,
     id: input.attemptId,
@@ -25,7 +42,7 @@ export async function recordReadSet(
   };
   return addEdges(
     client,
-    [...new Set(input.receiptIds)].map((id) => ({
+    receiptIds.map((id) => ({
       kind: 'evidence' as const,
       from: { kind: 'receipt' as const, id },
       to: attempt,

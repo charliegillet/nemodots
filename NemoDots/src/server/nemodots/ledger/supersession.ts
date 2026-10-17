@@ -32,7 +32,7 @@ import {
 import {
   buildClosure,
   CLOSURE_LIMITS,
-  emptyAffected,
+  DEAD_ATTEMPT_STATUSES,
   type ClosureLimits,
   type ClosureResult,
   type GraphNodeKind,
@@ -111,7 +111,7 @@ export async function loadClosure(
   if (depth > limits.maxDepth) throw await capExceeded('depth');
 
   const reached = reachedQuery.rows;
-  const meta = await loadNodeMeta(client, reached);
+  const meta = await loadNodeMeta(client, reached, options);
   const missionIds = [
     ...new Set(
       meta.flatMap((node) => (node.missionId ? [node.missionId] : [])),
@@ -145,6 +145,7 @@ async function directMissionIds(
 async function loadNodeMeta(
   client: PgClient,
   reached: readonly { kind: GraphNodeKind; id: string }[],
+  options?: LedgerOptions,
 ): Promise<NodeMeta[]> {
   if (reached.length === 0) return [];
   const { rows } = await client.query<{
@@ -159,6 +160,11 @@ async function loadNodeMeta(
     [reached.map((node) => node.kind), reached.map((node) => node.id)],
   );
   const known = new Map(rows.map((row) => [`${row.kind}:${row.id}`, row]));
+  const dead = await loadDeadAttempts(
+    client,
+    reached.filter((node) => node.kind === 'attempt').map((node) => node.id),
+    options,
+  );
   return reached.map((node) => {
     const row = known.get(`${node.kind}:${node.id}`);
     return {
@@ -166,8 +172,36 @@ async function loadNodeMeta(
       id: node.id,
       missionId: row?.mission_id ?? null,
       taskId: row?.task_id ?? null,
+      ...(node.kind === 'attempt' && dead.has(node.id)
+        ? { attemptLive: false }
+        : {}),
     };
   });
+}
+
+/**
+ * Ids of the given attempts the coordinator reports as ended without being the
+ * task's result (closure rule R2). Attempts the coordinator does not know (a
+ * graph-only fixture, or a coordinator schema that is not migrated) stay live.
+ */
+async function loadDeadAttempts(
+  client: PgClient,
+  attemptIds: readonly string[],
+  options?: LedgerOptions,
+): Promise<Set<string>> {
+  if (attemptIds.length === 0) return new Set();
+  const schema = coordinatorSchema(options);
+  const present = await client.query<{ present: boolean }>(
+    'SELECT to_regclass($1) IS NOT NULL AS present',
+    [`${schema}.task_attempts`],
+  );
+  if (!present.rows[0]?.present) return new Set();
+  const { rows } = await client.query<{ id: string }>(
+    `SELECT id FROM ${schema}.task_attempts
+      WHERE id = ANY($1::uuid[]) AND status = ANY($2::text[])`,
+    [attemptIds, [...DEAD_ATTEMPT_STATUSES]],
+  );
+  return new Set(rows.map((row) => row.id));
 }
 
 /**
@@ -497,25 +531,44 @@ export interface CoarseInvalidation {
   nodes?: number;
 }
 
+/** The union of the coarse affected sets: what a cap-path registration marks. */
+export function coarseAffected(coarse: CoarseInvalidation | undefined): Affected {
+  return unionAffected((coarse?.perMission ?? []).map((entry) => entry.affected));
+}
+
 /**
  * The cap path (C14): registers `draft` and supersedes the prior head WITHOUT
  * running the closure, and records a coarse invalidation event
  * (reason closure_cap_exceeded, closure.capped = true) whose affected set is
  * the union of `coarse.perMission`. The caller (the watcher) has already
  * paused the missions in a transaction of its own.
+ *
+ * Superseding a live head without a coarse set would leave every dependent
+ * usable under a superseded receipt with nothing to drive repair, so it throws
+ * CoarseInvalidationRequiredError before writing. The coarse set is marked with
+ * the same compare-and-set as a real closure (rows named by `locked` are
+ * already held, see prelock.ts).
  */
 export async function supersedeWithoutClosure(
   client: PgClient,
-  input: Omit<SupersedeInput, 'limits' | 'marker'> & {
+  input: Omit<SupersedeInput, 'limits'> & {
     coarse?: CoarseInvalidation;
   },
 ): Promise<SupersedeResult> {
   const { prior, draft } = input;
+  const live = isLiveHead(prior);
+  if (live && (input.coarse?.perMission.length ?? 0) === 0)
+    throw new CoarseInvalidationRequiredError(input.sourceKey);
+  const affected = coarseAffected(input.coarse);
+  if (live) {
+    await lockReceiptForTransition(client, prior.id);
+    if (input.locked) assertLocked(input.locked, affected);
+  }
   const receipt = await insertReceipt(client, {
     ...draft,
     supersedes: prior ? prior.id : null,
   });
-  if (!isLiveHead(prior))
+  if (!live)
     return { receipt, supersededReceiptId: null, event: null, marks: null };
   const eventId = invalidationEventId(
     input.sourceKey,
@@ -540,8 +593,12 @@ export async function supersedeWithoutClosure(
       input.transitionReason,
       eventId,
     );
-  const perMission = input.coarse?.perMission ?? [];
-  const affected = unionAffected(perMission.map((entry) => entry.affected));
+  const marker =
+    input.marker === undefined
+      ? createCoordinatorMarker(input.ledger)
+      : input.marker;
+  const marks = marker ? await marker.mark(client, { eventId, affected }) : null;
+  const perMission = input.coarse!.perMission;
   const event = await insertInvalidationEvent(client, {
     sourceId: prior.sourceId,
     sourceKey: input.sourceKey,
@@ -558,7 +615,7 @@ export async function supersedeWithoutClosure(
       capped: true,
     },
   });
-  return { receipt, supersededReceiptId: prior.id, event, marks: null };
+  return { receipt, supersededReceiptId: prior.id, event, marks };
 }
 
 /**
@@ -575,6 +632,8 @@ export async function invalidateRetired(
     limits?: ClosureLimits;
     marker?: ClosureMarker | null;
     ledger?: LedgerOptions;
+    /** Coordinator rows the caller has locked (prelock.ts). */
+    locked?: Affected;
   },
 ): Promise<{ event: InvalidationEvent; marks: MarkSummary | null }> {
   const closure = await loadClosure(
@@ -583,6 +642,7 @@ export async function invalidateRetired(
     input.limits,
     input.ledger,
   );
+  if (input.locked) assertLocked(input.locked, closure.affected);
   const eventId = invalidationEventId(
     input.sourceKey,
     input.receipt.id,

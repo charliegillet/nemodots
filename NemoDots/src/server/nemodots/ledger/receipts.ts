@@ -6,6 +6,18 @@
 // Every function needs a client inside an open transaction (BEGIN ...
 // COMMIT) owned by the caller; the sources row lock and the controlled-row
 // FOR SHARE lock live exactly as long as that transaction.
+//
+// Lock order (prelock.ts): the coordinator rows a closure marks are locked
+// FIRST, then the controlled config rows, the sources row and the receipt row.
+// Registrations that can mark run inside runWithClosureLocks.
+//
+// Known limit (controlled receipts): a controlled receipt's currency is the
+// authority version, and unique (source_id, source_revision) allows one receipt
+// per version. A controlled receipt that was retracted or expired by hand
+// therefore cannot be replaced by re-observing the same version
+// (ReceiptNotRegistrableError); the authority row has to advance. Controlled
+// registrations may not carry expiresAt for the same reason (the expiry could
+// never be repaired by observation); explicit retraction stays possible.
 import {
   assertTransition,
   CollectionValueSchema,
@@ -15,6 +27,7 @@ import {
   NORMALIZED_VALUE_MAX_BYTES,
   SOURCE_KEY_PATTERN,
   SourceRefSchema,
+  type Affected,
   type AttemptId,
   type Digest,
   type InvalidationEvent,
@@ -41,6 +54,10 @@ import {
 import type { ClosureLimits } from './closure.js';
 import type { LedgerOptions } from './options.js';
 import {
+  runWithClosureLocks,
+  type ClosureLockPlan,
+} from './prelock.js';
+import {
   appendConfirmation,
   getReceiptRow,
   headReceipt,
@@ -52,14 +69,18 @@ import {
 } from './receipt-store.js';
 import {
   COLLECTION_SOURCE_KEY,
+  configMemberKey,
   ensureSource,
+  liveMember,
   liveMemberKeys,
   liveVersion,
   lockSource,
   type SourceRow,
 } from './sources.js';
 import {
+  coarseAffected,
   invalidateRetired,
+  loadClosure,
   supersedeAndInvalidate,
   supersedeWithoutClosure,
   type ClosureMarker,
@@ -229,6 +250,11 @@ function prepare(input: RegisterObservationInput): Prepared {
       'only controlled sources carry trust controlled_authority',
     );
 
+  if (ref.authority === 'controlled' && input.expiresAt)
+    throw new InvalidObservationError(
+      'controlled receipts do not expire: their currency is the authority version',
+    );
+
   const selfWrite = input.provenance.selfWrite ?? 'none';
   const causedByActionId = input.provenance.causedByActionId ?? null;
   if (selfWrite !== 'none' && causedByActionId === null)
@@ -253,12 +279,81 @@ function prepare(input: RegisterObservationInput): Prepared {
   };
 }
 
+/**
+ * observedAt may lead the database clock by at most this much (sampling clocks
+ * drift). A future time would keep a receipt "fresh" without any later
+ * confirmation (lastConfirmedAt = max(observed_at, confirmations)), defeating
+ * freshness at admission (I2/D3).
+ */
+export const MAX_OBSERVED_AT_SKEW_MS = 5_000;
+
+async function assertObservedAtBound(
+  client: PgClient,
+  observedAt: Date | null,
+): Promise<void> {
+  if (!observedAt) return;
+  const { rows } = await client.query<{ future: boolean }>(
+    `SELECT $1::timestamptz > clock_timestamp() + ($2::int * interval '1 millisecond') AS future`,
+    [observedAt, MAX_OBSERVED_AT_SKEW_MS],
+  );
+  if (rows[0]?.future)
+    throw new InvalidObservationError(
+      `observedAt is more than ${MAX_OBSERVED_AT_SKEW_MS} ms ahead of the database clock`,
+    );
+}
+
 /** Claimed revisions: older than the assignable one is stale, newer is a mismatch. */
 function checkClaim(claimed: number | undefined, expected: number) {
   if (claimed === undefined || claimed === expected) return;
   if (claimed < expected)
     throw new StaleObservationRejectedError(claimed, expected);
   throw new RevisionMismatchError(claimed, expected);
+}
+
+const MEMBER_VALUE_FIELDS = ['key', 'value', 'version'];
+
+/**
+ * A member observation is `{ key, value, version }` (ARCHITECTURE 9.4) and has
+ * to describe the authority row this transaction holds FOR SHARE: the same
+ * key, the live version (an older one is a stale read, a newer one cannot
+ * exist) and the live value. Anything else would certify content the authority
+ * does not hold as current.
+ */
+async function checkMemberValue(
+  client: PgClient,
+  sourceKey: string,
+  revision: number,
+  value: unknown,
+  options: RegisterOptions,
+): Promise<void> {
+  const memberKey = configMemberKey(sourceKey)!;
+  const shaped =
+    typeof value === 'object' && value !== null && !Array.isArray(value);
+  const record = shaped ? (value as Record<string, unknown>) : null;
+  if (
+    !record ||
+    Object.keys(record).sort().join() !== MEMBER_VALUE_FIELDS.join() ||
+    typeof record.key !== 'string' ||
+    record.value === undefined ||
+    !Number.isInteger(record.version)
+  )
+    throw new InvalidObservationError(
+      'controlled member value must be { key, value, version }',
+    );
+  if (record.key !== memberKey)
+    throw new InvalidObservationError(
+      'controlled member value names another key than the source',
+    );
+  const version = record.version as number;
+  if (version < revision)
+    throw new StaleObservationRejectedError(version, revision);
+  if (version > revision) throw new RevisionMismatchError(version, revision);
+  const member = await liveMember(client, memberKey, options.ledger);
+  if (!member) throw new ControlledSourceMissingError(sourceKey);
+  if (digest(record.value) !== digest(member.value))
+    throw new DigestMismatchError(
+      `the value does not match the authority row of ${sourceKey} at version ${revision}`,
+    );
 }
 
 interface ControlledReading {
@@ -290,6 +385,7 @@ async function readControlled(
   if (!isCollection) {
     if (collectionRevision === null)
       throw new ControlledSourceMissingError(COLLECTION_SOURCE_KEY);
+
     if (
       input.collectionRevision !== undefined &&
       input.collectionRevision !== null &&
@@ -323,6 +419,8 @@ async function readControlled(
       );
   }
   checkClaim(input.claimed?.sourceRevision, revision);
+  if (!isCollection)
+    await checkMemberValue(client, key, revision, prepared.value, options);
   return { revision, collectionRevision };
 }
 
@@ -355,15 +453,54 @@ function derivedReason(
   return 'newer_observation';
 }
 
+const isLive = (head: ReceiptRow | null): head is ReceiptRow =>
+  head !== null && (head.status === 'supported' || head.status === 'contested');
+
+/**
+ * Unlocked look at what a registration will mark: the closure of the live
+ * head, or null when the call can only confirm (or is refused) and so writes no
+ * mark. The locked body re-reads everything; a wrong guess only costs a round
+ * (prelock.ts).
+ */
+async function previewRegistration(
+  client: PgClient,
+  source: SourceRow,
+  prepared: Prepared,
+  options: RegisterOptions,
+): Promise<Affected | null> {
+  if (options.closure === 'skip') return coarseAffected(options.coarse);
+  const head = await headReceipt(client, source.id);
+  if (!isLive(head)) return null;
+  if (source.authority === 'controlled') {
+    const live = await liveVersion(client, [source.key], 'none', options.ledger);
+    if (live.get(source.key) === head.sourceRevision) return null;
+  } else if (
+    head.status === 'supported' &&
+    head.contentDigest === prepared.digest
+  )
+    return null;
+  const closure = await loadClosure(
+    client,
+    { receiptId: head.id, sourceKey: source.key },
+    options.limits,
+    options.ledger,
+  );
+  return closure.affected;
+}
+
 /**
  * ARCHITECTURE 5.2 steps 1-5 in the caller's transaction:
+ *   0. the coordinator rows the closure will mark are locked first (prelock.ts),
+ *      so a publication or commit holding one of them finishes instead of
+ *      deadlocking with the lock sequence below;
  *   1. ensureSource, then the sources row FOR UPDATE (serializes concurrent
  *      registrations of one source, C8);
- *   2. controlled: revision = the authority's version read FOR SHARE here; a
- *      lower revision than the head's or than the live version is refused,
- *      A->B->A always mints a new revision. Observed: same digest as a
- *      supported head -> a receipt_confirmations row and the head returned, no
- *      revision minted (I2/D3); different digest -> revision head + 1;
+ *   2. controlled: revision = the authority's version read FOR SHARE here, the
+ *      value checked against the locked authority row; a lower revision than
+ *      the head's or than the live version is refused, A->B->A always mints a
+ *      new revision. Observed: same digest as a supported head -> a
+ *      receipt_confirmations row and the head returned, no revision minted
+ *      (I2/D3); different digest -> revision head + 1;
  *   3. new receipt `supported`, prior head superseded (transition row + CAS);
  *   4. the closure over evidence + inheritance edges, marks and the
  *      InvalidationEvent. ClosureCapExceeded is thrown before step 3 writes.
@@ -374,11 +511,55 @@ export async function registerObservation(
   options: RegisterOptions = {},
 ): Promise<RegisterResult> {
   const prepared = prepare(input);
+  await assertObservedAtBound(client, prepared.observedAt);
   const source = await ensureSource(client, prepared.ref);
   if (options.hooks?.afterPreliminaryRead) {
     const head = await headReceipt(client, source.id);
     await options.hooks.afterPreliminaryRead({ sourceId: source.id, head });
   }
+  const plan: ClosureLockPlan = {
+    // marker === null: nothing is written to the coordinator, nothing to lock.
+    enabled: options.marker !== null,
+    ledger: options.ledger,
+    preview: () => previewRegistration(client, source, prepared, options),
+  };
+  return runWithClosureLocks(client, plan, (locked) =>
+    registerLocked(
+      client,
+      source,
+      prepared,
+      input,
+      options,
+      plan.enabled ? locked : undefined,
+    ),
+  );
+}
+
+function sameNegative(
+  a: ObservationReceipt['negative'],
+  b: ObservationReceipt['negative'],
+): boolean {
+  return (
+    a !== null &&
+    b !== null &&
+    a.predicate === b.predicate &&
+    a.collectionRevision === b.collectionRevision
+  );
+}
+
+async function registerLocked(
+  client: PgClient,
+  source: SourceRow,
+  prepared: Prepared,
+  input: RegisterObservationInput,
+  options: RegisterOptions,
+  locked: Affected | undefined,
+): Promise<RegisterResult> {
+  // Documented order: authority rows, then the registry row, then the receipt.
+  const reading =
+    source.authority === 'controlled'
+      ? await readControlled(client, prepared, input, options)
+      : null;
   await lockSource(client, source.id);
 
   const head = await headReceipt(client, source.id);
@@ -386,8 +567,7 @@ export async function registerObservation(
   let collectionRevision: number | null = null;
   let confirmHead = false;
 
-  if (source.authority === 'controlled') {
-    const reading = await readControlled(client, prepared, input, options);
+  if (reading) {
     revision = reading.revision;
     collectionRevision = reading.collectionRevision;
     if (head && head.sourceRevision > revision)
@@ -416,10 +596,18 @@ export async function registerObservation(
   }
 
   if (confirmHead && head) {
+    // A confirmation refreshes freshness only. It cannot add or change the
+    // membership predicate the receipt carries (D1), so a caller relying on
+    // a predicate the receipt does not hold is refused, not silently served.
+    if (input.negative && !sameNegative(head.negative, input.negative))
+      throw new InvalidObservationError(
+        'the current receipt does not carry this membership predicate; a re-observation of an unchanged collection cannot add or change it',
+      );
     const confirmedAt = await appendConfirmation(
       client,
       head.id,
       confirmationInput(prepared.provenance),
+      prepared.observedAt,
     );
     const current = await getReceiptRow(client, head.id);
     return {
@@ -460,6 +648,8 @@ export async function registerObservation(
     transitionReason,
     sourceKey: source.key,
     ledger: options.ledger,
+    marker: options.marker,
+    locked,
   };
   const result =
     options.closure === 'skip'
@@ -470,7 +660,6 @@ export async function registerObservation(
       : await supersedeAndInvalidate(client, {
           ...base,
           limits: options.limits,
-          marker: options.marker,
         });
   return {
     receipt: toReceipt(result.receipt),
@@ -507,6 +696,39 @@ export async function transitionReceipt(
   input: TransitionReceiptInput,
   options: Pick<RegisterOptions, 'ledger' | 'limits' | 'marker'> = {},
 ): Promise<TransitionReceiptResult> {
+  const retiring = input.to === 'retracted' || input.to === 'expired';
+  const plan: ClosureLockPlan = {
+    enabled: retiring && options.marker !== null,
+    ledger: options.ledger,
+    preview: async () => {
+      const probe = await getReceiptRow(client, input.receiptId);
+      if (probe.status !== 'supported' && probe.status !== 'contested')
+        return null;
+      const closure = await loadClosure(
+        client,
+        { receiptId: probe.id, sourceKey: probe.sourceKey },
+        options.limits,
+        options.ledger,
+      );
+      return closure.affected;
+    },
+  };
+  return runWithClosureLocks(client, plan, (locked) =>
+    transitionLocked(
+      client,
+      input,
+      options,
+      plan.enabled ? locked : undefined,
+    ),
+  );
+}
+
+async function transitionLocked(
+  client: PgClient,
+  input: TransitionReceiptInput,
+  options: Pick<RegisterOptions, 'ledger' | 'limits' | 'marker'>,
+  locked: Affected | undefined,
+): Promise<TransitionReceiptResult> {
   const probe = await getReceiptRow(client, input.receiptId);
   const source: SourceRow = await lockSource(client, probe.sourceId);
   const receipt = await getReceiptRow(client, input.receiptId);
@@ -529,6 +751,7 @@ export async function transitionReceipt(
       limits: options.limits,
       marker: options.marker,
       ledger: options.ledger,
+      locked,
     });
     invalidation = retired.event;
     marks = retired.marks;

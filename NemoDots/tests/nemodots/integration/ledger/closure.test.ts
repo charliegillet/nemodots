@@ -1120,7 +1120,13 @@ describe('caps (C14)', () => {
       closure: { capped: true, depth: 0, nodes: 10_001 },
       missionIds: [missionId],
     });
-    expect(registered.marks).toBeNull();
+    // The coarse set is empty here: the marker runs and moves nothing.
+    expect(registered.marks).toEqual({
+      attemptsInvalidated: [],
+      tasksInvalidated: [],
+      outputsUnusable: [],
+      intentsBlocked: [],
+    });
     const stored = await getInvalidationEvent(app, registered.invalidation!.id);
     expect(stored).toEqual(registered.invalidation);
     expect(

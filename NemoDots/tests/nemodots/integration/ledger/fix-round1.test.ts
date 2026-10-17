@@ -26,6 +26,7 @@ import {
   backendPid,
   count,
   inTx,
+  insertConfig,
   newScope,
   readMember,
   resetAuthority,
@@ -789,5 +790,281 @@ describe('registerWithoutClosure (cap path)', () => {
     });
     expect(await statusOf('task_attempts', attempt.id)).toBe('invalidated');
     expect(await statusOf('action_intents', intentId)).toBe('blocked');
+  });
+});
+
+// --- 9. a dead attempt does not taint a repaired task (closure rule R2) ------
+
+describe('closure rule R2: dead attempts', () => {
+  it('a repaired task whose invalidated attempt read the changed receipt is not invalidated again', async () => {
+    const { app, admin } = getDb();
+    const scope = newScope();
+    const health = await registerHealth(scope, { status: 'ok' });
+    const redis = await inTx(app, (client) =>
+      registerObservation(
+        client,
+        {
+          source: sourceRef(scope, 'redis.stats'),
+          normalizedValue: { hits: 1 },
+          provenance: { kind: 'watcher' },
+        },
+        { ledger: FX, marker: null },
+      ),
+    );
+    const taskId = randomUUID();
+    const oldAttempt = randomUUID();
+    const newAttempt = randomUUID();
+    await admin.query(
+      `INSERT INTO fx_coordinator.tasks (id, mission_id, status) VALUES ($1, $2, 'succeeded')`,
+      [taskId, scope.missionId],
+    );
+    await admin.query(
+      `INSERT INTO fx_coordinator.task_attempts (id, task_id, mission_id, status)
+       VALUES ($1, $3, $4, 'running'), ($2, $3, $4, 'running')`,
+      [oldAttempt, newAttempt, taskId, scope.missionId],
+    );
+    await inTx(app, async (client) => {
+      await recordReadSet(
+        client,
+        {
+          missionId: scope.missionId,
+          taskId,
+          attemptId: oldAttempt,
+          receiptIds: [health.receipt.id],
+        },
+        FX,
+      );
+      await recordReadSet(
+        client,
+        {
+          missionId: scope.missionId,
+          taskId,
+          attemptId: newAttempt,
+          receiptIds: [redis.receipt.id],
+        },
+        FX,
+      );
+    });
+    // The first attempt was invalidated earlier and its repair attempt published.
+    await admin.query(
+      `UPDATE fx_coordinator.task_attempts SET status = 'invalidated', abort_reason = 'readset_invalidated' WHERE id = $1`,
+      [oldAttempt],
+    );
+    await admin.query(
+      `UPDATE fx_coordinator.task_attempts SET status = 'published' WHERE id = $1`,
+      [newAttempt],
+    );
+
+    const result = await inTx(app, (client) =>
+      registerObservation(
+        client,
+        {
+          source: sourceRef(scope, 'checkout.health'),
+          normalizedValue: { status: 'down' },
+          provenance: { kind: 'watcher' },
+        },
+        { ledger: FX },
+      ),
+    );
+    expect(result.invalidation!.affected.taskIds).toEqual([]);
+    expect(result.marks!.tasksInvalidated).toEqual([]);
+    expect(result.invalidation!.perMission[0].preserved.taskIds).toEqual([
+      taskId,
+    ]);
+    expect(await statusOf('tasks', taskId)).toBe('succeeded');
+  });
+});
+
+// --- 10. a read set that is still open cannot be missed by the closure -------
+
+describe('recordReadSet versus a concurrent registration', () => {
+  it('the registration waits for the open read set and then reaches its attempt', async () => {
+    const { app, admin } = getDb();
+    const scope = newScope();
+    const first = await registerHealth(scope, { status: 'ok' });
+    const attempt = await insertAttempt(scope);
+
+    const reader = await open(app);
+    await reader.query('BEGIN');
+    await recordReadSet(
+      reader,
+      {
+        missionId: scope.missionId,
+        taskId: attempt.taskId,
+        attemptId: attempt.id,
+        receiptIds: [first.receipt.id],
+      },
+      FX,
+    );
+
+    const registrar = await open(app);
+    const pid = await backendPid(registrar);
+    await registrar.query('BEGIN');
+    const registration = registerObservation(
+      registrar,
+      {
+        source: sourceRef(scope, 'checkout.health'),
+        normalizedValue: { status: 'down' },
+        provenance: { kind: 'watcher' },
+      },
+      { ledger: FX },
+    );
+    // Before the fix it completed at once with an empty closure.
+    expect(await waitsOnLock(admin, pid, 3_000)).toBe(true);
+    await reader.query('COMMIT');
+    const result = await withTimeout(registration, 5_000, 'registration');
+    await registrar.query('COMMIT');
+
+    expect(result.invalidation!.affected.attemptIds).toEqual([attempt.id]);
+    expect(await statusOf('task_attempts', attempt.id)).toBe('invalidated');
+  });
+});
+
+// --- 11. confirmations carry the sample time, not the arrival time -----------
+
+describe('confirmation freshness', () => {
+  const observeHealth = (scope: TestScope, observedAt?: Date) =>
+    inTx(getDb().app, (client) =>
+      registerObservation(
+        client,
+        {
+          source: sourceRef(scope, 'checkout.health'),
+          normalizedValue: { status: 'ok' },
+          provenance: { kind: 'watcher' },
+          ...(observedAt ? { observedAt } : {}),
+        },
+        { ledger: FX, marker: null },
+      ),
+    );
+
+  it('a same-digest re-observation sampled earlier does not claim to be fresh now', async () => {
+    const scope = newScope();
+    const tenMinutes = Date.now() - 600_000;
+    const fiveMinutes = Date.now() - 300_000;
+    await observeHealth(scope, new Date(tenMinutes));
+    const again = await observeHealth(scope, new Date(fiveMinutes));
+    expect(again.newRevision).toBe(false);
+    expect(Date.parse(again.confirmation!.confirmedAt)).toBe(fiveMinutes);
+    expect(Date.parse(again.receipt.lastConfirmedAt)).toBe(fiveMinutes);
+    // ... so a 120 s freshness policy still refuses it.
+    const error = await inTx(getDb().app, (client) =>
+      assertCurrent(
+        client,
+        [again.receipt.id],
+        { lockMode: 'share', freshness: { 'checkout.health': 120_000 } },
+        FX,
+      ),
+    ).catch((e: unknown) => e);
+    expect((error as SupportError).reason).toBe('evidence_too_old');
+  });
+
+  it('a re-observation without a sample time is stamped now, and a future one is refused', async () => {
+    const scope = newScope();
+    await observeHealth(scope, new Date(Date.now() - 600_000));
+    const now = await observeHealth(scope);
+    expect(Date.now() - Date.parse(now.receipt.lastConfirmedAt)).toBeLessThan(
+      30_000,
+    );
+    const error = await observeHealth(
+      scope,
+      new Date(Date.now() + 3_600_000),
+    ).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(InvalidObservationError);
+  });
+});
+
+// --- 12. a confirmation cannot add a membership predicate --------------------
+
+describe('membership predicate on an unchanged collection', () => {
+  const observeCollection = (
+    scope: TestScope,
+    negative?: { predicate: string; collectionRevision: number },
+  ) =>
+    inTx(getDb().app, async (client) => {
+      const keys = await client.query<{ key: string }>(
+        'SELECT key FROM fx_checkout.config_entries ORDER BY key',
+      );
+      const version = await client.query<{ version: number }>(
+        'SELECT version FROM fx_checkout.config_collection',
+      );
+      return registerObservation(
+        client,
+        {
+          source: sourceRef(scope, 'checkout.config'),
+          normalizedValue: {
+            keys: keys.rows.map((row) => row.key),
+            collectionVersion: version.rows[0].version,
+          },
+          provenance: { kind: 'watcher' },
+          ...(negative ? { negative } : {}),
+        },
+        { ledger: FX, marker: null },
+      );
+    });
+
+  it('refuses a predicate the stored receipt does not carry; the same predicate confirms', async () => {
+    const { app } = getDb();
+    const scope = newScope();
+    await seedConfig(app, { 'db.pool_max': 3 });
+    const plain = await observeCollection(scope);
+    const claim = {
+      predicate: "key 'checkout.restrict_orders' does not exist",
+      collectionRevision: 2,
+    };
+    const error = await observeCollection(scope, claim).catch(
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(InvalidObservationError);
+    expect(
+      await count(
+        app,
+        'SELECT count(*) AS n FROM ledger.receipt_confirmations WHERE receipt_id = $1',
+        [plain.receipt.id],
+      ),
+    ).toBe(0);
+
+    // At a new collection revision the predicate is stored with the new receipt,
+    // and an identical re-observation then confirms it.
+    await inTx(app, (client) => insertConfig(client, 'cache.ttl', 5));
+    const withPredicate = await observeCollection(scope, {
+      ...claim,
+      collectionRevision: 3,
+    });
+    expect(withPredicate.newRevision).toBe(true);
+    expect(withPredicate.receipt.negative).toEqual({
+      ...claim,
+      collectionRevision: 3,
+    });
+    const confirmed = await observeCollection(scope, {
+      ...claim,
+      collectionRevision: 3,
+    });
+    expect(confirmed.newRevision).toBe(false);
+    expect(confirmed.receipt.negative).toEqual(withPredicate.receipt.negative);
+  });
+});
+
+// --- 13. controlled receipts do not expire ------------------------------------
+
+describe('controlled receipts and expiresAt', () => {
+  it('a controlled registration with expiresAt is refused: expiry could never be repaired by observation', async () => {
+    const { app } = getDb();
+    const scope = newScope();
+    await seedConfig(app, { 'db.pool_max': 3 });
+    const error = await inTx(app, async (client) => {
+      const read = await readMember(client, 'db.pool_max');
+      return registerObservation(
+        client,
+        {
+          source: sourceRef(scope, 'checkout.config/db.pool_max'),
+          normalizedValue: read.normalizedValue,
+          provenance: { kind: 'watcher' },
+          expiresAt: new Date(Date.now() + 60_000),
+        },
+        { ledger: FX, marker: null },
+      );
+    }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(InvalidObservationError);
+    expect(await receiptCount(scope)).toBe(0);
   });
 });

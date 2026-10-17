@@ -101,18 +101,26 @@ describe('evidence view', () => {
     const [taskA, taskB] = [randomUUID(), randomUUID()];
     const [attemptA, attemptB] = [randomUUID(), randomUUID()];
     await inTx(app, async (client) => {
-      await recordReadSet(client, {
-        missionId: missionA,
-        taskId: taskA,
-        attemptId: attemptA,
-        receiptIds: [member.receipt.id, health2.receipt.id],
-      });
-      await recordReadSet(client, {
-        missionId: missionB,
-        taskId: taskB,
-        attemptId: attemptB,
-        receiptIds: [health2.receipt.id],
-      });
+      await recordReadSet(
+        client,
+        {
+          missionId: missionA,
+          taskId: taskA,
+          attemptId: attemptA,
+          receiptIds: [member.receipt.id, health2.receipt.id],
+        },
+        FX,
+      );
+      await recordReadSet(
+        client,
+        {
+          missionId: missionB,
+          taskId: taskB,
+          attemptId: attemptB,
+          receiptIds: [health2.receipt.id],
+        },
+        FX,
+      );
     });
 
     const head = await listEvidence(app, {
@@ -300,11 +308,11 @@ describe('read sets and publication links', () => {
       attemptId,
       receiptIds: [member.receipt.id, health.receipt.id, member.receipt.id],
     };
-    expect(await inTx(app, (client) => recordReadSet(client, link))).toEqual({
+    expect(await inTx(app, (client) => recordReadSet(client, link, FX))).toEqual({
       inserted: 2,
       existing: 0,
     });
-    expect(await inTx(app, (client) => recordReadSet(client, link))).toEqual({
+    expect(await inTx(app, (client) => recordReadSet(client, link, FX))).toEqual({
       inserted: 0,
       existing: 2,
     });

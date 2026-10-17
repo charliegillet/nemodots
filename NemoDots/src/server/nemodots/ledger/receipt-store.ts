@@ -354,16 +354,22 @@ export interface ConfirmationInput {
   modelCallId: ModelCallId | null;
 }
 
-/** Appends a freshness confirmation and returns its timestamp. */
+/**
+ * Appends a freshness confirmation and returns its timestamp. `sampledAt` is
+ * when the source was actually sampled (already bounded by the database clock
+ * by the caller); without it the confirmation is stamped now. A confirmation
+ * therefore never claims to be fresher than the sample behind it.
+ */
 export async function appendConfirmation(
   client: PgClient,
   receiptId: string,
   input: ConfirmationInput,
+  sampledAt: Date | null = null,
 ): Promise<Date> {
   const { rows } = await client.query<{ confirmed_at: Date }>(
-    `INSERT INTO ledger.receipt_confirmations (receipt_id, provenance_kind, attempt_id, model_call_id)
-     VALUES ($1, $2, $3, $4) RETURNING confirmed_at`,
-    [receiptId, input.kind, input.attemptId, input.modelCallId],
+    `INSERT INTO ledger.receipt_confirmations (receipt_id, confirmed_at, provenance_kind, attempt_id, model_call_id)
+     VALUES ($1, COALESCE($5::timestamptz, clock_timestamp()), $2, $3, $4) RETURNING confirmed_at`,
+    [receiptId, input.kind, input.attemptId, input.modelCallId, sampledAt],
   );
   return rows[0].confirmed_at;
 }

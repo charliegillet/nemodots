@@ -676,3 +676,18 @@ describe('recordOrphanedAttempt (unfenced telemetry path, C16)', () => {
     });
   });
 });
+
+describe('inherited artifact ids', () => {
+  it('rejects a malformed id instead of silently skipping its edge', async () => {
+    const w = await world();
+    const { snapshot, record } = build(w);
+    snapshot.injected.inheritedArtifacts[0].id = 'not-a-uuid';
+    const before = await counts();
+    await expect(
+      inTx(getDb().app, (client) =>
+        recordModelCall(client, { record, snapshot }, FX),
+      ),
+    ).rejects.toMatchObject({ code: 'model_call_invalid' });
+    expect(await counts()).toEqual(before);
+  });
+});

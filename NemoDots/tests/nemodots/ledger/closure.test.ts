@@ -414,3 +414,51 @@ describe('buildClosure edge cases', () => {
     expect(result.perMission).toEqual([]);
   });
 });
+
+describe('dead attempts do not taint their task (R2)', () => {
+  //   R1 -> A_old (invalidated, replaced) -> O_old          [T1: repaired by A_new]
+  //   R2 -> A_new (published)
+  //   R1 -> A_live (running)                                 [T2]
+  const nodes = [
+    receipt('R1'),
+    receipt('R2'),
+    task('T1', 'm1'),
+    task('T2', 'm1'),
+    attempt('A_old', 'm1', 'T1'),
+    output('O_old', 'm1', 'T1'),
+    attempt('A_new', 'm1', 'T1'),
+    attempt('A_live', 'm1', 'T2'),
+  ];
+  const edges = [
+    ev('R1', 'A_old'),
+    ev('A_old', 'O_old'),
+    ev('R2', 'A_new'),
+    ev('R1', 'A_live'),
+  ];
+  const graph = buildGraph(nodes, edges);
+
+  it('a reached attempt known to be dead is affected itself but its task is not', () => {
+    const traversal = traverseClosure(graph.records, {
+      kind: 'receipt',
+      id: 'R1',
+    });
+    const meta = traversal.nodes.map((node) => ({
+      ...graph.meta(node.id),
+      ...(node.id === 'A_old' ? { attemptLive: false } : {}),
+    }));
+    const result = buildClosure(meta, graph.tasksByMission);
+    expect(result.affected.attemptIds).toEqual(['A_live', 'A_old']);
+    expect(result.affected.outputIds).toEqual(['O_old']);
+    // T1's live attempt (A_new) never read R1: only T2 is affected.
+    expect(result.affected.taskIds).toEqual(['T2']);
+    expect(result.perMission[0].preserved.taskIds).toEqual(['T1']);
+  });
+
+  it('an attempt of unknown status counts as live (graph-only fixtures)', () => {
+    const result = buildClosure(
+      closureOf(graph, 'R1').reached.map((id) => graph.meta(id)),
+      graph.tasksByMission,
+    );
+    expect(result.affected.taskIds).toEqual(['T1', 'T2']);
+  });
+});

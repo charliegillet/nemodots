@@ -3,8 +3,11 @@
 // Nodes carry their mission and task so the closure is self-contained. Edges
 // are append-only. Evidence and inheritance edges must keep the graph acyclic
 // and point older -> newer; the rule is enforced by a reachability check
-// under one advisory transaction lock (two writers cannot each add half of a
-// cycle). Scheduling edges are task -> task and checked for cycles among
+// under an advisory transaction lock PER MISSION (edges never cross missions,
+// so a cycle can only form inside one; two writers of one mission cannot each
+// add half of a cycle, writers of different missions do not wait for each
+// other). It is the LAST lock of the ledger order (prelock.ts): coordinator
+// rows, config rows, sources, receipts, then this. Scheduling edges are task -> task and checked for cycles among
 // themselves. A batch is all-or-nothing: addEdges runs inside a savepoint.
 //
 // All functions need a client inside an open transaction.
@@ -33,7 +36,7 @@ export interface AddEdgesResult {
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const EDGE_LOCK_NAME = 'nemodots_ledger_edges';
+const EDGE_LOCK_PREFIX = 'nemodots_ledger_edges:';
 const SAVEPOINT = 'ledger_add_edges';
 
 const edgeClass = (kind: EdgeKind): EdgeKind[] =>
@@ -107,6 +110,40 @@ async function reaches(
 }
 
 /**
+ * Takes the per-mission cycle locks of a batch, in ascending lock-key order so
+ * two batches spanning the same missions cannot deadlock. A mission is the
+ * `to` node's (given, or already stored); an edge without one fails later in
+ * addEdges with its own message.
+ */
+async function lockMissions(
+  client: PgClient,
+  edges: readonly EdgeInput[],
+): Promise<void> {
+  const missions = new Set<string>();
+  const unresolved = new Map<string, NodeRef>();
+  for (const edge of edges) {
+    if (edge.to.missionId) missions.add(edge.to.missionId.toLowerCase());
+    else unresolved.set(`${edge.to.kind}:${edge.to.id}`, edge.to);
+  }
+  if (unresolved.size > 0) {
+    const nodes = [...unresolved.values()];
+    const { rows } = await client.query<{ mission_id: string | null }>(
+      `SELECT n.mission_id FROM ledger.dependency_nodes n
+         JOIN unnest($1::text[], $2::uuid[]) AS r(kind, id) ON r.kind = n.kind AND r.id = n.id`,
+      [nodes.map((node) => node.kind), nodes.map((node) => node.id)],
+    );
+    for (const row of rows) if (row.mission_id) missions.add(row.mission_id);
+  }
+  if (missions.size === 0) return;
+  const { rows } = await client.query<{ key: string }>(
+    `SELECT DISTINCT hashtext($1 || m)::bigint AS key FROM unnest($2::text[]) AS m ORDER BY key`,
+    [EDGE_LOCK_PREFIX, [...missions]],
+  );
+  for (const { key } of rows)
+    await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [key]);
+}
+
+/**
  * Adds edges (idempotent per edge). Rejects, writing nothing: unknown or
  * malformed endpoints, a `to` receipt, self loops, edges across missions,
  * scheduling edges that are not task -> task, and any edge that would close a
@@ -133,10 +170,10 @@ export async function addEdges(
   }
   await client.query(`SAVEPOINT ${SAVEPOINT}`);
   try {
-    if (edges.some((edge) => edge.kind !== 'scheduling'))
-      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
-        EDGE_LOCK_NAME,
-      ]);
+    await lockMissions(
+      client,
+      edges.filter((edge) => edge.kind !== 'scheduling'),
+    );
     let inserted = 0;
     let existing = 0;
     for (const edge of edges) {
