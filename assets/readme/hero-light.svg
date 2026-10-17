@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 420" role="img" aria-label="NemoDots: when evidence changes, the team adapts. Receipt r1 is superseded by r2, the stale action is blocked, the affected branch is repaired and the independent branch is preserved.">
+  <rect width="1200" height="420" rx="18" fill="#f7f9f8"/>
+  <g font-family="ui-sans-serif, -apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+    <text x="60" y="92" font-size="56" font-weight="800" fill="#14201c">NemoDots<tspan fill="#0f9d58">•</tspan></text>
+    <text x="62" y="134" font-size="22" fill="#5b6b65">When evidence changes, the team adapts.</text>
+    <text x="62" y="168" font-size="15" fill="#5b6b65">A persistent team of NVIDIA Nemotron agents on Crusoe Managed Inference</text>
+
+    <!-- evidence lane -->
+    <text x="62" y="236" font-size="13" font-weight="700" fill="#5b6b65" letter-spacing="1.5">EVIDENCE LEDGER</text>
+    <line x1="62" y1="262" x2="1138" y2="262" stroke="#d6dedb" stroke-width="2"/>
+    <circle cx="250" cy="262" r="16" fill="#ffffff" stroke="#5b6b65" stroke-width="2"/>
+    <text x="250" y="267" font-size="13" font-weight="700" fill="#5b6b65" text-anchor="middle">r1</text>
+    <text x="250" y="300" font-size="12" fill="#5b6b65" text-anchor="middle">superseded</text>
+    <circle cx="620" cy="262" r="16" fill="#ffffff" stroke="#0f9d58" stroke-width="3"/>
+    <text x="620" y="267" font-size="13" font-weight="700" fill="#0f9d58" text-anchor="middle">r2</text>
+    <text x="620" y="300" font-size="12" fill="#0f9d58" text-anchor="middle">source changed · new receipt</text>
+    <path d="M268 262 L600 262" stroke="#0f9d58" stroke-width="2" stroke-dasharray="6 6"/>
+
+    <path d="M636 256 C 665 240, 672 216, 700 216" fill="none" stroke="#c62828" stroke-width="2"/>
+    <path d="M890 216 L910 216" stroke="#a86b00" stroke-width="2"/>
+    <path d="M636 268 C 665 290, 672 338, 700 338" fill="none" stroke="#0f9d58" stroke-width="2"/>
+    <!-- branch A -->
+    <rect x="700" y="196" width="190" height="40" rx="10" fill="#ffffff" stroke="#c62828" stroke-width="2"/>
+    <text x="795" y="221" font-size="14" font-weight="700" fill="#c62828" text-anchor="middle">✕ stale action blocked</text>
+    <rect x="910" y="196" width="228" height="40" rx="10" fill="#ffffff" stroke="#a86b00" stroke-width="2"/>
+    <text x="1024" y="221" font-size="14" font-weight="700" fill="#a86b00" text-anchor="middle">↻ branch A re-reads, replans</text>
+
+    <!-- branch B -->
+    <rect x="700" y="318" width="438" height="40" rx="10" fill="#ffffff" stroke="#0f9d58" stroke-width="2"/>
+    <text x="919" y="343" font-size="14" font-weight="700" fill="#0f9d58" text-anchor="middle">✓ branch B preserved · not re-run</text>
+    <text x="62" y="343" font-size="14" fill="#14201c">Every model call records what it saw.</text>
+    <text x="62" y="366" font-size="14" fill="#14201c">Stale support can't commit. Only affected work is repaired.</text>
+  </g>
+</svg>
