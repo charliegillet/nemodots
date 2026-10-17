@@ -123,3 +123,32 @@ it('retries the victim of a real deadlock (40P01)', async () => {
     }
   });
 });
+
+it('does not report success when the callback swallowed a failed statement', async () => {
+  await withTestDatabase(async ({ urls }) => {
+    await adminExec(
+      urls.admin,
+      'CREATE TABLE public.swallow (id int PRIMARY KEY)',
+    );
+    const pool = new pg.Pool({ connectionString: urls.admin, max: 2 });
+    try {
+      await expect(
+        withTransaction(pool, async (client) => {
+          await client.query('INSERT INTO public.swallow VALUES (1)');
+          try {
+            await client.query('INSERT INTO public.swallow VALUES (1)');
+          } catch {
+            // swallowed: the transaction is now aborted
+          }
+          return 'returned-ok';
+        }),
+      ).rejects.toMatchObject({ code: '25P02' });
+      const { rows } = await pool.query(
+        'SELECT count(*)::int AS n FROM public.swallow',
+      );
+      expect(rows[0].n).toBe(0);
+    } finally {
+      await pool.end();
+    }
+  });
+});

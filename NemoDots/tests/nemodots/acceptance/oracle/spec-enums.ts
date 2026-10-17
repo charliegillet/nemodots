@@ -155,7 +155,8 @@ export type ConfigValue = string | number | boolean;
 export const CONFIG_DOMAIN: Readonly<
   Record<ConfigKey, (value: ConfigValue) => boolean>
 > = {
-  'cache.namespace': (v) => typeof v === 'string' && /^[a-z0-9-]{1,32}$/.test(v),
+  'cache.namespace': (v) =>
+    typeof v === 'string' && /^[a-z0-9-]{1,32}$/.test(v),
   'cache.schema_version': (v) =>
     typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 9,
   'db.pool_max': (v) =>

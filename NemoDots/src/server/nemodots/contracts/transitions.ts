@@ -18,15 +18,9 @@ function freezeTable<S extends string>(
 export const MISSION_TRANSITIONS: Table<MissionStatus> =
   freezeTable<MissionStatus>({
     created: ['running', 'blocked_provider', 'cancelled'],
-    // running -> blocked_provider: ARCHITECTURE 10 ("If the provider becomes
-    // unreachable, in-flight attempts fail ... the mission moves to blocked_provider").
-    running: [
-      'paused',
-      'awaiting_acceptance',
-      'failed',
-      'cancelled',
-      'blocked_provider',
-    ],
+    // Verbatim CONTRACTS section 4. running->blocked_provider (ARCHITECTURE 10
+    // prose) is NOT in the spec lists and is pending a lead ruling.
+    running: ['paused', 'awaiting_acceptance', 'failed', 'cancelled'],
     blocked_provider: ['created', 'cancelled'],
     paused: ['running', 'cancelled'],
     awaiting_acceptance: ['succeeded', 'running', 'failed', 'cancelled'],
@@ -39,16 +33,9 @@ export const TASK_TRANSITIONS: Table<TaskStatus> = freezeTable<TaskStatus>({
   pending: ['runnable', 'cancelled'],
   runnable: ['leased', 'cancelled'],
   leased: ['running', 'runnable', 'cancelled'],
-  // running -> runnable: ARCHITECTURE 7.2 diagram ("repair attempt scheduled"
-  // back to runnable) and section 6 reaper takeover ("makes the task runnable").
-  running: [
-    'waiting',
-    'succeeded',
-    'failed',
-    'invalidated',
-    'cancelled',
-    'runnable',
-  ],
+  // Verbatim CONTRACTS section 4. running->runnable (ARCHITECTURE 7.2 diagram,
+  // reaper prose) is NOT in the spec lists and is pending a lead ruling.
+  running: ['waiting', 'succeeded', 'failed', 'invalidated', 'cancelled'],
   waiting: ['running', 'invalidated', 'failed', 'cancelled'],
   succeeded: ['invalidated'],
   invalidated: ['repairing', 'cancelled', 'failed'],

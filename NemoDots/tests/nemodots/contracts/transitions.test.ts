@@ -29,8 +29,6 @@ const expected = {
       'blocked_provider>created',
       // CONTRACTS 4: awaiting_acceptance -> running (acceptance fails, work resumes)
       'awaiting_acceptance>running',
-      // ARCHITECTURE 10: provider unreachable while running
-      'running>blocked_provider',
     ],
   },
   task: {
@@ -48,8 +46,6 @@ const expected = {
       'running>failed',
       'running>invalidated',
       'running>cancelled',
-      // 7.2 diagram: running -> runnable when a retry attempt is scheduled; section 6 reaper takeover
-      'running>runnable',
       'waiting>running',
       'waiting>invalidated',
       'waiting>failed',

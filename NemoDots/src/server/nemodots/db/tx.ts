@@ -29,6 +29,22 @@ export interface TransactionOptions {
   onRetry?: (info: { attempt: number; code: string; delayMs: number }) => void;
 }
 
+/**
+ * COMMIT of an aborted transaction succeeds on the wire but performs a
+ * ROLLBACK. This is raised instead of returning the callback's result, so a
+ * swallowed statement error can never look like a committed write. SQLSTATE
+ * 25P02 (in_failed_sql_transaction) is not retryable.
+ */
+export class TransactionRolledBackError extends Error {
+  readonly code = '25P02';
+  constructor() {
+    super(
+      'Transaction was aborted by an earlier failed statement; COMMIT rolled it back. Do not swallow database errors inside withTransaction.',
+    );
+    this.name = 'TransactionRolledBackError';
+  }
+}
+
 export function sqlState(error: unknown) {
   return typeof error === 'object' && error && 'code' in error
     ? String((error as { code: unknown }).code)
@@ -81,7 +97,9 @@ export async function withTransaction<T>(
     try {
       await client.query(begin);
       result = await fn(client, attempt);
-      await client.query('COMMIT');
+      const committed = await client.query('COMMIT');
+      if (committed.command !== 'COMMIT')
+        throw new TransactionRolledBackError();
     } catch (error) {
       try {
         await client.query('ROLLBACK');

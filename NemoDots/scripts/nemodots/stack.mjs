@@ -737,21 +737,33 @@ async function stop(ctx) {
 
 async function status(ctx) {
   assertOwned(ctx);
-  const pg = run('pg_isready', [
-    '-h',
-    '127.0.0.1',
-    '-p',
-    String(ctx.pgPort),
-    '-t',
-    '5',
-  ]);
-  const pgOk = pg.status === 0;
+  // Health must belong to THIS instance: a recorded port answering is not
+  // enough when another instance (or process) serves it. Postgres is checked
+  // through pg_ctl on our own data dir and pg_isready on our own socket dir;
+  // Redis through our own pid file before PING.
+  const pgOwn = pgRunning(ctx);
+  const pgReady =
+    pgOwn &&
+    run('pg_isready', [
+      '-h',
+      ctx.paths.run,
+      '-p',
+      String(ctx.pgPort),
+      '-t',
+      '5',
+    ]).status === 0;
+  const pgOk = pgReady;
+  const pgForeign = !pgOwn && (await portAcceptsConnections(ctx.pgPort));
   say(
-    `postgres: ${pgOk ? 'accepting connections' : 'down'} on 127.0.0.1:${ctx.pgPort}`,
+    `postgres: ${pgOk ? 'accepting connections' : pgForeign ? 'down (port served by another process)' : 'down'} on 127.0.0.1:${ctx.pgPort}`,
   );
-  const pong = redisCli(ctx, ['ping']).stdout.trim();
-  const redisOk = pong === 'PONG';
-  say(`redis: ${redisOk ? 'PONG' : 'down'} on 127.0.0.1:${ctx.redisPort}`);
+  const redisOwn = Boolean(ownRedisPid(ctx));
+  const redisOk = redisOwn && redisCli(ctx, ['ping']).stdout.trim() === 'PONG';
+  const redisForeign =
+    !redisOwn && (await portAcceptsConnections(ctx.redisPort));
+  say(
+    `redis: ${redisOk ? 'PONG' : redisForeign ? 'down (port served by another process)' : 'down'} on 127.0.0.1:${ctx.redisPort}`,
+  );
   let checkoutOk = true;
   if (fs.existsSync(path.join(APP_ROOT, CHECKOUT_ENTRY))) {
     const record = ownCheckout(ctx);

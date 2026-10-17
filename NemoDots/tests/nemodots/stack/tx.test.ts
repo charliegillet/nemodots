@@ -4,12 +4,13 @@
 import type pg from 'pg';
 import { describe, expect, it } from 'vitest';
 import {
+  TransactionRolledBackError,
   isRetryable,
   retryDelay,
   withTransaction,
 } from '../../../src/server/nemodots/db/tx.js';
 
-function scriptedPool(failRollback = false) {
+function scriptedPool(failRollback = false, commitCommand = 'COMMIT') {
   const log: string[] = [];
   const releases: (Error | undefined)[] = [];
   const pool = {
@@ -19,7 +20,7 @@ function scriptedPool(failRollback = false) {
           log.push(sql);
           if (sql === 'ROLLBACK' && failRollback)
             throw new Error('connection lost');
-          return { rows: [] };
+          return { rows: [], command: sql === 'COMMIT' ? commitCommand : sql };
         },
         release(error?: Error) {
           releases.push(error);
@@ -34,6 +35,14 @@ const sqlError = (code: string) =>
   Object.assign(new Error(`sqlstate ${code}`), { code });
 
 describe('withTransaction', () => {
+  it('throws instead of returning when COMMIT silently rolled back', async () => {
+    const { pool, releases } = scriptedPool(false, 'ROLLBACK');
+    await expect(
+      withTransaction(pool, async () => 'returned-ok'),
+    ).rejects.toBeInstanceOf(TransactionRolledBackError);
+    expect(releases).toEqual([undefined]);
+  });
+
   it('commits and releases on success, with the requested isolation', async () => {
     const { pool, log, releases } = scriptedPool();
     const result = await withTransaction(pool, async () => 42, {

@@ -439,9 +439,53 @@ export const PlanTaskSchema = z
     dependsOn: z.array(z.number().int().nonnegative()),
   })
   .strict();
-export const PlanSchema = z
+/** Refinement-free shape (use for z.toJSONSchema / strict json_schema). */
+export const PlanShapeSchema = z
   .object({ tasks: z.array(PlanTaskSchema).min(2).max(6) })
   .strict();
+
+/** Semantic plan problems: ordinals, cycles, roles, capabilities. */
+export function planIssues(plan: z.infer<typeof PlanShapeSchema>): string[] {
+  const issues: string[] = [];
+  const n = plan.tasks.length;
+  plan.tasks.forEach((task, i) => {
+    if (task.role === 'planner' || task.role === 'postcondition')
+      issues.push(`tasks[${i}].role ${task.role} is not a plan role`);
+    if (!capabilitiesWithinRole(task.role, task.capabilities))
+      issues.push(
+        `tasks[${i}].capabilities exceed ROLE_CAPABILITIES.${task.role}`,
+      );
+    if (new Set(task.capabilities).size !== task.capabilities.length)
+      issues.push(`tasks[${i}].capabilities must be unique`);
+    if (new Set(task.dependsOn).size !== task.dependsOn.length)
+      issues.push(`tasks[${i}].dependsOn must be unique`);
+    for (const d of task.dependsOn) {
+      if (d >= n) issues.push(`tasks[${i}].dependsOn ${d} out of range`);
+      else if (d === i) issues.push(`tasks[${i}].dependsOn references itself`);
+    }
+  });
+  // Kahn's algorithm over in-range, non-self edges.
+  const indegree = plan.tasks.map(
+    (task, i) => new Set(task.dependsOn.filter((d) => d < n && d !== i)).size,
+  );
+  const queue = indegree.flatMap((deg, i) => (deg === 0 ? [i] : []));
+  let seen = 0;
+  while (queue.length > 0) {
+    const done = queue.pop() as number;
+    seen += 1;
+    plan.tasks.forEach((task, i) => {
+      if (task.dependsOn.includes(done) && done !== i && --indegree[i] === 0)
+        queue.push(i);
+    });
+  }
+  if (seen < n) issues.push('plan dependencies contain a cycle');
+  return issues;
+}
+
+export const PlanSchema = PlanShapeSchema.superRefine((plan, ctx) => {
+  for (const message of planIssues(plan))
+    ctx.addIssue({ code: 'custom', message });
+});
 export type Plan = z.infer<typeof PlanSchema>;
 
 /** Created by the coordinator and passed to tools as context.context; nothing comes from the model. */

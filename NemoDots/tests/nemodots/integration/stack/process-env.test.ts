@@ -14,6 +14,8 @@ import { unlinkByPrefix, withTestRedis } from '../../helpers/test-redis.js';
 const execFileAsync = promisify(execFile);
 const STACK = path.resolve('scripts/nemodots/stack.mjs');
 const STUB = 'tests/nemodots/integration/stack/fixtures/print-env-names.mjs';
+const PARSE_STUB =
+  'tests/nemodots/integration/stack/fixtures/print-env-names.ts';
 const instance = process.env.NEMODOTS_INSTANCE ?? 'dev';
 
 function envNames(stdout: string) {
@@ -37,7 +39,7 @@ it('I3: the checkout child receives exactly its own role URL and the minimal env
   const parentEnv = { ...process.env, ...roles, NEMODOTS_INSTANCE: instance };
   const { stdout, stderr } = await execFileAsync(
     process.execPath,
-    [STACK, 'checkout', '--entry', STUB],
+    [STACK, 'checkout', '--entry', PARSE_STUB],
     { env: parentEnv },
   );
   const names = envNames(stdout);
@@ -64,6 +66,8 @@ it('I3: the checkout child receives exactly its own role URL and the minimal env
   expect(names.filter((name) => name.startsWith('NEMODOTS_PG_URL_'))).toEqual([
     'NEMODOTS_PG_URL_CHECKOUT',
   ]);
+  // The child can parse its own minimal environment with the shared parser.
+  expect(stdout).toMatch(/^PARSE_OK pgPort=\d+$/m);
   for (const value of Object.values(roles))
     expect(stdout + stderr).not.toContain(value);
 });

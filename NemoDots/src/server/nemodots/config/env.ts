@@ -130,9 +130,21 @@ function parseUrl(name: string, value: string, protocols: string[]) {
   return url;
 }
 
+const OVERRIDING_QUERY_KEYS = ['host', 'port', 'hostaddr', 'service'];
+
 /** Validates a PostgreSQL URL without ever echoing it. Returns its port. */
 export function assertSafePgUrl(name: string, value: string) {
   const url = parseUrl(name, value, ['postgres:', 'postgresql:']);
+  // pg (pg-connection-string) lets ?host=, ?port=, ?hostaddr= and ?service=
+  // override the authority, which would bypass the port check below. Refuse
+  // them rather than re-implement the parser's precedence rules.
+  for (const key of url.searchParams.keys()) {
+    if (OVERRIDING_QUERY_KEYS.includes(key.toLowerCase()))
+      throw new NemoDotsEnvError(
+        [name],
+        `${name} must not carry a ${key} query parameter; put the host and port in the URL authority.`,
+      );
+  }
   const urlPort = url.port ? Number(url.port) : 5432;
   assertAllowedPort(name, urlPort);
   if (!url.hostname)
@@ -157,22 +169,36 @@ export function parseNemoDotsEnv(env: Env = process.env): NemoDotsConfig {
       ['NEMODOTS_INSTANCE'],
       'NEMODOTS_INSTANCE must match ^[a-z0-9][a-z0-9-]{0,23}$.',
     );
-  const pgPort = port(env, 'NEMODOTS_PG_PORT', DEFAULT_PG_PORT);
+  const explicitPgPort = text(env, 'NEMODOTS_PG_PORT') !== undefined;
+  let pgPort = port(env, 'NEMODOTS_PG_PORT', DEFAULT_PG_PORT);
   const pgHost = text(env, 'NEMODOTS_PG_HOST') ?? '127.0.0.1';
   const database = text(env, 'NEMODOTS_PG_DATABASE') ?? 'nemodots';
   const urls: Partial<Record<PgRole, string>> = {};
+  const urlPorts: { name: string; port: number }[] = [];
   for (const role of PG_ROLES) {
     const name = pgUrlEnvName(role);
     const value = text(env, name);
     if (!value) continue;
-    const parsed = assertSafePgUrl(name, value);
-    if (parsed.port !== pgPort)
-      throw new NemoDotsEnvError(
-        [name, 'NEMODOTS_PG_PORT'],
-        `${name} does not use NEMODOTS_PG_PORT (${pgPort}).`,
-      );
     urls[role] = value;
+    urlPorts.push({ name, port: assertSafePgUrl(name, value).port });
   }
+  // The checkout child is given only its own role URL (finding I3), so
+  // NEMODOTS_PG_PORT is usually absent there. Cross-check against it only when
+  // it is set explicitly; otherwise the URLs must agree with each other and
+  // define the port.
+  const reference = explicitPgPort ? pgPort : urlPorts[0]?.port;
+  for (const entry of urlPorts) {
+    if (entry.port !== reference)
+      throw new NemoDotsEnvError(
+        explicitPgPort
+          ? [entry.name, 'NEMODOTS_PG_PORT']
+          : [entry.name, urlPorts[0]!.name],
+        explicitPgPort
+          ? `${entry.name} does not use NEMODOTS_PG_PORT (${pgPort}).`
+          : `${entry.name} does not use the same port as ${urlPorts[0]!.name}.`,
+      );
+  }
+  if (!explicitPgPort && reference !== undefined) pgPort = reference;
   const redisPort = port(env, 'NEMODOTS_REDIS_PORT', DEFAULT_REDIS_PORT);
   const redisUrl =
     text(env, 'NEMODOTS_REDIS_URL') ?? `redis://127.0.0.1:${redisPort}/0`;

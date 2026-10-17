@@ -1,6 +1,8 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   NemoDotsEnvError,
+  assertSafePgUrl,
   liveRequirements,
   parseNemoDotsEnv,
   pgUrl,
@@ -93,10 +95,70 @@ describe('parseNemoDotsEnv', () => {
 
   it('rejects a role URL that does not use the instance port, without echoing it', () => {
     const error = errorOf(() =>
-      parseNemoDotsEnv({ NEMODOTS_PG_URL_APP: url('app', 55433) }),
+      parseNemoDotsEnv({
+        NEMODOTS_PG_PORT: '55432',
+        NEMODOTS_PG_URL_APP: url('app', 55433),
+      }),
     );
     expect(error.names).toEqual(['NEMODOTS_PG_URL_APP', 'NEMODOTS_PG_PORT']);
     expect(error.message).not.toContain(SECRET);
+  });
+
+  it('parses exactly the checkout child environment on a non-default PostgreSQL port', () => {
+    // The name set stack.mjs checkoutEnv() hands the checkout API (finding I3):
+    // no NEMODOTS_PG_PORT.
+    const config = parseNemoDotsEnv({
+      NEMODOTS_PG_URL_CHECKOUT: url('checkout', 55433),
+      NEMODOTS_REDIS_URL: 'redis://127.0.0.1:56380/0',
+      NEMODOTS_REDIS_PREFIX: 'nemodots:ci-b',
+      NEMODOTS_CHECKOUT_PORT: '4511',
+      NEMODOTS_PROBE_SECRET: 's',
+      LC_ALL: 'C',
+      PATH: '/usr/bin',
+    });
+    expect(config.pg.port).toBe(55433);
+    expect(pgUrl(config, 'checkout')).toBe(url('checkout', 55433));
+  });
+
+  it('requires role URLs to agree on the port when NEMODOTS_PG_PORT is unset', () => {
+    const error = errorOf(() =>
+      parseNemoDotsEnv({
+        NEMODOTS_PG_URL_APP: url('app', 55433),
+        NEMODOTS_PG_URL_ADMIN: url('admin', 55434),
+      }),
+    );
+    expect(error.names).toEqual([
+      'NEMODOTS_PG_URL_APP',
+      'NEMODOTS_PG_URL_ADMIN',
+    ]);
+    expect(error.message).not.toContain(SECRET);
+  });
+
+  it.each([
+    '?port=5432',
+    '?host=localhost&port=5432',
+    '?hostaddr=127.0.0.1',
+    '?HOST=/var/run/postgresql',
+    '?service=mine',
+  ])('refuses overriding query parameters %s', (query) => {
+    const value = `postgres://nemodots_app:${SECRET}@127.0.0.1:55432/nemodots${query}`;
+    expect(() => assertSafePgUrl('NEMODOTS_PG_URL_APP', value)).toThrow(
+      NemoDotsEnvError,
+    );
+    const error = errorOf(() =>
+      parseNemoDotsEnv({ NEMODOTS_PG_URL_APP: value }),
+    );
+    expect(error.names).toEqual(['NEMODOTS_PG_URL_APP']);
+    expect(error.message).not.toContain(SECRET);
+  });
+
+  it('allows harmless query parameters', () => {
+    expect(
+      assertSafePgUrl(
+        'X',
+        `postgres://u:${SECRET}@127.0.0.1:55432/nemodots?sslmode=disable`,
+      ).port,
+    ).toBe(55432);
   });
 
   it('rejects malformed values by name', () => {
@@ -212,5 +274,24 @@ describe('resolveInference', () => {
     expect(
       resolveInference({ ...live, NEMODOTS_INFERENCE_MODE: 'blocked' }),
     ).toMatchObject({ mode: 'blocked', reason: 'requested', missingEnv: [] });
+  });
+});
+
+describe('.env.example (finding I1)', () => {
+  it('never resolves live inference to a non-Crusoe host', () => {
+    const values: Record<string, string> = {};
+    for (const line of readFileSync('.env.example', 'utf8').split('\n')) {
+      const match = /^([A-Z][A-Z0-9_]*)=(.*)$/.exec(line);
+      if (match) values[match[1]!] = match[2]!;
+    }
+    const resolved = resolveInference({
+      ...values,
+      OPENAI_API_KEY: 'k',
+      OPENAI_MODEL: 'm',
+      NEMODOTS_INFERENCE_MODE: 'live',
+    });
+    if (resolved.mode === 'live')
+      expect(resolved.provider.host).toMatch(/crusoecloud\.com$/);
+    else expect(resolved.missingEnv).toEqual(['OPENAI_BASE_URL']);
   });
 });

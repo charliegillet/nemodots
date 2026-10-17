@@ -92,6 +92,8 @@ export interface ClosureExpectation {
   conservative: boolean;
   /** What a conventional DAG (scheduling-edge) restart would rerun; evaluation only. */
   dagRestartTaskIds?: string[];
+  /** Receipts that must still be current (status supported, no supersession) afterwards. */
+  receiptsStillCurrent?: string[];
 }
 
 export interface ClosureCase {
@@ -108,10 +110,7 @@ export interface ClosureCase {
 }
 
 export type RejectionCode =
-  | 'scheduling_cycle'
-  | 'edge_cycle'
-  | 'edge_order'
-  | 'closure_cap_exceeded';
+  'scheduling_cycle' | 'edge_cycle' | 'edge_order' | 'closure_cap_exceeded';
 
 export interface RejectionCase {
   id: string;
@@ -121,15 +120,31 @@ export interface RejectionCase {
     | { kind: 'plan'; dependsOn: number[][] }
     | {
         kind: 'delegate';
-        existing: { id: string; parentTaskId: string | null; waitsOn: string[] }[];
+        existing: {
+          id: string;
+          parentTaskId: string | null;
+          waitsOn: string[];
+        }[];
         parentTaskId: string;
         childDependsOn: string[];
       }
-    | { kind: 'edge'; nodes: GraphNode[]; existing: GraphEdge[]; add: GraphEdge }
-    | { kind: 'generated_chain'; length: number; capBy: 'depth' | 'nodes' };
+    | {
+        kind: 'edge';
+        nodes: GraphNode[];
+        existing: GraphEdge[];
+        add: GraphEdge;
+      }
+    | {
+        kind: 'generated';
+        /** chain: R0 -> A1 -> O1 -> A2 -> ... ; fanout: R0 -> A1..An */
+        shape: 'chain' | 'fanout';
+        /** Number of attempt nodes generated. */
+        size: number;
+      };
   expected: {
     rejected: true;
-    code: RejectionCode;
+    /** Any of these codes is an acceptable classification of the refusal. */
+    acceptedCodes: RejectionCode[];
     /** Rows that must not exist after the rejection. */
     writesNothing: true;
     /** For closure caps: what the watcher path must do afterwards. */
@@ -185,17 +200,38 @@ export type LedgerOp =
       environment?: 'dev' | 'test' | 'eval';
       /** For observed sources: the normalized value to register. */
       normalizedValue?: unknown;
-      /** For tampering cases: claimed revision/digest that disagree with reality. */
+      /**
+       * Tampering/late-delivery cases: claimed revision (relative, like relRevision)
+       * or a digest that disagrees with the normalized value.
+       */
       claimRevision?: number;
       claimDigestMismatch?: boolean;
       /** Size of a synthetic payload in canonical bytes (oversize cases). */
       syntheticBytes?: number;
     }
-  | { op: 'register_concurrent'; labels: [string, string]; sourceKey: string; normalizedValue: unknown }
+  | {
+      op: 'register_concurrent';
+      labels: [string, string];
+      sourceKey: string;
+      normalizedValue: unknown;
+    }
   | { op: 'age_receipt'; label: string; ageMs: number }
-  | { op: 'transition'; label: string; to: 'contested' | 'retracted' | 'expired' }
-  | { op: 'tamper_update'; label: string; column: 'normalized_value' | 'content_digest' | 'source_revision' }
-  | { op: 'assert_current'; labels: string[]; lockMode: 'share' | 'update'; freshness?: Record<string, number> }
+  | {
+      op: 'transition';
+      label: string;
+      to: 'contested' | 'retracted' | 'expired';
+    }
+  | {
+      op: 'tamper_update';
+      label: string;
+      column: 'normalized_value' | 'content_digest' | 'source_revision';
+    }
+  | {
+      op: 'assert_current';
+      labels: string[];
+      lockMode: 'share' | 'update';
+      freshness?: Record<string, number>;
+    }
   | { op: 'publish_finding'; label: string; citing: string[] }
   | { op: 'page_edit'; pageId: string };
 
@@ -203,19 +239,34 @@ export interface LedgerExpectation {
   /** Per op index: the outcome. */
   outcomes: Record<
     number,
-    | { ok: true; revision?: number; newRevision?: boolean; confirmation?: boolean }
+    | {
+        ok: true;
+        /** Observed sources: absolute ledger-assigned revision. */
+        revision?: number;
+        /** Controlled sources: revision minus the authority version right after the case's seed ops. */
+        relRevision?: number;
+        newRevision?: boolean;
+        confirmation?: boolean;
+      }
     | { ok: false; error: string }
   >;
-  /** Final facts checked at the end. */
+  /** Final facts checked at the end. Source keys are written '<environment>:<sourceKey>'. */
   final: {
     currentRevisionBySource?: Record<string, number>;
-    receiptStatus?: Record<string, 'supported' | 'superseded' | 'contested' | 'retracted' | 'expired'>;
+    currentRelRevisionBySource?: Record<string, number>;
+    receiptStatus?: Record<
+      string,
+      'supported' | 'superseded' | 'contested' | 'retracted' | 'expired'
+    >;
     receiptRowsBySource?: Record<string, number>;
     confirmationsByLabel?: Record<string, number>;
     distinctSources?: number;
     newObservationReceipts?: number;
-    configVersion?: Record<string, number>;
+    /** Authority version minus the version right after the case's seed_config ops. */
+    configVersionDelta?: Record<string, number>;
     configValue?: Record<string, ConfigValue>;
+    /** Number of new coordinator.findings rows, all with trust 'model_claim'. */
+    modelClaimFindings?: number;
   };
 }
 

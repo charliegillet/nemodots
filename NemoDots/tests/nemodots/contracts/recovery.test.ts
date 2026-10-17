@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import * as C from '../../../src/server/nemodots/contracts/index.js';
+import * as F from './fixtures.js';
 import { ids, invalidationId } from './fixtures.js';
 
 type AttemptRow = C.OpenInvalidationAttempt;
@@ -21,6 +22,7 @@ const affected = (attemptIds: C.AttemptId[], actionIds: string[]) => ({
   taskIds: [],
 });
 const event = (attemptIds: C.AttemptId[], actionIds: string[] = []) => ({
+  missionIds: [C.MissionIdSchema.parse(ids.mission)],
   affected: affected(attemptIds, actionIds),
   perMission: [
     {
@@ -143,5 +145,40 @@ describe('openInvalidation (CONTRACTS section 6)', () => {
       'failed',
       'verified',
     ]);
+  });
+});
+
+describe('perMission coverage (fail closed)', () => {
+  const m = C.MissionIdSchema.parse(ids.mission);
+  const other = C.MissionIdSchema.parse(ids.mission2);
+
+  it('schema rejects missionIds without a perMission entry', () => {
+    const e = { ...F.invalidation(), perMission: [] };
+    expect(C.InvalidationEventSchema.safeParse(e).success).toBe(false);
+  });
+  it('schema rejects duplicate missionIds and duplicate perMission entries', () => {
+    const base = F.invalidation();
+    expect(
+      C.InvalidationEventSchema.safeParse({
+        ...base,
+        missionIds: [...base.missionIds, ...base.missionIds],
+      }).success,
+    ).toBe(false);
+    expect(
+      C.InvalidationEventSchema.safeParse({
+        ...base,
+        perMission: [...base.perMission, ...base.perMission],
+      }).success,
+    ).toBe(false);
+  });
+  it('mission listed without entry falls back to the global affected set (open)', () => {
+    const e = { ...event([A1]), perMission: [] };
+    expect(C.openInvalidation(e, [att(A1, 'running')], [], m)).toBe(true);
+    expect(C.openInvalidation(e, [att(A1, 'published')], [], m)).toBe(false);
+  });
+  it('mission not in missionIds is not affected', () => {
+    expect(
+      C.openInvalidation(event([A1]), [att(A1, 'running')], [], other),
+    ).toBe(false);
   });
 });

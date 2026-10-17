@@ -15,6 +15,7 @@ These amendments take precedence over BUILD_PROMPT.md and TEST_PROMPT.md where t
 ## Engineering team (Claude) — user override
 
 History, for honest reporting:
+
 - Phase 0 audit, architecture draft/final and the three architecture devil's advocates ran on **Fable 5.1** (the user's first instruction: Fable for planning/review, Opus for implementation). Wave-1 builders (`w1-contracts-v1`, `w1-local-stack`) ran on **Opus 5.5**.
 - From then on the user reinstated the original team plan: **Opus** for the architect role, reviewers, the three devil's advocates (concurrency, integration, demo/novelty), the independent verifier, triage and lead integration; **Sonnet 5.5** for the ledger, runtime, integration, sandbox and frontend engineers, repair/closing engineers, the evaluation engineer, docs, and the dependency auditor. The requested ID `claude-opus-5` maps to the current Opus (`claude-opus-5-5`); Sonnet is `claude-sonnet-5-5`.
 - The team runs as Claude Code **workflow subagents** orchestrated by deterministic workflow scripts (`nemodots-build` and, in parallel, `nemodots-acceptance`), not native agent teams; label it that way in reports. Record effective model names as reported by the runtime when available.

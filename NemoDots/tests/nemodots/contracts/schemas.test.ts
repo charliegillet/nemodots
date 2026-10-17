@@ -260,6 +260,56 @@ describe('invariants', () => {
     expect(C.PlanSchema.safeParse(seven).success).toBe(false);
   });
 
+  describe('PlanSchema semantic validation', () => {
+    const task = (over: Record<string, unknown>) => ({
+      ...F.plan().tasks[0],
+      ...over,
+    });
+    const plan = (...tasks: unknown[]) => ({ tasks });
+    const t0 = F.plan().tasks[0];
+    it('accepts the fixture plan', () => {
+      expect(C.PlanSchema.safeParse(F.plan()).success).toBe(true);
+    });
+    it.each([
+      ['self dependency', plan(task({ dependsOn: [0] }), t0)],
+      ['out-of-range ordinal', plan(task({ dependsOn: [5] }), t0)],
+      [
+        'two-task cycle',
+        plan(task({ dependsOn: [1] }), task({ dependsOn: [0] })),
+      ],
+      [
+        'three-task cycle',
+        plan(
+          task({ dependsOn: [2] }),
+          task({ dependsOn: [0] }),
+          task({ dependsOn: [1] }),
+        ),
+      ],
+      ['planner role', plan(task({ role: 'planner', capabilities: [] }), t0)],
+      [
+        'postcondition role',
+        plan(task({ role: 'postcondition', capabilities: ['observe'] }), t0),
+      ],
+      [
+        'investigator proposing',
+        plan(task({ capabilities: ['observe', 'propose_cache_flush'] }), t0),
+      ],
+      [
+        'duplicate capabilities',
+        plan(task({ capabilities: ['observe', 'observe'] }), t0),
+      ],
+      ['duplicate dependsOn', plan(t0, task({ dependsOn: [0, 0] }))],
+    ])('rejects %s', (_label, p) => {
+      expect(C.PlanSchema.safeParse(p).success).toBe(false);
+    });
+    it('shape schema stays refinement-free for JSON Schema', () => {
+      expect(() => C.PlanShapeSchema.parse(F.plan())).not.toThrow();
+      expect(
+        C.PlanShapeSchema.safeParse(plan(task({ dependsOn: [0] }), t0)).success,
+      ).toBe(true);
+    });
+  });
+
   it('ActionIntent binds action, adapter, payload and target', () => {
     expect(
       C.ActionIntentSchema.safeParse({ ...F.intent(), adapter: 'redis_cache' })

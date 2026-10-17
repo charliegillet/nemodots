@@ -15,6 +15,7 @@ import {
   TaskOutputIdSchema,
 } from './ids.js';
 import type { ActionStatus } from './action.js';
+import type { MissionId } from './ids.js';
 import { SelfWriteSchema } from './observation.js';
 import type { AttemptStatus, TaskAttempt } from './task.js';
 
@@ -74,6 +75,26 @@ export const InvalidationEventSchema = z
   .strict()
   .superRefine((event, ctx) => {
     const missions = new Set(event.missionIds);
+    if (missions.size !== event.missionIds.length)
+      ctx.addIssue({
+        code: 'custom',
+        path: ['missionIds'],
+        message: 'missionIds must be unique',
+      });
+    const covered = new Set(event.perMission.map((entry) => entry.missionId));
+    if (covered.size !== event.perMission.length)
+      ctx.addIssue({
+        code: 'custom',
+        path: ['perMission'],
+        message: 'perMission must have at most one entry per mission',
+      });
+    for (const [i, id] of event.missionIds.entries())
+      if (!covered.has(id))
+        ctx.addIssue({
+          code: 'custom',
+          path: ['missionIds', i],
+          message: 'every mission in missionIds needs a perMission entry',
+        });
     for (const [i, entry] of event.perMission.entries())
       if (!missions.has(entry.missionId))
         ctx.addIssue({
@@ -142,11 +163,20 @@ export type OpenInvalidationIntent = { id: string; status: ActionStatus };
  * A successor is an attempt whose `repairOf.attemptId` names the invalidated
  * attempt; it counts when it published, or was itself invalidated and has a
  * published successor. Fail-closed: an affected id missing from `attempts` or
- * `intents` keeps the event open. With `missionId`, only that mission's
- * `perMission` subset is considered (a mission with no entry is not affected).
+ * `intents` keeps the event open. With `missionId`, that mission's `perMission`
+ * subset is used; a mission listed in `missionIds` without an entry falls back
+ * to the global affected set (fail closed); a mission not in `missionIds` is
+ * not affected (closed).
+ *
+ * Known limit (pending CONTRACTS revision, see handoff): per CONTRACTS section 6
+ * an affected `published` attempt counts as closed and `affected.taskIds` /
+ * `outputIds` are ignored, whereas ARCHITECTURE 7.1 (D9) words the rule as
+ * "terminal without a published repair". There is no published->invalidated
+ * attempt edge, so an event affecting only published attempts is closed at once.
+ * Callers needing the stricter rule must also check task/output status.
  */
 export function openInvalidation(
-  event: Pick<InvalidationEvent, 'affected' | 'perMission'>,
+  event: Pick<InvalidationEvent, 'affected' | 'perMission' | 'missionIds'>,
   attempts: readonly OpenInvalidationAttempt[],
   intents: readonly OpenInvalidationIntent[],
   missionId?: string,
@@ -154,8 +184,8 @@ export function openInvalidation(
   let affected: Affected = event.affected;
   if (missionId !== undefined) {
     const entry = event.perMission.find((item) => item.missionId === missionId);
-    if (!entry) return false;
-    affected = entry.affected;
+    if (entry) affected = entry.affected;
+    else if (!event.missionIds.includes(missionId as MissionId)) return false;
   }
   const byId = new Map(
     attempts.map((attempt) => [attempt.id as string, attempt]),
