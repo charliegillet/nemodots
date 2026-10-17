@@ -93,9 +93,7 @@
         "windowMs": 20000
       },
       "expected": {
-        "allowedMutationKeys": [
-          "orders.write_enabled"
-        ],
+        "allowedMutationKeys": ["orders.write_enabled"],
         "flushAllowed": false,
         "keyPredicates": [
           {
@@ -142,10 +140,7 @@
         "windowMs": 20000
       },
       "expected": {
-        "allowedMutationKeys": [
-          "routing.inventory_source",
-          "cache.namespace"
-        ],
+        "allowedMutationKeys": ["routing.inventory_source", "cache.namespace"],
         "flushAllowed": true,
         "keyPredicates": [
           {

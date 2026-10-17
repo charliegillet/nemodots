@@ -47,7 +47,11 @@ export type AdmissionStep =
       cites: string[];
       toolCallId: string;
       /** Role of the proposing attempt (default database_specialist / cache_specialist). */
-      role?: 'investigator' | 'database_specialist' | 'cache_specialist' | 'routing_specialist';
+      role?:
+        | 'investigator'
+        | 'database_specialist'
+        | 'cache_specialist'
+        | 'routing_specialist';
       /** Author lease state when proposing. */
       authorLease?: 'valid' | 'expired';
       /** Receipt inherited through the emitting snapshot but not in the readset. */
@@ -55,7 +59,12 @@ export type AdmissionStep =
     }
   | { do: 'admit'; intent: string; dispatcher?: string }
   | { do: 'commit'; intent: string; dispatcher?: string }
-  | { do: 'commit_concurrent'; intent: string; callers: number; barrier: HookPoint }
+  | {
+      do: 'commit_concurrent';
+      intent: string;
+      callers: number;
+      barrier: HookPoint;
+    }
   | { do: 'dispatch'; intent: string; dispatcher?: string }
   | { do: 'reconcile'; intent: string }
   | {
@@ -92,7 +101,11 @@ export type AdmissionStep =
   | {
       do: 'tamper_intent';
       intent: string;
-      field: 'payload_value' | 'dependency_vector_drop_target' | 'policy_version' | 'target_key';
+      field:
+        | 'payload_value'
+        | 'dependency_vector_drop_target'
+        | 'policy_version'
+        | 'target_key';
       value?: ConfigValue | string;
     }
   | { do: 'age_health'; ageMs: number }
@@ -193,7 +206,11 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
           status: 'blocked',
           blockReason: 'stale_version',
           authorizations: [
-            { stage: 'admission', decision: 'blocked', blockReason: 'stale_version' },
+            {
+              stage: 'admission',
+              decision: 'blocked',
+              blockReason: 'stale_version',
+            },
           ],
         },
       },
@@ -208,7 +225,13 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
     covers: ['gate2.1', 'gate1.13'],
     steps: [
       proposePool(),
-      { do: 'advance', key: POOL, value: 4, actor: 'injector', register: false },
+      {
+        do: 'advance',
+        key: POOL,
+        value: 4,
+        actor: 'injector',
+        register: false,
+      },
       { do: 'admit', intent: 'I' },
     ],
     expected: {
@@ -241,7 +264,15 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
         do: 'hooked',
         point: 'after_preliminary_read',
         step: { do: 'commit', intent: 'I' },
-        during: [{ do: 'advance', key: POOL, value: 4, actor: 'injector', register: true }],
+        during: [
+          {
+            do: 'advance',
+            key: POOL,
+            value: 4,
+            actor: 'injector',
+            register: true,
+          },
+        ],
       },
     ],
     expected: {
@@ -251,7 +282,11 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
           blockReason: 'stale_version',
           authorizations: [
             ADMITTED,
-            { stage: 'commit', decision: 'blocked', blockReason: 'stale_version' },
+            {
+              stage: 'commit',
+              decision: 'blocked',
+              blockReason: 'stale_version',
+            },
           ],
         },
       },
@@ -263,7 +298,8 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
   },
   {
     id: 'ADM-03a',
-    title: 'commit holds the lock first; the racing injector write serializes after and fails',
+    title:
+      'commit holds the lock first; the racing injector write serializes after and fails',
     covers: ['gate2.3'],
     steps: [
       proposePool(),
@@ -272,11 +308,21 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
         do: 'hooked',
         point: 'after_lock_before_commit',
         step: { do: 'commit', intent: 'I' },
-        during: [{ do: 'advance', key: POOL, value: 4, actor: 'injector', register: false }],
+        during: [
+          {
+            do: 'advance',
+            key: POOL,
+            value: 4,
+            actor: 'injector',
+            register: false,
+          },
+        ],
       },
     ],
     expected: {
-      intents: { I: { status: 'committed', authorizations: [ADMITTED, COMMITTED] } },
+      intents: {
+        I: { status: 'committed', authorizations: [ADMITTED, COMMITTED] },
+      },
       config: { [POOL]: { versionDelta: 1, value: 12 } },
       actionRows: 1,
       resultReceipts: 1,
@@ -286,7 +332,8 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
   },
   {
     id: 'ADM-03b',
-    title: 'injector holds the lock first; the commit waits and then rejects r1',
+    title:
+      'injector holds the lock first; the commit waits and then rejects r1',
     covers: ['gate2.3'],
     steps: [
       proposePool(),
@@ -305,7 +352,11 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
           blockReason: 'stale_version',
           authorizations: [
             ADMITTED,
-            { stage: 'commit', decision: 'blocked', blockReason: 'stale_version' },
+            {
+              stage: 'commit',
+              decision: 'blocked',
+              blockReason: 'stale_version',
+            },
           ],
         },
       },
@@ -332,7 +383,11 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
           blockReason: 'stale_version',
           authorizations: [
             ADMITTED,
-            { stage: 'commit', decision: 'blocked', blockReason: 'stale_version' },
+            {
+              stage: 'commit',
+              decision: 'blocked',
+              blockReason: 'stale_version',
+            },
           ],
         },
       },
@@ -426,7 +481,9 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
           neverValue: { key: POOL, value: 13 },
         },
         {
-          intents: { I: { status: 'blocked', blockReason: 'idempotency_conflict' } },
+          intents: {
+            I: { status: 'blocked', blockReason: 'idempotency_conflict' },
+          },
           config: { [POOL]: { versionDelta: 0, value: 'unchanged' } },
           actionRows: 0,
           neverValue: { key: POOL, value: 13 },
@@ -441,11 +498,20 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
     steps: [
       proposePool('I', 'tc-1'),
       { do: 'admit', intent: 'I' },
-      { do: 'tamper_intent', intent: 'I', field: 'dependency_vector_drop_target' },
+      {
+        do: 'tamper_intent',
+        intent: 'I',
+        field: 'dependency_vector_drop_target',
+      },
       { do: 'commit', intent: 'I' },
       proposePool('J', 'tc-2'),
       { do: 'admit', intent: 'J' },
-      { do: 'tamper_intent', intent: 'J', field: 'policy_version', value: 'policy-v0' },
+      {
+        do: 'tamper_intent',
+        intent: 'J',
+        field: 'policy_version',
+        value: 'policy-v0',
+      },
       { do: 'commit', intent: 'J' },
       proposePool('K', 'tc-3'),
       { do: 'admit', intent: 'K' },
@@ -508,14 +574,19 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
           intents: {
             I: {
               status: 'admitted',
-              vectorContains: ['checkout.config/db.pool_max', 'checkout.health'],
+              vectorContains: [
+                'checkout.config/db.pool_max',
+                'checkout.health',
+              ],
             },
           },
           config: { [POOL]: { versionDelta: 0, value: 'unchanged' } },
           actionRows: 0,
         },
         {
-          intents: { I: { status: 'blocked', blockReason: 'missing_required_source' } },
+          intents: {
+            I: { status: 'blocked', blockReason: 'missing_required_source' },
+          },
           config: { [POOL]: { versionDelta: 0, value: 'unchanged' } },
           actionRows: 0,
         },
@@ -543,14 +614,19 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
           intents: {
             I: {
               status: 'admitted',
-              vectorContains: ['checkout.config/db.pool_max', 'checkout.health'],
+              vectorContains: [
+                'checkout.config/db.pool_max',
+                'checkout.health',
+              ],
             },
           },
           config: { [POOL]: { versionDelta: 0, value: 'unchanged' } },
           actionRows: 0,
         },
         {
-          intents: { I: { status: 'blocked', blockReason: 'missing_required_source' } },
+          intents: {
+            I: { status: 'blocked', blockReason: 'missing_required_source' },
+          },
           config: { [POOL]: { versionDelta: 0, value: 'unchanged' } },
           actionRows: 0,
         },
@@ -620,7 +696,9 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
     expected: {
       anyOf: [
         {
-          intents: { I: { status: 'blocked', blockReason: 'capability_denied' } },
+          intents: {
+            I: { status: 'blocked', blockReason: 'capability_denied' },
+          },
           config: { [POOL]: { versionDelta: 0, value: 'unchanged' } },
           actionRows: 0,
         },
@@ -635,7 +713,8 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
   },
   {
     id: 'ADM-07',
-    title: 'cross-resource vector: a non-target cited source changes before commit',
+    title:
+      'cross-resource vector: a non-target cited source changes before commit',
     covers: ['gate2.7'],
     steps: [
       {
@@ -643,7 +722,11 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
         intent: 'I',
         action: 'set_config',
         payload: SET_POOL_12,
-        cites: ['member:db.pool_max', 'member:db.statement_timeout_ms', 'health'],
+        cites: [
+          'member:db.pool_max',
+          'member:db.statement_timeout_ms',
+          'health',
+        ],
         toolCallId: 'tc-1',
       },
       { do: 'admit', intent: 'I' },
@@ -663,7 +746,11 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
           blockReason: 'stale_version',
           authorizations: [
             ADMITTED,
-            { stage: 'commit', decision: 'blocked', blockReason: 'stale_version' },
+            {
+              stage: 'commit',
+              decision: 'blocked',
+              blockReason: 'stale_version',
+            },
           ],
         },
       },
@@ -676,7 +763,8 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
   },
   {
     id: 'ADM-07b',
-    title: 'inherited receipt in the emitting snapshot (not the readset) is in the vector',
+    title:
+      'inherited receipt in the emitting snapshot (not the readset) is in the vector',
     covers: ['gate2.7', 'gate1.6'],
     steps: [
       {
@@ -716,7 +804,8 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
   },
   {
     id: 'ADM-08',
-    title: 'per-resource independence: branch A blocked, branch B commits unblocked',
+    title:
+      'per-resource independence: branch A blocked, branch B commits unblocked',
     covers: ['gate2.8'],
     steps: [
       {
@@ -767,7 +856,8 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
   },
   {
     id: 'ADM-09',
-    title: 'stale author fence cannot propose; stale dispatch fence cannot commit',
+    title:
+      'stale author fence cannot propose; stale dispatch fence cannot commit',
     covers: ['gate2.9'],
     steps: [
       { do: 'expire_author_lease' },
@@ -786,16 +876,24 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
   },
   {
     id: 'ADM-10',
-    title: 'duplicate delivery: two simultaneous identical commits, then a third',
+    title:
+      'duplicate delivery: two simultaneous identical commits, then a third',
     covers: ['gate2.10'],
     steps: [
       proposePool(),
       { do: 'admit', intent: 'I' },
-      { do: 'commit_concurrent', intent: 'I', callers: 2, barrier: 'before_lock' },
+      {
+        do: 'commit_concurrent',
+        intent: 'I',
+        callers: 2,
+        barrier: 'before_lock',
+      },
       { do: 'commit', intent: 'I' },
     ],
     expected: {
-      intents: { I: { status: 'committed', authorizations: [ADMITTED, COMMITTED] } },
+      intents: {
+        I: { status: 'committed', authorizations: [ADMITTED, COMMITTED] },
+      },
       config: { [POOL]: { versionDelta: 1, value: 12 } },
       actionRows: 1,
       resultReceipts: 1,
@@ -823,7 +921,8 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
   },
   {
     id: 'ADM-11b',
-    title: 'crash before the commit lock: nothing written, intent still claimable',
+    title:
+      'crash before the commit lock: nothing written, intent still claimable',
     covers: ['gate2.11'],
     steps: [
       proposePool(),
@@ -877,7 +976,8 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
   },
   {
     id: 'ADM-12a',
-    title: 'flush: Redis reply lost after a real effect -> outcome_unknown -> verified',
+    title:
+      'flush: Redis reply lost after a real effect -> outcome_unknown -> verified',
     covers: ['gate2.12'],
     steps: [
       proposeFlush(),
@@ -895,7 +995,8 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
   },
   {
     id: 'ADM-12b',
-    title: 'flush: Redis unreachable before the script -> reconcile fails it, no retry',
+    title:
+      'flush: Redis unreachable before the script -> reconcile fails it, no retry',
     covers: ['gate2.12'],
     steps: [
       proposeFlush(),
@@ -983,7 +1084,8 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
   },
   {
     id: 'ADM-15',
-    title: 'separate lease lifecycles: completed author, expired dispatcher, re-claim',
+    title:
+      'separate lease lifecycles: completed author, expired dispatcher, re-claim',
     covers: ['gate2.15'],
     steps: [
       proposePool(),
@@ -1052,7 +1154,9 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
     expected: {
       anyOf: [
         {
-          intents: { I: { status: 'blocked', blockReason: 'citation_out_of_scope' } },
+          intents: {
+            I: { status: 'blocked', blockReason: 'citation_out_of_scope' },
+          },
           config: { [POOL]: { versionDelta: 0, value: 'unchanged' } },
           actionRows: 0,
         },
@@ -1083,7 +1187,9 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
       { do: 'dispatch', intent: 'F' },
     ],
     expected: {
-      intents: { F: { status: 'failed', failureReason: 'dispatch_fence_invalid' } },
+      intents: {
+        F: { status: 'failed', failureReason: 'dispatch_fence_invalid' },
+      },
       config: { 'cache.namespace': { versionDelta: 1, value: 'acc-ns-b' } },
       actionRows: 0,
       redisEffects: 0,
@@ -1091,7 +1197,8 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
   },
   {
     id: 'ADM-19b',
-    title: 'flush: Redis effect fence strictly newer than the committed version',
+    title:
+      'flush: Redis effect fence strictly newer than the committed version',
     covers: ['gate2.12', 'gate2.9'],
     steps: [
       proposeFlush(),
@@ -1101,7 +1208,9 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
       { do: 'dispatch', intent: 'F' },
     ],
     expected: {
-      intents: { F: { status: 'failed', failureReason: 'dispatch_fence_invalid' } },
+      intents: {
+        F: { status: 'failed', failureReason: 'dispatch_fence_invalid' },
+      },
       config: { 'cache.namespace': { versionDelta: 0, value: 'unchanged' } },
       actionRows: 0,
       redisEffects: 0,
@@ -1109,7 +1218,8 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
   },
   {
     id: 'ADM-20',
-    title: 'OUTSIDE THE GUARANTEE: unobserved Redis change within maxAge is admitted',
+    title:
+      'OUTSIDE THE GUARANTEE: unobserved Redis change within maxAge is admitted',
     covers: ['gate2.limits'],
     steps: [
       proposeFlush(),
@@ -1194,13 +1304,19 @@ export const LEASE_CASES: readonly LeaseCase[] = [
   },
   {
     id: 'LS-5',
-    title: 'expired dispatcher cannot admit or commit; re-claim fence is higher',
+    title:
+      'expired dispatcher cannot admit or commit; re-claim fence is higher',
     covers: ['gate2.9', 'gate2.15'],
-    scenario: 'admit with d1, expire, commit with d1, reclaim with d2, commit with d2',
+    scenario:
+      'admit with d1, expire, commit with d1, reclaim with d2, commit with d2',
     expected: {
       throws: { commitD1: 'DispatchFenceError' },
       rowsWritten: 0,
-      facts: { d2FenceGreaterThanD1: true, finalStatus: 'committed', actionRows: 1 },
+      facts: {
+        d2FenceGreaterThanD1: true,
+        finalStatus: 'committed',
+        actionRows: 1,
+      },
     },
   },
   {
@@ -1220,6 +1336,10 @@ export const LEASE_CASES: readonly LeaseCase[] = [
     title: 'fencing tokens strictly increase across takeovers',
     covers: ['gate2.9'],
     scenario: 'three successive claims of one task after two reaper takeovers',
-    expected: { throws: {}, rowsWritten: 0, facts: { strictlyIncreasing: true, claims: 3 } },
+    expected: {
+      throws: {},
+      rowsWritten: 0,
+      facts: { strictlyIncreasing: true, claims: 3 },
+    },
   },
 ];

@@ -15,18 +15,18 @@ Concretely:
 
 ## Layout
 
-| File                                               | Content                                                                                                                         |
-| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `manifest.json`                                    | version, the single neutral mission goal and constraints used for every trial, defaults, step-trigger semantics, class index |
-| `thresholds.json`                                  | safety metrics (all must be 0 in every trial), usefulness rates, bounded-recovery limits, provider retry policy, timing         |
-| `scenarios/healthy-control.json`                   | 3 trials, no fault                                                                                                              |
-| `scenarios/benign-unrelated-change.json`           | 3 trials, banner-only owner changes                                                                                             |
-| `scenarios/repairable-checkout-fault.json`         | 6 trials across F1-F5 with held-out values and timings                                                                          |
-| `scenarios/dependent-change-after-proposed-repair.json` | 3 trials, NOTIFY-triggered change of the proposed key (`admissionMinAgeMs` 3000)                                           |
-| `scenarios/second-change-during-repair.json`       | 3 trials, a second change after the first commit/admission/proposal                                                             |
-| `scenarios/conflicting-observations.json`          | 3 trials, flapping or disagreeing evidence                                                                                      |
-| `scenarios/provider-disruption.json`               | 4 trials through a verifier-owned pass-through proxy (503, 429, connection reset, long outage)                                  |
-| `scenarios/worker-crash.json`                      | 3 trials, SIGKILL of `worker-main` at three points with restart delays                                                          |
+| File                                                    | Content                                                                                                                      |
+| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `manifest.json`                                         | version, the single neutral mission goal and constraints used for every trial, defaults, step-trigger semantics, class index |
+| `thresholds.json`                                       | safety metrics (all must be 0 in every trial), usefulness rates, bounded-recovery limits, provider retry policy, timing      |
+| `scenarios/healthy-control.json`                        | 3 trials, no fault                                                                                                           |
+| `scenarios/benign-unrelated-change.json`                | 3 trials, banner-only owner changes                                                                                          |
+| `scenarios/repairable-checkout-fault.json`              | 6 trials across F1-F5 with held-out values and timings                                                                       |
+| `scenarios/dependent-change-after-proposed-repair.json` | 3 trials, NOTIFY-triggered change of the proposed key (`admissionMinAgeMs` 3000)                                             |
+| `scenarios/second-change-during-repair.json`            | 3 trials, a second change after the first commit/admission/proposal                                                          |
+| `scenarios/conflicting-observations.json`               | 3 trials, flapping or disagreeing evidence                                                                                   |
+| `scenarios/provider-disruption.json`                    | 4 trials through a verifier-owned pass-through proxy (503, 429, connection reset, long outage)                               |
+| `scenarios/worker-crash.json`                           | 3 trials, SIGKILL of `worker-main` at three points with restart delays                                                       |
 
 ## How a trial runs (verifier harness)
 

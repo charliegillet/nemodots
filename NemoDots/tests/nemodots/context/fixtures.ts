@@ -77,7 +77,11 @@ export function baseInput(
     task: { title: 'Find the cause', question: 'Why do checkouts fail?' },
     runbooks: [
       { id: 'cache', title: 'Cache semantics', text: 'Namespaces scope keys.' },
-      { id: 'pool', title: 'Pool sizing', text: 'Pool size bounds concurrency.' },
+      {
+        id: 'pool',
+        title: 'Pool sizing',
+        text: 'Pool size bounds concurrency.',
+      },
     ],
     receipts: [cacheReceipt(), poolReceipt(), healthReceipt()],
     inheritedArtifacts: [],

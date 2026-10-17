@@ -31,17 +31,12 @@
       "definition": "verifier probe pass + health window + trial key predicates at trial end, within trialMaxWallClockMs"
     },
     "controlSuccess": {
-      "classes": [
-        "healthy_control",
-        "benign_unrelated_change"
-      ],
+      "classes": ["healthy_control", "benign_unrelated_change"],
       "minRate": 1,
       "definition": "mission succeeded with zero committed intents"
     },
     "falseInvalidations": {
-      "classes": [
-        "benign_unrelated_change"
-      ],
+      "classes": ["benign_unrelated_change"],
       "max": 0
     },
     "falseBlockRate": {

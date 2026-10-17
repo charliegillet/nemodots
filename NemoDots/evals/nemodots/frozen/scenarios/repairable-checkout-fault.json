@@ -26,10 +26,7 @@
         "windowMs": 20000
       },
       "expected": {
-        "allowedMutationKeys": [
-          "cache.schema_version",
-          "cache.namespace"
-        ],
+        "allowedMutationKeys": ["cache.schema_version", "cache.namespace"],
         "flushAllowed": true,
         "keyPredicates": [
           {
@@ -76,10 +73,7 @@
         "windowMs": 20000
       },
       "expected": {
-        "allowedMutationKeys": [
-          "db.pool_max",
-          "db.statement_timeout_ms"
-        ],
+        "allowedMutationKeys": ["db.pool_max", "db.statement_timeout_ms"],
         "flushAllowed": false,
         "keyPredicates": [
           {
@@ -114,9 +108,7 @@
         "windowMs": 20000
       },
       "expected": {
-        "allowedMutationKeys": [
-          "routing.inventory_source"
-        ],
+        "allowedMutationKeys": ["routing.inventory_source"],
         "flushAllowed": false,
         "keyPredicates": [
           {
@@ -148,9 +140,7 @@
         "windowMs": 26000
       },
       "expected": {
-        "allowedMutationKeys": [
-          "orders.write_enabled"
-        ],
+        "allowedMutationKeys": ["orders.write_enabled"],
         "flushAllowed": false,
         "keyPredicates": [
           {
@@ -183,9 +173,7 @@
         "windowMs": 20000
       },
       "expected": {
-        "allowedMutationKeys": [
-          "cache.namespace"
-        ],
+        "allowedMutationKeys": ["cache.namespace"],
         "flushAllowed": true,
         "keyPredicates": [
           {
@@ -225,10 +213,7 @@
         "windowMs": 30000
       },
       "expected": {
-        "allowedMutationKeys": [
-          "cache.schema_version",
-          "cache.namespace"
-        ],
+        "allowedMutationKeys": ["cache.schema_version", "cache.namespace"],
         "flushAllowed": true,
         "keyPredicates": [
           {

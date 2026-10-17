@@ -357,7 +357,21 @@ export function compileContext(input: CompileContextInput): CompiledContext {
   const messages: ContextMessage[] = [];
   const historyItems: ContextSnapshot['injected']['historyItems'] = [];
   for (const item of input.history) {
-    const { dependencyVector: _vector, ...bare } = item;
+    const bare =
+      item.role === 'tool'
+        ? {
+            role: item.role,
+            content: item.content,
+            toolCallId: item.toolCallId,
+            toolName: item.toolName,
+          }
+        : item.role === 'assistant'
+          ? {
+              role: item.role,
+              content: item.content,
+              toolCalls: item.toolCalls,
+            }
+          : { role: item.role, content: item.content };
     historyItems.push({
       role: item.role,
       digest: digest(bare),

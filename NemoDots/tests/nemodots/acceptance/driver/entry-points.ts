@@ -33,13 +33,17 @@ export class DriverWiringPendingError extends Error {
 
 export const ENTRY = {
   // Wave 2 ledger
-  registerObservation: 'src/server/nemodots/ledger/receipts.ts#registerObservation',
-  supersedeAndInvalidate: 'src/server/nemodots/ledger/invalidation.ts#supersedeAndInvalidate',
-  registerWithoutClosure: 'src/server/nemodots/ledger/invalidation.ts#registerWithoutClosure',
+  registerObservation:
+    'src/server/nemodots/ledger/receipts.ts#registerObservation',
+  supersedeAndInvalidate:
+    'src/server/nemodots/ledger/invalidation.ts#supersedeAndInvalidate',
+  registerWithoutClosure:
+    'src/server/nemodots/ledger/invalidation.ts#registerWithoutClosure',
   ledgerEdges: 'src/server/nemodots/ledger/edges.ts',
   ledgerSupport: 'src/server/nemodots/ledger/support.ts',
   recordModelCall: 'src/server/nemodots/ledger/model-calls.ts#recordModelCall',
-  recordOrphanedAttempt: 'src/server/nemodots/ledger/model-calls.ts#recordOrphanedAttempt',
+  recordOrphanedAttempt:
+    'src/server/nemodots/ledger/model-calls.ts#recordOrphanedAttempt',
   // Wave 2 coordinator
   coordinatorMissions: 'src/server/nemodots/coordinator/missions.ts',
   coordinatorTasks: 'src/server/nemodots/coordinator/tasks.ts',
@@ -47,7 +51,8 @@ export const ENTRY = {
   coordinatorPublish: 'src/server/nemodots/coordinator/publish.ts',
   coordinatorRecovery: 'src/server/nemodots/coordinator/recovery.ts',
   // Wave 2 sandbox
-  advanceConfig: 'src/server/nemodots/sandbox/version-authority.ts#advanceConfig',
+  advanceConfig:
+    'src/server/nemodots/sandbox/version-authority.ts#advanceConfig',
   seed: 'src/server/nemodots/sandbox/seed.ts',
   checkoutMain: 'src/server/nemodots/sandbox/checkout-main.ts',
   checkoutMigration: 'src/server/nemodots/db/migrations/0004_checkout.ts',
@@ -87,7 +92,10 @@ export async function requireEntry(name: EntryName): Promise<unknown> {
   const specifier = pathToFileURL(absolute).href;
   let mod: Record<string, unknown>;
   try {
-    mod = (await import(/* @vite-ignore */ specifier)) as Record<string, unknown>;
+    mod = (await import(/* @vite-ignore */ specifier)) as Record<
+      string,
+      unknown
+    >;
   } catch (error) {
     throw new EntryPointMissingError(
       entryPoint,
