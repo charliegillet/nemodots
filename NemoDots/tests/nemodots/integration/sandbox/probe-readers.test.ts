@@ -309,10 +309,12 @@ describe('readers: controlled config sources', () => {
         version: 2,
       });
 
-      // insert changes membership; the absent key reads as null with the collection version as hint
+      // insert changes membership; a key that never existed reads as null at
+      // member revision 0 (the collection version travels separately in raw)
       const absent = await read(s, 'checkout.config/exp.flag');
       expect(absent.normalizedValue).toBeNull();
-      expect(absent.revisionHint).toBe(8);
+      expect(absent.revisionHint).toBe(0);
+      expect(absent.raw).toMatchObject({ collectionRevision: 8 });
       await advanceConfigTx(s.pools.injector, {
         key: 'exp.flag',
         value: true,
@@ -327,6 +329,92 @@ describe('readers: controlled config sources', () => {
       expect(after.collectionVersion).toBe(9);
       expect(after.keys).toContain('exp.flag');
       expect([...after.keys].sort()).toEqual(after.keys);
+    });
+  });
+
+  it('an absent member is reported at its own tombstone revision: delete -> read -> re-insert -> read strictly increases', async () => {
+    await withSandbox(async (s) => {
+      const key = 'exp.flag';
+      const insert = (value: boolean) =>
+        advanceConfigTx(s.pools.injector, {
+          key,
+          value,
+          expectedVersion: 0,
+          insertIfMissing: true,
+          causedBy: { actor: 'injector' },
+        });
+      // push the collection counter well past the member counter
+      await insert(true);
+      const bump = await advanceConfigTx(s.pools.injector, {
+        key,
+        value: false,
+        expectedVersion: 1,
+        causedBy: { actor: 'injector' },
+      });
+      for (const other of ['exp.a', 'exp.b', 'exp.c']) {
+        await advanceConfigTx(s.pools.injector, {
+          key: other,
+          value: 1,
+          expectedVersion: 0,
+          insertIfMissing: true,
+          causedBy: { actor: 'injector' },
+        });
+        await advanceConfigTx(s.pools.injector, {
+          key: other,
+          deleteKey: true,
+          expectedVersion: 1,
+          causedBy: { actor: 'injector' },
+        });
+      }
+      const present = await read(s, `checkout.config/${key}`);
+      expect(present.revisionHint).toBe(bump.versionAfter);
+      await advanceConfigTx(s.pools.injector, {
+        key,
+        deleteKey: true,
+        expectedVersion: bump.versionAfter,
+        causedBy: { actor: 'injector' },
+      });
+      const absent = await read(s, `checkout.config/${key}`);
+      expect(absent.normalizedValue).toBeNull();
+      expect(absent.revisionHint).toBe(bump.versionAfter + 1);
+      const collectionNow = (
+        (await read(s, 'checkout.config')).normalizedValue as {
+          collectionVersion: number;
+        }
+      ).collectionVersion;
+      expect(collectionNow).toBeGreaterThan(absent.revisionHint as number);
+      expect((absent.raw as { collectionRevision: number }).collectionRevision).toBe(
+        collectionNow,
+      );
+      await insert(true);
+      const again = await read(s, `checkout.config/${key}`);
+      expect(again.revisionHint).toBe(bump.versionAfter + 2);
+      expect(present.revisionHint as number).toBeLessThan(
+        absent.revisionHint as number,
+      );
+      expect(absent.revisionHint as number).toBeLessThan(
+        again.revisionHint as number,
+      );
+    });
+  });
+
+  it('reader traffic carries the observer tag when given the probe secret: /inventory/<sku> stays out of the metrics windows', async () => {
+    await withSandbox(async (s) => {
+      const tagged = createSourceReaders({
+        pg: s.pools.app,
+        redisPrefix: s.redis.prefix,
+        checkoutUrl: 'http://checkout.invalid',
+        fetch: s.fetch,
+        now: s.clock.now,
+        probeSecret: s.probeSecret,
+      });
+      const value = (await tagged.read('checkout.inventory/SKU-0001' as SourceKey, scope))
+        .normalizedValue as { consistent: boolean };
+      expect(value.consistent).toBe(true);
+      expect((await s.request('/metrics')).body.requests.total).toBe(0);
+      // without the secret the read is ordinary tracked traffic
+      await read(s, 'checkout.inventory/SKU-0001');
+      expect((await s.request('/metrics')).body.requests.total).toBeGreaterThan(0);
     });
   });
 

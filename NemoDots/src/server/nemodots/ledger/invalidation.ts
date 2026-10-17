@@ -43,7 +43,10 @@ import {
  * after ClosureCapExceeded: it has paused the affected missions
  * (`ClosureCapExceeded.missionIds`) and passes the coarse affected set as
  * `options.coarse`; a closure_cap_exceeded InvalidationEvent with
- * closure.capped = true is recorded and the source stays observable.
+ * closure.capped = true is recorded, the coarse set gets the same
+ * compare-and-set marks as a real closure, and the source stays observable.
+ * Superseding a live receipt without a coarse set throws
+ * CoarseInvalidationRequiredError before anything is written.
  */
 export function registerWithoutClosure(
   client: PgClient,

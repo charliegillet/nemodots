@@ -4,7 +4,7 @@ import type {
   MissionControlPort,
   MissionId,
   MissionSnapshot,
-  ObservationReceipt,
+  ReceiptId,
 } from '../contracts/index.js';
 import {
   acceptMission,
@@ -24,8 +24,8 @@ import type { CoordinatorDeps } from './types.js';
 
 // MissionControlPort (CONTRACTS.md section 10) over the CAS lifecycle in
 // missions.ts. `succeeded` is reachable only through awaiting_acceptance with a
-// supported acceptance probe receipt whose verdict is pass AND zero open
-// invalidations (completeAcceptance / acceptMission).
+// ledger-verified, current acceptance probe receipt whose verdict is pass AND
+// nothing blocking the mission from settling (completeAcceptance / acceptMission).
 
 export type ControlDeps = Pick<
   CoordinatorDeps,
@@ -37,6 +37,7 @@ export type ControlDeps = Pick<
   | 'providerHealthy'
   | 'probe'
   | 'snapshotReader'
+  | 'supportValidator'
 >;
 
 export interface MissionControl extends MissionControlPort {
@@ -45,10 +46,14 @@ export interface MissionControl extends MissionControlPort {
   evaluate(missionId: MissionId): Promise<EvaluationOutcome>;
   /** Run the acceptance probe and settle an awaiting_acceptance mission. */
   accept(missionId: MissionId): Promise<Mission>;
-  /** Settle an awaiting_acceptance mission from a probe receipt the caller already holds. */
+  /**
+   * Settle an awaiting_acceptance mission from a probe receipt id. The receipt
+   * is re-read from the ledger and re-validated under the mission lock; nothing
+   * but the id is trusted.
+   */
   completeAcceptance(
     missionId: MissionId,
-    receipt: ObservationReceipt,
+    receiptId: ReceiptId,
   ): Promise<Mission>;
   fail(missionId: MissionId, reason: string): Promise<Mission>;
 }
@@ -65,8 +70,8 @@ export function createMissionControl(deps: ControlDeps): MissionControl {
     get: (missionId) => getMission(deps, missionId),
     evaluate: (missionId) => evaluateMission(deps, missionId),
     accept: (missionId) => acceptMission(deps, missionId),
-    completeAcceptance: (missionId, receipt) =>
-      completeAcceptance(deps, missionId, receipt),
+    completeAcceptance: (missionId, receiptId) =>
+      completeAcceptance(deps, missionId, receiptId),
     fail: (missionId, reason) => failMission(deps, missionId, reason),
   };
 }

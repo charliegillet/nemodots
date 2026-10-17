@@ -92,6 +92,8 @@ export interface GraphTask {
   id: TaskId;
   parentId: TaskId | null;
   prerequisites: readonly TaskId[];
+  /** Current status; a `failed` or `cancelled` task can never satisfy a dependency. */
+  status?: string;
 }
 
 export interface DelegationFacts {
@@ -174,9 +176,18 @@ export function validateDelegation(
       `mission already has ${facts.totalTasks} of ${limits.maxTasks} tasks`,
     );
   const known = new Map(facts.tasks.map((task) => [task.id, task]));
-  for (const id of request.dependsOn)
-    if (!known.has(id))
+  for (const id of request.dependsOn) {
+    const prerequisite = known.get(id);
+    if (!prerequisite)
       issues.push(`dependsOn ${id} is not a task of this mission`);
+    else if (
+      prerequisite.status === 'failed' ||
+      prerequisite.status === 'cancelled'
+    )
+      issues.push(
+        `dependsOn ${id} is ${prerequisite.status}: it can never succeed, so a task waiting for it would never run`,
+      );
+  }
   if (new Set(request.dependsOn).size !== request.dependsOn.length)
     issues.push('dependsOn must be unique');
   if (

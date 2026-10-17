@@ -253,6 +253,24 @@ export async function promoteRunnable(
   return promoted;
 }
 
+/**
+ * Fails a task that cannot continue. A `leased` task (its worker died or gave up
+ * between claim and start) has no direct `leased -> failed` edge in
+ * contracts/transitions.ts, so it passes through `running` (the legal path)
+ * first; the extra task.status event carries the same reason.
+ */
+export async function failTask(
+  tx: TxCtx,
+  task: TaskRow,
+  options: { reason: string; bumpFence?: boolean },
+): Promise<TaskRow> {
+  const current =
+    task.status === 'leased'
+      ? await transitionTask(tx, task, 'running', { reason: options.reason })
+      : task;
+  return transitionTask(tx, current, 'failed', options);
+}
+
 export interface RequeueOptions {
   reason: string;
   repair?: TaskRepair | null;

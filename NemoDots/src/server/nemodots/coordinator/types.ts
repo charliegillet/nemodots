@@ -94,7 +94,11 @@ export interface LedgerWriterPort {
 export interface OrphanedAttemptInfo {
   context: AttemptContext;
   record: ModelCallRecord;
-  fenceReason: FenceReason;
+  /**
+   * Why the fenced record was rejected: a FenceReason, or `publication_rejected`
+   * when the SupportValidator found the call's snapshot receipts superseded.
+   */
+  fenceReason: FenceReason | 'publication_rejected';
 }
 export type RecordOrphanedAttempt = (
   info: OrphanedAttemptInfo,

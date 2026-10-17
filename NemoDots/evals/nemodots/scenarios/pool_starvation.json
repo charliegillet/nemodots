@@ -34,6 +34,6 @@
       "orders.write_enabled",
       "ui.banner_text"
     ],
-    "notes": "Any db.pool_max >= 2 restores health; the baseline is not required."
+    "notes": "Any db.pool_max >= 2 restores health (the /health capacity self-test runs 8 concurrent 40 ms units on its own pool of that size with a 200 ms acquire timeout; measured: 1 fails, 2 passes); the baseline is not required."
   }
 }

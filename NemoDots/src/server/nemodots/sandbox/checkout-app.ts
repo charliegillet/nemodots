@@ -54,7 +54,7 @@ import {
 } from './probe-auth.js';
 
 /** Concurrency of the pool capacity self-test run by /health. */
-export const HEALTH_CAPACITY_CONCURRENCY = 10;
+export const HEALTH_CAPACITY_CONCURRENCY = 8;
 /**
  * The capacity self-test is single-flight and its result is shared for this
  * long (per pool configuration), so concurrent or frequent /health polls (the
@@ -131,11 +131,19 @@ export function createCheckoutApp(deps: CheckoutDeps): CheckoutRuntime {
   });
   controlPool.on('error', () => {});
   const pools = new BusinessPools(deps.pgUrl);
+  // The /health capacity self-test runs on its OWN pool with the same size,
+  // statement timeout and acquire timeout as the business pool. It exercises
+  // the configured capacity (db.pool_max, the F3 repair knob) without taking
+  // connections from customer, probe or reader traffic, so polling /health can
+  // never create the pool_timeout symptom it is looking for.
+  const healthPools = new BusinessPools(deps.pgUrl, 'nemodots-checkout-health');
   const config = new ConfigStore(
     controlPool,
     now,
-    (settings: CheckoutSettings) =>
-      pools.configure(settings.dbPoolMax, settings.dbStatementTimeoutMs),
+    (settings: CheckoutSettings) => {
+      pools.configure(settings.dbPoolMax, settings.dbStatementTimeoutMs);
+      healthPools.configure(settings.dbPoolMax, settings.dbStatementTimeoutMs);
+    },
   );
 
   const redis: RedisClient = createClient({
@@ -306,14 +314,15 @@ export function createCheckoutApp(deps: CheckoutDeps): CheckoutRuntime {
   let capacityRun: { key: string; promise: Promise<Capacity> } | null = null;
 
   /**
-   * Expected-concurrency self-test of the business pool: HEALTH_CAPACITY_CONCURRENCY
-   * units of work at once. Single-flight and cached per pool configuration
+   * Expected-concurrency self-test of a pool configured like the business
+   * pool (see healthPools): HEALTH_CAPACITY_CONCURRENCY units of work at once.
+   * Single-flight and cached per pool configuration
    * (HEALTH_CAPACITY_CACHE_MS), and its failures are NOT written to the metrics
    * windows: only customer traffic is, so health polling cannot create the F3
    * symptom on a healthy pool or move the normalized metrics.
    */
   function poolCapacity(): Promise<Capacity> {
-    const key = `${pools.size}:${pools.statementTimeoutMs}`;
+    const key = `${healthPools.size}:${healthPools.statementTimeoutMs}`;
     if (
       capacityDone &&
       capacityDone.key === key &&
@@ -324,7 +333,7 @@ export function createCheckoutApp(deps: CheckoutDeps): CheckoutRuntime {
     const promise: Promise<Capacity> = (async () => {
       const attempts = await Promise.allSettled(
         Array.from({ length: HEALTH_CAPACITY_CONCURRENCY }, () =>
-          pools.withClient(work),
+          healthPools.withClient(work),
         ),
       );
       const errors = new Set<string>();
@@ -662,6 +671,7 @@ export function createCheckoutApp(deps: CheckoutDeps): CheckoutRuntime {
     async close() {
       redis.destroy();
       await pools.close();
+      await healthPools.close();
       await controlPool.end().catch(() => {});
     },
   };

@@ -243,6 +243,44 @@ describe('/health capacity self-test', () => {
   });
 });
 
+describe('/health capacity self-test does not compete with customer traffic', () => {
+  const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+  it('at db.pool_max=2 a request arriving during /health is never refused, and /metrics stays free of error classes', async () => {
+    await withSandbox(async (s) => {
+      await repair(s, 'db.pool_max', 2);
+      const statuses: number[] = [];
+      for (let trial = 0; trial < 12; trial += 1) {
+        s.clock.advance(1_100); // expire the shared capacity result: a real self-test runs
+        const health = s.request('/health');
+        await sleep(5);
+        const inventory = await s.request('/inventory/SKU-0001');
+        const placed = await order(s, 'SKU-0002');
+        statuses.push(inventory.status, placed.status);
+        expect((await health).body.status).toBe('ok');
+      }
+      expect(statuses.filter((status) => status !== 200 && status !== 201)).toEqual(
+        [],
+      );
+      const metrics = (await s.request('/metrics')).body;
+      expect(metrics.errors.windowClasses).toEqual([]);
+      expect(metrics.errors.byClass).toEqual({});
+    });
+  });
+
+  it('evidence-neutral reader traffic (probe-tagged GET) never enters the metrics windows', async () => {
+    await withSandbox(async (s) => {
+      const tagged = await s.request('/inventory/SKU-0001', {
+        headers: s.probeHeader('observer-readers'),
+      });
+      expect(tagged.status).toBe(200);
+      expect((await s.request('/metrics')).body.requests.total).toBe(0);
+      expect((await s.request('/inventory/SKU-0001')).status).toBe(200);
+      expect((await s.request('/metrics')).body.requests.total).toBe(1);
+    });
+  });
+});
+
 describe('F4 stale replica', () => {
   it('is observable with zero customer traffic: the lagging replica already disagrees with the authority and the scarce SKU oversells', async () => {
     await withSandbox(async (s) => {

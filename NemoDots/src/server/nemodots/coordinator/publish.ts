@@ -28,7 +28,7 @@ import {
   type TaskRole,
 } from '../contracts/index.js';
 import { withTransaction } from '../db/tx.js';
-import { finishAttempt } from './attempts.js';
+import { finishAttempt, lockRunningAttemptsOfTasks } from './attempts.js';
 import {
   CapabilityDeniedError,
   CitationOutOfScopeError,
@@ -61,6 +61,7 @@ import type { MissionRow, TaskRow } from './rows.js';
 import {
   enqueueMissionEvaluate,
   failedAttemptCount,
+  failTask,
   insertTask,
   lockTasks,
   promoteRunnable,
@@ -68,7 +69,12 @@ import {
   transitionTask,
   type TxCtx,
 } from './tasks.js';
-import type { CoordinatorDeps, OutputInput, PublishedOutput } from './types.js';
+import type {
+  CoordinatorDeps,
+  OrphanedAttemptInfo,
+  OutputInput,
+  PublishedOutput,
+} from './types.js';
 
 // ARCHITECTURE.md G2 / section 6. Every publication is ONE transaction:
 //
@@ -175,6 +181,24 @@ async function rejectAfterSupportError(
 
 const union = unionDependencyVectors;
 
+/**
+ * The vector a completing publication is guarded by and recorded with: what the
+ * caller names, the context the task inherited, AND everything the attempt read
+ * (its readset). An attempt that read a receipt which was superseded since must
+ * be rejected even if the caller's own vector omits it, and the output carries
+ * an evidence edge for every read it may rest on.
+ */
+function guardedVector(
+  fenced: FencedAttempt,
+  requested: DependencyVector,
+): DependencyVector {
+  return union(
+    requested,
+    fenced.attempt.inherited_dependency_vector,
+    fenced.attempt.read_set_vector,
+  );
+}
+
 // ----------------------------------------------------------------- outputs
 
 export interface TaskCompletionContext {
@@ -221,13 +245,9 @@ export async function publishOutput(
   const requested = DependencyVectorSchema.parse(input.dependencyVector);
   return runPublication(deps, {
     context,
-    vector: (fenced) =>
-      union(requested, fenced.attempt.inherited_dependency_vector),
+    vector: (fenced) => guardedVector(fenced, requested),
     async write(fenced, tx) {
-      const vector = union(
-        requested,
-        fenced.attempt.inherited_dependency_vector,
-      );
+      const vector = guardedVector(fenced, requested);
       const outputId = randomUUID();
       const outputDigest = digest(input.content);
       await tx.client.query(
@@ -339,10 +359,39 @@ export async function publishPlan(
           justification: null,
         });
       }
-      if (input.cancelTaskIds?.length) {
-        const rows = await lockTasks(tx.client, input.cancelTaskIds);
+      // A replan supersedes the previous plan's root tasks that are only waiting
+      // for a repair (nothing is running them), so the new plan does not
+      // duplicate them. Running or preserved branches are left alone unless the
+      // planner names them in cancelTaskIds.
+      const superseded = new Set<string>(input.cancelTaskIds ?? []);
+      if (fenced.attempt.kind === 'replan') {
+        const awaiting = await tx.client.query<{ id: string }>(
+          `SELECT id FROM coordinator.tasks
+            WHERE mission_id = $1 AND parent_id IS NULL
+              AND role NOT IN ('planner', 'postcondition')
+              AND NOT (id = ANY ($2::uuid[]))
+              AND (status IN ('invalidated', 'repairing')
+                   OR (status = 'runnable' AND repair IS NOT NULL))`,
+          [fenced.mission.id, ids],
+        );
+        for (const item of awaiting.rows) superseded.add(item.id);
+      }
+      if (superseded.size > 0) {
+        // Attempts first (status first, and the global lock order): a task
+        // cancelled while a worker runs it must stop that worker.
+        const running = await lockRunningAttemptsOfTasks(
+          tx.client,
+          fenced.mission.id,
+          [...superseded],
+        );
+        for (const attempt of running)
+          await finishAttempt(tx, attempt, 'aborted', {
+            abortReason: 'readset_invalidated',
+          });
+        const rows = (await lockTasks(tx.client, [...superseded])).filter(
+          (row) => row.mission_id === fenced.mission.id,
+        );
         for (const row of rows) {
-          if (row.mission_id !== fenced.mission.id) continue;
           if (['succeeded', 'failed', 'cancelled'].includes(row.status))
             continue;
           await transitionTask(tx, row, 'cancelled', {
@@ -408,8 +457,7 @@ export async function delegate(
   return runPublication(deps, {
     context,
     fence: { missionLock: 'update' },
-    vector: (fenced) =>
-      union(requested, fenced.attempt.inherited_dependency_vector),
+    vector: (fenced) => guardedVector(fenced, requested),
     async write(fenced, tx) {
       const parent = fenced.task;
       if (!parent.capabilities.includes('delegate'))
@@ -427,9 +475,9 @@ export async function delegate(
       }
       const graph = (
         await tx.client.query<
-          Pick<TaskRow, 'id' | 'parent_id' | 'prerequisites'>
+          Pick<TaskRow, 'id' | 'parent_id' | 'prerequisites' | 'status'>
         >(
-          `SELECT id, parent_id, prerequisites FROM coordinator.tasks WHERE mission_id = $1`,
+          `SELECT id, parent_id, prerequisites, status FROM coordinator.tasks WHERE mission_id = $1`,
           [parent.mission_id],
         )
       ).rows;
@@ -463,6 +511,7 @@ export async function delegate(
             id: task.id as TaskId,
             parentId: task.parent_id as TaskId | null,
             prerequisites: task.prerequisites as TaskId[],
+            status: task.status,
           })),
         },
         candidateId,
@@ -473,10 +522,7 @@ export async function delegate(
         parent.capabilities as never,
       );
       const defaults = deps.config.taskDefaults;
-      const vector = union(
-        requested,
-        fenced.attempt.inherited_dependency_vector,
-      );
+      const vector = guardedVector(fenced, requested);
       const child = await insertTask(tx, {
         id: candidateId,
         missionId: parent.mission_id as MissionId,
@@ -555,7 +601,8 @@ export async function publishFinding(
       .filter(
         (entry): entry is DependencyVector[number] => entry !== undefined,
       );
-    return union(requested, fenced.attempt.inherited_dependency_vector, cited);
+    // The whole readset is guarded, not just the cited receipts.
+    return union(guardedVector(fenced, requested), cited);
   };
 
   return runPublication(deps, {
@@ -613,7 +660,10 @@ export interface ModelCallInput {
  * Records a completed model call against the attempt. If the author's fence
  * was lost while the call was in flight the fenced write is rejected with
  * FenceError, nothing is stored here, and the injected recordOrphanedAttempt
- * stores the billed call unfenced with outcome `orphaned_fence` (C16).
+ * stores the billed call unfenced with outcome `orphaned_fence` (C16). The same
+ * happens when the call's snapshot receipts were superseded meanwhile (a
+ * SupportError, fenceReason `publication_rejected`): the attempt is invalidated
+ * and the call is kept as telemetry only, so cost accounting stays complete.
  */
 export async function recordModelCall(
   deps: PublishDeps,
@@ -665,7 +715,17 @@ export async function recordModelCall(
       },
     });
   } catch (error) {
-    if (error instanceof FenceError) {
+    // The provider call already happened and was billed whatever the fate of
+    // the fenced record: keep it as unfenced telemetry (C16). A lost fence and
+    // a SupportError (the snapshot receipts were superseded while the call was
+    // in flight) both reject the record.
+    const fenceReason: OrphanedAttemptInfo['fenceReason'] | null =
+      error instanceof FenceError
+        ? error.reason
+        : isSupportError(error)
+          ? 'publication_rejected'
+          : null;
+    if (fenceReason) {
       try {
         await deps.recordOrphanedAttempt({
           context,
@@ -676,10 +736,11 @@ export async function recordModelCall(
               outcome: 'orphaned_fence' as const,
             })),
           },
-          fenceReason: error.reason,
+          fenceReason,
         });
       } catch (orphanError) {
-        error.orphanRecordError = orphanError;
+        (error as { orphanRecordError?: unknown }).orphanRecordError =
+          orphanError;
       }
     }
     throw error;
@@ -730,12 +791,11 @@ async function settleUnpublished(
 ): Promise<'requeued' | 'failed'> {
   const { task, mission } = { task: fenced.task, mission: fenced.mission };
   const failures = await failedAttemptCount(tx.client, task.id);
-  const canFail = task.status === 'running' || task.status === 'waiting';
+  const canFail = ['leased', 'running', 'waiting'].includes(task.status);
   if (canFail && (options.exhaust || failures >= task.max_attempts)) {
-    await transitionTask(tx, task, 'failed', {
-      reason: options.reason,
-      bumpFence: true,
-    });
+    await failTask(tx, task, { reason: options.reason, bumpFence: true });
+    // Pending dependents of a failed task can never run: cancel them.
+    await promoteRunnable(tx, mission.id);
     if (task.role === 'postcondition')
       await releaseGate(tx, mission.id, task.id);
     await resolveClosedInvalidations(tx, deps, mission.id);

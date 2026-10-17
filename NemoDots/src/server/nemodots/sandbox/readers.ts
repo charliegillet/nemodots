@@ -26,6 +26,7 @@ import {
 } from '../contracts/ids.js';
 import type { SourceReaderPort } from '../contracts/ports.js';
 import { parseCacheKey, type RedisClient } from './checkout-cache.js';
+import { PROBE_HEADER, probeHeaderValue } from './probe-auth.js';
 
 export class UnsupportedSourceError extends Error {
   constructor(readonly sourceKey: string) {
@@ -44,7 +45,19 @@ export interface ReaderDeps {
   fetch?: typeof fetch;
   now?: () => number;
   httpTimeoutMs?: number;
+  /**
+   * NEMODOTS_PROBE_SECRET. When present, every reader request to the checkout
+   * carries the authenticated observer tag, so observing the checkout (the
+   * /inventory/<sku> view in particular) is evidence-neutral: it never enters
+   * the checkout's metrics windows and cannot mint `checkout.metrics`
+   * revisions or, on a small pool, compete with customer traffic as tracked
+   * load. Without it the reads are ordinary tracked requests.
+   */
+  probeSecret?: string;
 }
+
+/** Run id of the observer tag (matches the probe run-id pattern). */
+export const OBSERVER_RUN_ID = 'observer-readers';
 
 // ------------------------------------------------------------ pure helpers
 
@@ -170,7 +183,17 @@ export function createSourceReaders(deps: ReaderDeps): SourceReaderPort {
     try {
       const response = await doFetch(`${deps.checkoutUrl}${path}`, {
         signal: AbortSignal.timeout(timeoutMs),
-        headers: { accept: 'application/json' },
+        headers: {
+          accept: 'application/json',
+          ...(deps.probeSecret
+            ? {
+                [PROBE_HEADER]: probeHeaderValue(
+                  deps.probeSecret,
+                  OBSERVER_RUN_ID,
+                ),
+              }
+            : {}),
+        },
       });
       // /health answers 503 with a body when degraded or down: the body is the observation.
       return (await response.json()) as unknown;
@@ -354,13 +377,28 @@ export function createSourceReaders(deps: ReaderDeps): SourceReaderPort {
       [key],
     );
     if (!row.rows.length) {
-      const collection = await deps.pg.query<{ version: string }>(
-        'SELECT version FROM checkout.config_collection WHERE singleton',
-      );
+      // An absent member's revision is the MEMBER's own counter: the tombstone
+      // a delete recorded in config_versions (0 when the key never existed).
+      // A re-insert continues from it, so the revision strictly increases
+      // present -> absent -> present. The collection version is a different
+      // counter and is carried separately in `raw`, never as the hint.
+      const [tombstone, collection] = await Promise.all([
+        deps.pg.query<{ version: string }>(
+          'SELECT COALESCE(max(version), 0) AS version FROM checkout.config_versions WHERE key = $1',
+          [key],
+        ),
+        deps.pg.query<{ version: string }>(
+          'SELECT version FROM checkout.config_collection WHERE singleton',
+        ),
+      ]);
       return {
         normalizedValue: null,
-        raw: { exists: false, key },
-        revisionHint: Number(collection.rows[0]?.version ?? 0),
+        raw: {
+          exists: false,
+          key,
+          collectionRevision: Number(collection.rows[0]?.version ?? 0),
+        },
+        revisionHint: Number(tombstone.rows[0]?.version ?? 0),
       };
     }
     const version = Number(row.rows[0].version);

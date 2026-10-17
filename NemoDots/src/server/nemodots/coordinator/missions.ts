@@ -10,12 +10,12 @@ import {
   type Mission,
   type MissionId,
   type MissionStatus,
-  type ObservationReceipt,
   type ReceiptId,
 } from '../contracts/index.js';
 import { withTransaction } from '../db/tx.js';
 import { finishAttempt, lockRunningAttempts } from './attempts.js';
 import {
+  AcceptanceInFlightError,
   AcceptanceRejectedError,
   CasConflictError,
   CoordinatorConfigError,
@@ -23,6 +23,7 @@ import {
   MissionStateError,
   ModeMismatchError,
   OpenInvalidationsError,
+  isSupportError,
 } from './errors.js';
 import { EventBuffer } from './events.js';
 import { carryRepair } from './leases.js';
@@ -61,6 +62,7 @@ type MissionDeps = Pick<
   | 'actions'
   | 'providerHealthy'
   | 'probe'
+  | 'supportValidator'
 >;
 
 const MISSION_TERMINAL: readonly MissionStatus[] = [
@@ -437,13 +439,79 @@ export async function failMission(
 export type EvaluationOutcome =
   'unchanged' | 'awaiting_acceptance' | 'running' | 'failed';
 
+export interface SettleBlockers {
+  /** Event ids of open (or not yet delivered) invalidations. */
+  eventIds: string[];
+  /** Human-readable reasons, for the error detail. */
+  reasons: string[];
+}
+
+/**
+ * Why the mission cannot settle (enter awaiting_acceptance or become succeeded)
+ * right now, or null. Read under the caller's FOR UPDATE lock on the mission
+ * row (D9):
+ *  - every task is terminal, and every succeeded task's output is still usable:
+ *    the ledger closure marks tasks `invalidated` and outputs unusable in its
+ *    own transaction BEFORE the watcher tells the coordinator, so the task
+ *    table is checked directly, not only coordinator.invalidations. Task rows
+ *    are locked FOR SHARE so a concurrent closure serialises with the decision;
+ *  - no coordinator invalidation is open;
+ *  - no ledger invalidation event names the mission without a coordinator copy
+ *    (not yet delivered): fail closed.
+ */
+export async function settleBlockers(
+  client: pg.PoolClient,
+  deps: Pick<MissionDeps, 'intents'>,
+  missionId: MissionId | string,
+): Promise<SettleBlockers | null> {
+  const reasons: string[] = [];
+  const tasks = (
+    await client.query<{
+      id: string;
+      status: string;
+      output_id: string | null;
+      output_usable: boolean | null;
+    }>(
+      `SELECT t.id, t.status, t.output_id, o.usable AS output_usable
+         FROM coordinator.tasks t
+         LEFT JOIN coordinator.task_outputs o ON o.id = t.output_id
+        WHERE t.mission_id = $1
+        ORDER BY t.id
+          FOR SHARE OF t`,
+      [missionId],
+    )
+  ).rows;
+  for (const task of tasks) {
+    if (!['succeeded', 'failed', 'cancelled'].includes(task.status))
+      reasons.push(`task ${task.id} is ${task.status}`);
+    else if (
+      task.status === 'succeeded' &&
+      (task.output_id === null || task.output_usable !== true)
+    )
+      reasons.push(`task ${task.id} succeeded with an unusable output`);
+  }
+  const evaluation = await evaluateOpen(client, deps, missionId);
+  const eventIds = [
+    ...evaluation.open.map((item) => item.row.event_id),
+    ...evaluation.undelivered,
+  ];
+  for (const item of evaluation.open) reasons.push(item.why);
+  for (const id of evaluation.undelivered)
+    reasons.push(`ledger invalidation ${id.slice(0, 12)} is not delivered yet`);
+  return reasons.length > 0 ? { eventIds, reasons } : null;
+}
+
 /**
  * Completion check, driven by the outbox after a task settles or an
- * invalidation resolves:
- *  - running, a root task failed for good -> failed;
- *  - running, every task is terminal, at least one planned task succeeded and
- *    no invalidation is open -> awaiting_acceptance;
- *  - awaiting_acceptance with unfinished work (a repair was scheduled) -> running.
+ * invalidation resolves (and by the maintenance reconciler):
+ *  - running: re-runs dependency promotion first (a promotion that raced a
+ *    sibling's commit is never lost), then
+ *    - a root task failed for good -> failed;
+ *    - every task terminal, at least one planned task succeeded and nothing
+ *      blocks settling (settleBlockers) -> awaiting_acceptance;
+ *  - awaiting_acceptance with unfinished work (a repair was scheduled) -> running;
+ *  - awaiting_acceptance, settled, with no live mission.accept message (it was
+ *    parked or never enqueued) -> a fresh message is enqueued.
  */
 export async function evaluateMission(
   deps: MissionDeps,
@@ -463,6 +531,7 @@ export async function evaluateMission(
         mission.status !== 'awaiting_acceptance'
       )
         return 'unchanged';
+      if (mission.status === 'running') await promoteRunnable(tx, missionId);
       const tasks = (
         await client.query<
           Pick<TaskRow, 'id' | 'status' | 'role' | 'parent_id'>
@@ -474,42 +543,48 @@ export async function evaluateMission(
       const unfinished = tasks.some(
         (task) => !['succeeded', 'failed', 'cancelled'].includes(task.status),
       );
+      let result: EvaluationOutcome = 'unchanged';
       if (mission.status === 'awaiting_acceptance') {
-        if (!unfinished) return 'unchanged';
-        await transitionMission(tx, mission, 'running', {
-          reason: 'work_scheduled',
-        });
-        await tx.events.flush(client);
-        return 'running';
+        if (unfinished) {
+          await transitionMission(tx, mission, 'running', {
+            reason: 'work_scheduled',
+          });
+          result = 'running';
+        } else if (deps.probe) {
+          await ensureAcceptMessage(client, mission);
+        }
+      } else {
+        const failedRoot = tasks.find(
+          (task) => task.parent_id === null && task.status === 'failed',
+        );
+        const planned = tasks.filter(
+          (task) => task.role !== 'planner' && task.role !== 'postcondition',
+        );
+        if (failedRoot) {
+          failedReason = `task ${failedRoot.id} failed`;
+          result = 'failed';
+        } else if (
+          !unfinished &&
+          planned.some((task) => task.status === 'succeeded') &&
+          !(await settleBlockers(client, deps, missionId))
+        ) {
+          await transitionMission(tx, mission, 'awaiting_acceptance', {
+            reason: 'all_tasks_succeeded',
+          });
+          await client.query(
+            `INSERT INTO coordinator.outbox (mission_id, topic, payload, dedupe_key)
+             VALUES ($1, 'mission.accept', $2::jsonb, $3) ON CONFLICT (dedupe_key) DO NOTHING`,
+            [
+              missionId,
+              JSON.stringify({ missionId }),
+              `accept:${missionId}:${mission.transition_version + 1}`,
+            ],
+          );
+          result = 'awaiting_acceptance';
+        }
       }
-      const failedRoot = tasks.find(
-        (task) => task.parent_id === null && task.status === 'failed',
-      );
-      if (failedRoot) {
-        failedReason = `task ${failedRoot.id} failed`;
-        return 'failed';
-      }
-      const planned = tasks.filter(
-        (task) => task.role !== 'planner' && task.role !== 'postcondition',
-      );
-      if (unfinished || !planned.some((task) => task.status === 'succeeded'))
-        return 'unchanged';
-      const open = await evaluateOpen(client, deps, missionId);
-      if (open.open.length > 0) return 'unchanged';
-      await transitionMission(tx, mission, 'awaiting_acceptance', {
-        reason: 'all_tasks_succeeded',
-      });
-      await client.query(
-        `INSERT INTO coordinator.outbox (mission_id, topic, payload, dedupe_key)
-         VALUES ($1, 'mission.accept', $2::jsonb, $3) ON CONFLICT (dedupe_key) DO NOTHING`,
-        [
-          missionId,
-          JSON.stringify({ missionId }),
-          `accept:${missionId}:${mission.transition_version + 1}`,
-        ],
-      );
       await tx.events.flush(client);
-      return 'awaiting_acceptance';
+      return result;
     },
   );
   if (outcome === 'failed' && failedReason) {
@@ -519,54 +594,172 @@ export async function evaluateMission(
   return outcome;
 }
 
-function acceptanceVerdict(
-  receipt: ObservationReceipt,
-): 'pass' | 'fail' | null {
-  const value = receipt.normalizedValue as { verdict?: unknown } | null;
-  return value && (value.verdict === 'pass' || value.verdict === 'fail')
-    ? value.verdict
-    : null;
+/** Enqueues a mission.accept message unless one is still live (unprocessed and not parked). */
+async function ensureAcceptMessage(client: pg.PoolClient, mission: MissionRow) {
+  await client.query(
+    `INSERT INTO coordinator.outbox (mission_id, topic, payload, dedupe_key, available_at)
+     SELECT $1, 'mission.accept', $2::jsonb,
+            'accept:' || $1::text || ':' || $3::text || ':retry' ||
+              (SELECT count(*) FROM coordinator.outbox
+                WHERE mission_id = $1 AND topic = 'mission.accept'),
+            now() + interval '5 seconds'
+      WHERE NOT EXISTS (
+        SELECT 1 FROM coordinator.outbox
+         WHERE mission_id = $1 AND topic = 'mission.accept'
+           AND processed_at IS NULL AND failed_at IS NULL)
+     ON CONFLICT (dedupe_key) DO NOTHING`,
+    [mission.id, JSON.stringify({ missionId: mission.id }), mission.transition_version],
+  );
 }
 
 /**
- * Settles an awaiting_acceptance mission from an acceptance probe receipt.
- * succeeded requires: a supported `checkout.acceptance` receipt of trust
- * `probe` for this mission with verdict pass, AND zero open invalidations (D9);
- * otherwise OpenInvalidationsError / AcceptanceRejectedError and the mission
- * stays awaiting_acceptance. A failing verdict returns the mission to running
- * with a bounded replan, or fails it when no replan is possible.
+ * Maintenance reconciler: evaluates missions that may be waiting on a wake-up
+ * that never came (a lost promotion race, a parked mission.accept message).
+ * Outbox messages are hints; this is the backstop that makes progress depend
+ * only on durable state.
+ */
+export async function reconcileMissions(
+  deps: MissionDeps,
+  limit = 20,
+): Promise<number> {
+  const { rows } = await deps.pool.query<{ id: string }>(
+    `SELECT m.id FROM coordinator.missions m
+      WHERE (m.status = 'running' AND (
+              EXISTS (
+                SELECT 1 FROM coordinator.tasks c
+                 WHERE c.mission_id = m.id AND c.status = 'pending'
+                   AND (NOT EXISTS (
+                          SELECT 1 FROM coordinator.tasks p
+                           WHERE p.id = ANY (c.prerequisites) AND p.status <> 'succeeded')
+                        OR EXISTS (
+                          SELECT 1 FROM coordinator.tasks p
+                           WHERE p.id = ANY (c.prerequisites)
+                             AND p.status IN ('failed', 'cancelled'))))
+              OR NOT EXISTS (
+                SELECT 1 FROM coordinator.tasks c
+                 WHERE c.mission_id = m.id
+                   AND c.status NOT IN ('succeeded', 'failed', 'cancelled'))
+              OR EXISTS (
+                SELECT 1 FROM coordinator.tasks c
+                 WHERE c.mission_id = m.id AND c.parent_id IS NULL
+                   AND c.status = 'failed')))
+         OR (m.status = 'awaiting_acceptance' AND $1::boolean
+             AND NOT EXISTS (
+               SELECT 1 FROM coordinator.outbox o
+                WHERE o.mission_id = m.id AND o.topic = 'mission.accept'
+                  AND o.processed_at IS NULL AND o.failed_at IS NULL))
+      ORDER BY m.created_at
+      LIMIT $2`,
+    [deps.probe !== null, limit],
+  );
+  let handled = 0;
+  for (const row of rows) {
+    await evaluateMission(deps, row.id as MissionId);
+    handled += 1;
+  }
+  return handled;
+}
+
+interface AcceptanceReceiptRow {
+  id: string;
+  status: string;
+  trust: string;
+  mission_id: string;
+  normalized_value: { verdict?: unknown } | null;
+  key: string;
+  owner_id: string;
+  environment: string;
+  resource: string;
+}
+
+/**
+ * Loads the acceptance receipt from the ledger (read-only SQL) and checks it,
+ * inside the caller's mission lock: the SupportValidator confirms the receipt is
+ * still current (and holds it FOR SHARE, so a supersession waits for this
+ * transaction), then the stored row must be a supported `checkout.acceptance`
+ * receipt of trust `probe` belonging to this mission. Nothing the caller hands
+ * in is trusted: only the id.
+ */
+async function loadAcceptanceReceipt(
+  client: pg.PoolClient,
+  deps: Pick<MissionDeps, 'supportValidator'>,
+  mission: MissionRow,
+  receiptId: string,
+): Promise<{ id: string; verdict: 'pass' | 'fail' | null }> {
+  const reject = (why: string) =>
+    new AcceptanceRejectedError(mission.id, why);
+  try {
+    await deps.supportValidator.assertCurrent(client, [receiptId as ReceiptId], {
+      lockMode: 'share',
+    });
+  } catch (error) {
+    if (isSupportError(error))
+      throw reject(`the probe receipt is not current: ${error.reason}`);
+    throw error;
+  }
+  const row = (
+    await client.query<AcceptanceReceiptRow>(
+      `SELECT r.id, r.status, r.trust, r.mission_id, r.normalized_value,
+              s.key, s.owner_id, s.environment, s.resource
+         FROM ledger.observation_receipts r
+         JOIN ledger.sources s ON s.id = r.source_id
+        WHERE r.id = $1`,
+      [receiptId],
+    )
+  ).rows[0];
+  if (!row) throw reject('the probe receipt does not exist in the ledger');
+  if (row.key !== 'checkout.acceptance' || row.trust !== 'probe')
+    throw reject('not a checkout.acceptance probe receipt');
+  if (row.status !== 'supported')
+    throw reject(`the probe receipt is ${row.status}, not supported`);
+  if (
+    row.mission_id !== mission.id ||
+    row.owner_id !== mission.owner_id ||
+    row.environment !== mission.environment ||
+    row.resource !== mission.resource
+  )
+    throw reject('the probe receipt belongs to another mission');
+  const verdict = row.normalized_value?.verdict;
+  return {
+    id: row.id,
+    verdict: verdict === 'pass' || verdict === 'fail' ? verdict : null,
+  };
+}
+
+/**
+ * Settles an awaiting_acceptance mission from an acceptance probe receipt,
+ * identified by id only. The receipt is re-read from the ledger and re-validated
+ * under the mission's FOR UPDATE lock (loadAcceptanceReceipt). succeeded
+ * requires: a current, supported `checkout.acceptance` receipt of trust `probe`
+ * for this mission with verdict pass, AND nothing blocking the mission from
+ * settling: every task terminal with usable outputs, zero open invalidations,
+ * no undelivered ledger invalidation (settleBlockers, D9). Otherwise
+ * OpenInvalidationsError / AcceptanceRejectedError and the mission stays
+ * awaiting_acceptance. A failing verdict returns the mission to running with a
+ * bounded replan, or fails it when no replan is possible.
  */
 export async function completeAcceptance(
   deps: MissionDeps,
   missionId: MissionId,
-  receipt: ObservationReceipt,
+  receiptId: ReceiptId | string,
 ): Promise<Mission> {
   return withTransaction(deps.pool, async (client) => {
     const tx: TxCtx = { client, events: new EventBuffer(deps.events) };
     const mission = await lockMission(client, missionId);
     if (mission.status !== 'awaiting_acceptance')
       throw new MissionStateError(missionId, mission.status, 'accept');
-    if (
-      receipt.source.key !== 'checkout.acceptance' ||
-      receipt.trust !== 'probe' ||
-      receipt.status !== 'supported'
-    )
-      throw new AcceptanceRejectedError(
-        missionId,
-        'not a supported checkout.acceptance probe receipt',
-      );
-    if (receipt.source.scope.missionId !== missionId)
-      throw new AcceptanceRejectedError(
-        missionId,
-        'the probe receipt belongs to another mission',
-      );
-    const verdict = acceptanceVerdict(receipt);
-    if (verdict === null)
+    const receipt = await loadAcceptanceReceipt(
+      client,
+      deps,
+      mission,
+      receiptId,
+    );
+    if (receipt.verdict === null)
       throw new AcceptanceRejectedError(
         missionId,
         'the probe receipt carries no verdict',
       );
-    if (verdict === 'fail') {
+    if (receipt.verdict === 'fail') {
       const marker = digest(['acceptance-failed-v1', receipt.id]);
       const running = await transitionMission(tx, mission, 'running', {
         reason: 'acceptance_failed',
@@ -589,11 +782,12 @@ export async function completeAcceptance(
       await tx.events.flush(client);
       return toMission(failed);
     }
-    const evaluation = await evaluateOpen(client, deps, missionId);
-    if (evaluation.open.length > 0)
+    const blockers = await settleBlockers(client, deps, missionId);
+    if (blockers)
       throw new OpenInvalidationsError(
         missionId,
-        evaluation.open.map((item) => item.row.event_id),
+        blockers.eventIds,
+        blockers.reasons.slice(0, 3).join('; '),
       );
     const succeeded = await transitionMission(tx, mission, 'succeeded', {
       reason: 'acceptance_passed',
@@ -604,7 +798,14 @@ export async function completeAcceptance(
   });
 }
 
-/** Runs the injected acceptance probe and settles the mission from its receipt. */
+/**
+ * Runs the injected acceptance probe and settles the mission from its receipt.
+ * Single-flight per mission: a session-level advisory lock on a dedicated
+ * connection (no transaction, no row locks) is held for the probe's duration, so
+ * a redelivered message or a second coordinator process never runs a concurrent
+ * probe (concurrent probes would break the exact-inventory invariant). The
+ * connection is released, and the lock with it, even if this process dies.
+ */
 export async function acceptMission(
   deps: MissionDeps,
   missionId: MissionId,
@@ -616,8 +817,28 @@ export async function acceptMission(
   const mission = await getMission(deps, missionId);
   if (mission.status !== 'awaiting_acceptance')
     throw new MissionStateError(missionId, mission.status, 'accept');
-  const receipt = await deps.probe.run(missionId);
-  return completeAcceptance(deps, missionId, receipt);
+  const guard = await deps.pool.connect();
+  let locked = false;
+  try {
+    const { rows } = await guard.query<{ ok: boolean }>(
+      `SELECT pg_try_advisory_lock(hashtext($1)) AS ok`,
+      [`nemodots_accept:${missionId}`],
+    );
+    locked = rows[0].ok;
+    if (!locked) throw new AcceptanceInFlightError(missionId);
+    const receipt = await deps.probe.run(missionId);
+    return await completeAcceptance(deps, missionId, receipt.id);
+  } finally {
+    try {
+      if (locked)
+        await guard.query(`SELECT pg_advisory_unlock(hashtext($1))`, [
+          `nemodots_accept:${missionId}`,
+        ]);
+      guard.release();
+    } catch (error) {
+      guard.release(error as Error);
+    }
+  }
 }
 
 export { MISSION_TERMINAL };

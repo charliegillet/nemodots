@@ -94,3 +94,19 @@ export async function lockRunningAttempts(
   );
   return rows;
 }
+
+/** Locks the running attempts of the given tasks of the mission (replan supersession). */
+export async function lockRunningAttemptsOfTasks(
+  client: pg.PoolClient,
+  missionId: string,
+  taskIds: readonly string[],
+): Promise<AttemptRow[]> {
+  if (taskIds.length === 0) return [];
+  const { rows } = await client.query<AttemptRow>(
+    `SELECT * FROM coordinator.task_attempts
+      WHERE mission_id = $1 AND task_id = ANY ($2::uuid[]) AND status = 'running'
+      ORDER BY id FOR UPDATE`,
+    [missionId, [...taskIds]],
+  );
+  return rows;
+}

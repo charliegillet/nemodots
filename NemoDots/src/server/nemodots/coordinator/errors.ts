@@ -157,16 +157,30 @@ export class CapabilityDeniedError extends Error {
   }
 }
 
-/** succeeded was requested while an invalidation is still open (D9). */
+/**
+ * succeeded (or awaiting_acceptance) was requested while an invalidation is
+ * still open, or while the closure's marks on tasks/outputs are not yet
+ * reflected in a processed invalidation (D9). Transient: it clears when
+ * recovery finishes, so callers retry or defer rather than give up.
+ */
 export class OpenInvalidationsError extends Error {
   constructor(
     readonly missionId: MissionId | string,
     readonly eventIds: string[],
+    readonly detail?: string,
   ) {
     super(
-      `mission ${missionId} has ${eventIds.length} open invalidation(s); it cannot succeed`,
+      `mission ${missionId} has ${eventIds.length} open invalidation(s)${detail ? ` (${detail})` : ''}; it cannot succeed`,
     );
     this.name = 'OpenInvalidationsError';
+  }
+}
+
+/** Another acceptance probe for the mission is running (single-flight per mission). */
+export class AcceptanceInFlightError extends Error {
+  constructor(readonly missionId: MissionId | string) {
+    super(`an acceptance probe for mission ${missionId} is already running`);
+    this.name = 'AcceptanceInFlightError';
   }
 }
 

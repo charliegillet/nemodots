@@ -1,4 +1,8 @@
-import { MissionStateError } from './errors.js';
+import {
+  AcceptanceInFlightError,
+  MissionStateError,
+  OpenInvalidationsError,
+} from './errors.js';
 import { getMissionRow, acceptMission, evaluateMission } from './missions.js';
 import {
   ActionProposedPayloadSchema,
@@ -21,6 +25,7 @@ export type HandlerDeps = Pick<
   | 'providerHealthy'
   | 'probe'
   | 'clock'
+  | 'supportValidator'
 >;
 
 export const OUTBOX_TOPICS = Object.freeze({
@@ -64,9 +69,16 @@ export function createCoordinatorHandlers(
         await acceptMission(deps, missionId);
       } catch (error) {
         // The mission moved on (repair scheduled, cancelled): nothing to accept.
-        // OpenInvalidationsError propagates so the message is retried with
-        // backoff until the invalidations close.
         if (error instanceof MissionStateError) return;
+        // Open invalidations and a probe already running are transient: keep
+        // the message queued without using up an attempt, so it can never be
+        // parked while the mission waits for recovery (it would be stuck in
+        // awaiting_acceptance).
+        if (
+          error instanceof OpenInvalidationsError ||
+          error instanceof AcceptanceInFlightError
+        )
+          return { deferUntil: new Date(deps.clock().getTime() + 2_000) };
         throw error;
       }
     },

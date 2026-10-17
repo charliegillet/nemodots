@@ -60,7 +60,10 @@ interface Generation {
 export class BusinessPools {
   private current: Generation | null = null;
 
-  constructor(private readonly connectionString: string) {
+  constructor(
+    private readonly connectionString: string,
+    private readonly applicationName = 'nemodots-checkout',
+  ) {
     assertSafePgUrl('NEMODOTS_PG_URL_CHECKOUT', connectionString);
   }
 
@@ -86,7 +89,7 @@ export class BusinessPools {
       statement_timeout: statementTimeoutMs,
       connectionTimeoutMillis: POOL_ACQUIRE_TIMEOUT_MS,
       idleTimeoutMillis: 30_000,
-      application_name: 'nemodots-checkout',
+      application_name: this.applicationName,
     });
     pool.on('error', () => {
       // an idle client lost its connection; the next acquire reconnects

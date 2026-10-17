@@ -39,6 +39,7 @@ import {
   enqueueMissionEvaluate,
   insertTask,
   isTerminalTask,
+  lockTaskGraph,
   lockTasks,
   promoteRunnable,
   requeueTask,
@@ -163,35 +164,41 @@ const sameSet = (a: readonly string[], b: readonly string[]) =>
  * Insert the mission's copy of an event, or merge into the existing row when
  * the same event id arrives again with more affected members (two attempts
  * rejected for the same stale receipt share one event id). Re-delivery of an
- * identical event is a no-op. A merge that adds members reopens the row.
+ * identical event is a no-op. A merge that adds members reopens the row; the
+ * processing step is idempotent per member (see processInvalidation), so
+ * members that already recovered are left alone.
+ *
+ * Race-safe: the INSERT is `ON CONFLICT DO NOTHING`, so two transactions that
+ * record the same event concurrently (two rejections for one stale receipt, or
+ * the watcher re-delivering an event) cannot fail with a unique violation; the
+ * loser waits for the winner's commit, then locks and merges into its row.
  */
 export async function upsertInvalidation(
   tx: TxCtx,
   missionId: MissionId,
   event: StoredEvent,
 ): Promise<InvalidationRow> {
+  const inserted = await tx.client.query<InvalidationRow>(
+    `INSERT INTO coordinator.invalidations
+       (event_id, mission_id, event, source_key, reason, self_write)
+     VALUES ($1, $2, $3::jsonb, $4, $5, $6)
+     ON CONFLICT (event_id, mission_id) DO NOTHING
+     RETURNING *`,
+    [
+      event.id,
+      missionId,
+      JSON.stringify(event),
+      event.sourceKey,
+      event.reason,
+      event.selfWrite,
+    ],
+  );
+  if (inserted.rows[0]) return inserted.rows[0];
   const existing = await tx.client.query<InvalidationRow>(
     `SELECT * FROM coordinator.invalidations
       WHERE event_id = $1 AND mission_id = $2 FOR UPDATE`,
     [event.id, missionId],
   );
-  if (existing.rows.length === 0) {
-    const { rows } = await tx.client.query<InvalidationRow>(
-      `INSERT INTO coordinator.invalidations
-         (event_id, mission_id, event, source_key, reason, self_write)
-       VALUES ($1, $2, $3::jsonb, $4, $5, $6)
-       RETURNING *`,
-      [
-        event.id,
-        missionId,
-        JSON.stringify(event),
-        event.sourceKey,
-        event.reason,
-        event.selfWrite,
-      ],
-    );
-    return rows[0];
-  }
   const row = existing.rows[0];
   const stored = row.event as StoredEvent;
   const merged = mergeAffected(stored.affected, event.affected);
@@ -226,9 +233,37 @@ export async function upsertInvalidation(
 
 // ------------------------------------------------------------ open predicate
 
-interface OpenEvaluation {
+export interface OpenEvaluation {
   open: { row: InvalidationRow; why: string }[];
   closed: InvalidationRow[];
+  /**
+   * Ids of ledger invalidation events that name this mission but have no
+   * coordinator copy yet (the watcher has not delivered them to onInvalidation).
+   * The ledger closure already marked tasks/outputs, so the mission must not
+   * settle until they are delivered and processed (fail closed, D9).
+   */
+  undelivered: string[];
+}
+
+/**
+ * Ledger events that name the mission and have no coordinator copy: read-only
+ * SQL on ledger.invalidation_events (the closure commits before the watcher
+ * calls RecoveryPort.onInvalidation).
+ */
+export async function undeliveredLedgerEvents(
+  client: pg.PoolClient,
+  missionId: MissionId | string,
+): Promise<string[]> {
+  const { rows } = await client.query<{ id: string }>(
+    `SELECT e.id FROM ledger.invalidation_events e
+      WHERE e.mission_ids @> to_jsonb($1::text)
+        AND NOT EXISTS (
+          SELECT 1 FROM coordinator.invalidations i
+           WHERE i.event_id = e.id AND i.mission_id = $1::uuid)
+      ORDER BY e.created_at, e.id`,
+    [missionId],
+  );
+  return rows.map((row) => row.id);
 }
 
 /**
@@ -238,12 +273,23 @@ interface OpenEvaluation {
  * affected task must itself be repaired: it published a usable output after the
  * invalidation was recorded, or it ended failed/cancelled. An event that was
  * recorded but not yet processed is open (fail closed).
+ *
+ * Two inputs are adjusted before the helper sees them, so that an event can
+ * always close:
+ *  - an affected `invalidated` attempt whose TASK ended failed or cancelled (a
+ *    replan superseded it, or its repairs were exhausted) can never get a
+ *    published successor, so it is presented as `aborted`;
+ *  - the planner is a scheduling artifact (D1): its task and attempts never
+ *    keep an event open (a planner affected by an event is re-planned within
+ *    replanCap by processInvalidation, and that is tracked by the planner task
+ *    itself being unfinished).
  */
 export async function evaluateOpen(
   client: pg.PoolClient,
   deps: Pick<RecoveryDeps, 'intents'>,
   missionId: MissionId | string,
 ): Promise<OpenEvaluation> {
+  const undelivered = await undeliveredLedgerEvents(client, missionId);
   const rows = (
     await client.query<InvalidationRow>(
       `SELECT * FROM coordinator.invalidations
@@ -251,7 +297,7 @@ export async function evaluateOpen(
       [missionId],
     )
   ).rows;
-  if (rows.length === 0) return { open: [], closed: [] };
+  if (rows.length === 0) return { open: [], closed: [], undelivered };
 
   const attemptRows = (
     await client.query<AttemptRow>(
@@ -259,25 +305,36 @@ export async function evaluateOpen(
       [missionId],
     )
   ).rows;
-  const attempts: OpenInvalidationAttempt[] = attemptRows.map((row) => ({
-    id: row.id as AttemptId,
-    status: row.status as OpenInvalidationAttempt['status'],
-    repairOf: row.repair_of
-      ? {
-          attemptId: row.repair_of.attemptId as AttemptId,
-          invalidationEventId: row.repair_of
-            .invalidationEventId as InvalidationEventId,
-        }
-      : null,
-  }));
-  const attemptTask = new Map(attemptRows.map((row) => [row.id, row.task_id]));
   const taskRows = (
-    await client.query<Pick<TaskRow, 'id' | 'status' | 'output_id'>>(
-      `SELECT id, status, output_id FROM coordinator.tasks WHERE mission_id = $1`,
+    await client.query<Pick<TaskRow, 'id' | 'status' | 'output_id' | 'role'>>(
+      `SELECT id, status, output_id, role FROM coordinator.tasks WHERE mission_id = $1`,
       [missionId],
     )
   ).rows;
   const tasks = new Map(taskRows.map((row) => [row.id, row]));
+  const attemptTask = new Map(attemptRows.map((row) => [row.id, row.task_id]));
+  const attempts: OpenInvalidationAttempt[] = attemptRows.map((row) => {
+    const task = tasks.get(row.task_id);
+    const superseded =
+      row.status === 'invalidated' &&
+      task !== undefined &&
+      (task.status === 'failed' ||
+        task.status === 'cancelled' ||
+        task.role === 'planner');
+    return {
+      id: row.id as AttemptId,
+      status: superseded
+        ? 'aborted'
+        : (row.status as OpenInvalidationAttempt['status']),
+      repairOf: row.repair_of
+        ? {
+            attemptId: row.repair_of.attemptId as AttemptId,
+            invalidationEventId: row.repair_of
+              .invalidationEventId as InvalidationEventId,
+          }
+        : null,
+    };
+  });
   const outputRows = (
     await client.query<{ id: string; published_at: Date; usable: boolean }>(
       `SELECT id, published_at, usable FROM coordinator.task_outputs WHERE mission_id = $1`,
@@ -296,7 +353,7 @@ export async function evaluateOpen(
       }))
     : [];
 
-  const result: OpenEvaluation = { open: [], closed: [] };
+  const result: OpenEvaluation = { open: [], closed: [], undelivered };
   for (const row of rows) {
     let why: string | null = null;
     if (row.processed_at === null) why = 'recovery has not run yet';
@@ -312,7 +369,12 @@ export async function evaluateOpen(
       }
       for (const taskId of affectedTasks) {
         const task = tasks.get(taskId);
-        if (!task || task.status === 'failed' || task.status === 'cancelled')
+        if (
+          !task ||
+          task.status === 'failed' ||
+          task.status === 'cancelled' ||
+          task.role === 'planner'
+        )
           continue;
         const output = task.output_id ? outputs.get(task.output_id) : undefined;
         const repaired =
@@ -377,9 +439,11 @@ async function replanCount(client: pg.PoolClient, missionId: string) {
 }
 
 /**
- * Re-invokes the planner: its (succeeded) task goes back to runnable with a
- * `replan` attempt spec. Bounded by config.replanCap per mission. Returns
- * whether a replan was scheduled.
+ * Re-invokes the planner: its (succeeded or invalidated) task goes back to
+ * runnable with a `replan` attempt spec. Bounded by config.replanCap per
+ * mission: this is the ONLY way the planner runs again, whatever triggered it
+ * (a root task invalidation, request_replan, a failed acceptance, or a closure
+ * that reached the planner). Returns whether a replan was scheduled.
  */
 export async function scheduleReplan(
   tx: TxCtx,
@@ -396,7 +460,8 @@ export async function scheduleReplan(
       [mission.id],
     )
   ).rows[0];
-  if (!planner || planner.status !== 'succeeded') return false;
+  if (!planner || !['succeeded', 'invalidated'].includes(planner.status))
+    return false;
   if ((await replanCount(tx.client, mission.id)) >= cap) return false;
   const latest = (
     await tx.client.query<{ id: string }>(
@@ -427,6 +492,35 @@ export async function scheduleReplan(
  * The open (non-terminal) postcondition task of the mission, or a new one.
  * System-created after a verified self-write; at most one is open per mission.
  */
+/**
+ * The first non-terminal postcondition task of the mission (other than
+ * `exceptId`), locked. Non-terminal here means pending/runnable/leased/running/
+ * waiting, the set covered by tasks_one_open_postcondition_idx.
+ */
+async function openPostconditionTask(
+  client: pg.PoolClient,
+  missionId: string,
+  exceptId?: string,
+): Promise<TaskRow | undefined> {
+  return (
+    await client.query<TaskRow>(
+      `SELECT * FROM coordinator.tasks
+        WHERE mission_id = $1 AND role = 'postcondition'
+          AND status IN ('pending', 'runnable', 'leased', 'running', 'waiting')
+          AND ($2::uuid IS NULL OR id <> $2)
+        ORDER BY ordinal LIMIT 1 FOR UPDATE`,
+      [missionId, exceptId ?? null],
+    )
+  ).rows[0];
+}
+
+/**
+ * The open (non-terminal) postcondition task of the mission, or a new one.
+ * System-created after a verified self-write; at most one is open per mission.
+ * The check and the insert run under the mission's task-graph lock, so two
+ * concurrent recoveries (each holding only FOR SHARE on the mission row) cannot
+ * both create one or collide on the ordinal.
+ */
 export async function ensurePostconditionTask(
   tx: TxCtx,
   deps: Pick<RecoveryDeps, 'config'>,
@@ -434,15 +528,8 @@ export async function ensurePostconditionTask(
   key: string,
   sourceKey: string,
 ): Promise<{ task: TaskRow; created: boolean }> {
-  const open = (
-    await tx.client.query<TaskRow>(
-      `SELECT * FROM coordinator.tasks
-        WHERE mission_id = $1 AND role = 'postcondition'
-          AND status NOT IN ('succeeded', 'failed', 'cancelled')
-        ORDER BY ordinal LIMIT 1 FOR UPDATE`,
-      [mission.id],
-    )
-  ).rows[0];
+  await lockTaskGraph(tx.client, mission.id);
+  const open = await openPostconditionTask(tx.client, mission.id);
   if (open) return { task: open, created: false };
   const done = (
     await tx.client.query<TaskRow>(
@@ -530,19 +617,37 @@ const ACTIVE_FOR_REPAIR = new Set([
   'invalidated',
 ]);
 
-/** The recovery transaction body for one mission's copy of an event. */
+const sameAffectedSets = (a: Affected, b: Affected) =>
+  sameSet(a.attemptIds, b.attemptIds) &&
+  sameSet(a.taskIds, b.taskIds) &&
+  sameSet(a.outputIds, b.outputIds) &&
+  sameSet(a.actionIds, b.actionIds) &&
+  sameSet(a.modelCallIds, b.modelCallIds);
+
+/**
+ * The recovery transaction body for one mission's copy of an event.
+ *
+ * Lock order (shared with the publication paths, see fence.ts): mission ->
+ * attempts -> tasks -> the invalidation row -> task-graph advisory lock. The
+ * attempts and tasks are locked BEFORE the invalidation row, because a
+ * publication holds its attempt and task when it later updates invalidation
+ * rows (resolveClosedInvalidations); locking the row first would deadlock.
+ *
+ * Every step is idempotent per member, so processing a row again after it grew
+ * (a second attempt rejected for the same receipt, a re-delivered event) never
+ * disturbs a member that already recovered: outputs published after the event
+ * was recorded stay usable, a task that already published a fresh output or is
+ * running a fresher attempt is not requeued, and recovery facts are unique.
+ */
 export async function processInvalidation(
   tx: TxCtx,
   deps: Pick<RecoveryDeps, 'config' | 'intents'>,
   options: RecoveryOptions,
   mission: MissionRow,
-  row: InvalidationRow,
+  initial: InvalidationRow,
 ): Promise<void> {
   const missionId = mission.id as MissionId;
-  const event = row.event as StoredEvent;
-  const eventId = row.event_id;
-  const affected = event.affected;
-  const entry = event.perMission[0];
+  const eventId = initial.event_id;
 
   if (['cancelled', 'failed', 'succeeded'].includes(mission.status)) {
     await tx.client.query(
@@ -554,6 +659,58 @@ export async function processInvalidation(
     return;
   }
 
+  // 0. Locks, in the global order. The row is re-read under its lock; if it
+  // grew since the caller read it, take the locks for the grown set too.
+  let row = initial;
+  let listed: AttemptRow[] = [];
+  let extra: AttemptRow[] = [];
+  let tasks: TaskRow[] = [];
+  for (let round = 0; round < 3; round += 1) {
+    const wanted = row.event as StoredEvent;
+    listed = await lockAttempts(
+      tx.client,
+      wanted.affected.attemptIds,
+      missionId,
+    );
+    const taskIds = unionIds(
+      wanted.affected.taskIds,
+      listed.map((attempt) => attempt.task_id as TaskId),
+    );
+    // Running attempts of an affected task that were not listed. Attempts that
+    // started after the event was recorded read fresher evidence: left alone.
+    extra = taskIds.length
+      ? (
+          await tx.client.query<AttemptRow>(
+            `SELECT * FROM coordinator.task_attempts
+              WHERE task_id = ANY ($1::uuid[]) AND status = 'running'
+                AND started_at <= $3
+                AND NOT (id = ANY ($2::uuid[]))
+              ORDER BY id FOR UPDATE`,
+            [taskIds, listed.map((attempt) => attempt.id), row.created_at],
+          )
+        ).rows
+      : [];
+    tasks = await lockTasks(tx.client, taskIds);
+    const locked = (
+      await tx.client.query<InvalidationRow>(
+        `SELECT * FROM coordinator.invalidations
+          WHERE event_id = $1 AND mission_id = $2 FOR UPDATE`,
+        [eventId, missionId],
+      )
+    ).rows[0];
+    if (!locked || locked.processed_at !== null) return;
+    const settled = sameAffectedSets(
+      (locked.event as StoredEvent).affected,
+      wanted.affected,
+    );
+    row = locked;
+    if (settled) break;
+  }
+  const event = row.event as StoredEvent;
+  const affected = event.affected;
+  const entry = event.perMission[0];
+  const taskIds = tasks.map((task) => task.id);
+
   if (event.closure.capped || event.reason === 'closure_cap_exceeded')
     await recordRecovery(tx, {
       invalidationEventId: eventId,
@@ -563,24 +720,6 @@ export async function processInvalidation(
     });
 
   // 1. Status first: abort affected attempts that are still running.
-  const listed = await lockAttempts(tx.client, affected.attemptIds, missionId);
-  const taskIds = [
-    ...new Set([
-      ...affected.taskIds,
-      ...listed.map((attempt) => attempt.task_id),
-    ]),
-  ];
-  const extra = taskIds.length
-    ? (
-        await tx.client.query<AttemptRow>(
-          `SELECT * FROM coordinator.task_attempts
-            WHERE task_id = ANY ($1::uuid[]) AND status = 'running'
-              AND NOT (id = ANY ($2::uuid[]))
-            ORDER BY id FOR UPDATE`,
-          [taskIds, listed.map((attempt) => attempt.id)],
-        )
-      ).rows
-    : [];
   const touchedAttempts = [...listed, ...extra];
   for (const attempt of touchedAttempts) {
     if (attempt.status !== 'running') continue;
@@ -597,46 +736,89 @@ export async function processInvalidation(
     });
   }
 
-  // 2. Affected outputs and findings are no longer usable.
+  // 2. Affected outputs and findings are no longer usable. Outputs the listed
+  // ids name are affected by definition; outputs found through a task count
+  // only when they were published before the event was recorded.
   const reason = `invalidated:${eventId.slice(0, 16)}`;
   await tx.client.query(
     `UPDATE coordinator.task_outputs SET usable = false, unusable_reason = $4
       WHERE mission_id = $1 AND usable
-        AND (id = ANY ($2::uuid[]) OR task_id = ANY ($3::uuid[]))`,
-    [missionId, affected.outputIds, taskIds, reason],
+        AND (id = ANY ($2::uuid[])
+             OR (task_id = ANY ($3::uuid[]) AND published_at <= $5))`,
+    [missionId, affected.outputIds, taskIds, reason, row.created_at],
   );
   await tx.client.query(
     `UPDATE coordinator.findings SET usable = false
       WHERE mission_id = $1 AND usable
-        AND (attempt_id = ANY ($2::uuid[]) OR task_id = ANY ($3::uuid[]))`,
-    [missionId, touchedAttempts.map((attempt) => attempt.id), taskIds],
+        AND (attempt_id = ANY ($2::uuid[])
+             OR (task_id = ANY ($3::uuid[]) AND created_at <= $4))`,
+    [missionId, touchedAttempts.map((attempt) => attempt.id), taskIds, row.created_at],
   );
 
   // 3. Repairs.
-  const tasks = await lockTasks(tx.client, taskIds);
-  const latest = new Map<string, string>(
+  const latest = new Map<string, { id: string; startedAt: Date }>(
     taskIds.length
       ? (
-          await tx.client.query<{ task_id: string; id: string }>(
-            `SELECT DISTINCT ON (task_id) task_id, id FROM coordinator.task_attempts
+          await tx.client.query<{
+            task_id: string;
+            id: string;
+            started_at: Date;
+          }>(
+            `SELECT DISTINCT ON (task_id) task_id, id, started_at
+               FROM coordinator.task_attempts
               WHERE task_id = ANY ($1::uuid[]) ORDER BY task_id, n DESC`,
             [taskIds],
           )
-        ).rows.map((item) => [item.task_id, item.id] as [string, string])
+        ).rows.map(
+          (item) =>
+            [item.task_id, { id: item.id, startedAt: item.started_at }] as [
+              string,
+              { id: string; startedAt: Date },
+            ],
+        )
       : [],
   );
+  const freshOutput = new Set<string>(
+    taskIds.length
+      ? (
+          await tx.client.query<{ id: string }>(
+            `SELECT t.id FROM coordinator.tasks t
+               JOIN coordinator.task_outputs o ON o.id = t.output_id
+              WHERE t.id = ANY ($1::uuid[]) AND o.usable AND o.published_at >= $2`,
+            [taskIds, row.created_at],
+          )
+        ).rows.map((item) => item.id)
+      : [],
+  );
+  const listedAttemptIds = new Set(listed.map((attempt) => attempt.id));
+  /** Already repaired, or already running on evidence newer than the event. */
+  const recovered = (task: TaskRow) => {
+    if (task.status === 'succeeded') return freshOutput.has(task.id);
+    if (['leased', 'running', 'waiting'].includes(task.status)) {
+      const attempt = latest.get(task.id);
+      return (
+        attempt !== undefined &&
+        !listedAttemptIds.has(attempt.id) &&
+        attempt.startedAt > row.created_at
+      );
+    }
+    return false;
+  };
   const eligible = tasks.filter(
     (task) =>
       latest.has(task.id) &&
       (ACTIVE_FOR_REPAIR.has(task.status) ||
         task.status === 'runnable' ||
-        task.status === 'repairing'),
+        task.status === 'repairing') &&
+      !recovered(task),
   );
 
   let gate: TaskRow | null = null;
   const needsGate =
     event.selfWrite === 'verified' &&
-    eligible.some((task) => task.role !== 'postcondition');
+    eligible.some(
+      (task) => task.role !== 'postcondition' && task.role !== 'planner',
+    );
   if (needsGate) {
     const ensured = await ensurePostconditionTask(
       tx,
@@ -661,10 +843,31 @@ export async function processInvalidation(
       });
   }
 
-  let scheduledAny = false;
   for (const task of eligible) {
     if (gate && task.id === gate.id) continue;
-    const attemptId = latest.get(task.id)!;
+    const attemptId = latest.get(task.id)!.id;
+    // The planner is a scheduling artifact (D1): once it has published (or was
+    // marked invalidated), the plan is re-made only through scheduleReplan, so
+    // replanCap bounds it and the root tasks are not multiplied by repairs.
+    if (
+      task.role === 'planner' &&
+      (task.status === 'succeeded' || task.status === 'invalidated')
+    ) {
+      const scheduled = await scheduleReplan(
+        tx,
+        deps,
+        mission,
+        eventId,
+        `the planner's context ${event.sourceKey} changed (${event.reason})`,
+      );
+      // Cap reached: the plan stays as it is, and the planner task must not
+      // hold the mission open in `invalidated`.
+      if (!scheduled && task.status === 'invalidated')
+        await transitionTask(tx, task, 'cancelled', {
+          reason: 'replan_cap_reached',
+        });
+      continue;
+    }
     let held = false;
     const spec: TaskRepair = {
       kind: task.role === 'planner' ? 'replan' : 'repair',
@@ -688,6 +891,23 @@ export async function processInvalidation(
         [task.id, JSON.stringify(spec)],
       );
     } else {
+      if (
+        task.role === 'postcondition' &&
+        (task.status === 'succeeded' || task.status === 'invalidated') &&
+        (await openPostconditionTask(tx.client, missionId, task.id))
+      ) {
+        // At most one open postcondition task per mission: the one in flight
+        // already observes the current state.
+        await recordRecovery(tx, {
+          invalidationEventId: eventId,
+          missionId,
+          kind: 'repair_coalesced',
+          taskId: task.id,
+          attemptId,
+          detail: 'another postcondition task is already open',
+        });
+        continue;
+      }
       held = gate !== null && task.role !== 'postcondition';
       await requeueTask(tx, task, {
         reason: spec.reason,
@@ -695,7 +915,6 @@ export async function processInvalidation(
         holdInvalidated: held,
       });
     }
-    scheduledAny = true;
     await recordRecovery(tx, {
       invalidationEventId: eventId,
       missionId,
@@ -720,16 +939,13 @@ export async function processInvalidation(
     options.replanOnRootInvalidation !== false &&
     event.reason !== 'publication_rejected'
   ) {
-    if (
-      await scheduleReplan(
-        tx,
-        deps,
-        mission,
-        eventId,
-        `root task invalidated by ${event.sourceKey}`,
-      )
-    )
-      scheduledAny = true;
+    await scheduleReplan(
+      tx,
+      deps,
+      mission,
+      eventId,
+      `root task invalidated by ${event.sourceKey}`,
+    );
   }
 
   // 5. Branches that are not affected keep running untouched.
@@ -750,7 +966,9 @@ export async function processInvalidation(
       WHERE event_id = $1 AND mission_id = $2 AND processed_at IS NULL`,
     [eventId, missionId],
   );
-  if (scheduledAny) await enqueueMissionEvaluate(tx.client, missionId);
+  // Always re-evaluate: the event may have been the last thing holding the
+  // mission back (also when nothing needed a repair).
+  await enqueueMissionEvaluate(tx.client, missionId);
   await resolveClosedInvalidations(tx, deps, missionId);
 }
 
@@ -887,10 +1105,12 @@ export function createRecovery(
       const tx = txCtx(client);
       const mission = await lockMissionShared(client, missionId);
       if (!mission) return;
+      // Read without a lock: processInvalidation locks attempts and tasks first
+      // and the row last (the global order), then re-checks processed_at.
       const row = (
         await client.query<InvalidationRow>(
           `SELECT * FROM coordinator.invalidations
-            WHERE event_id = $1 AND mission_id = $2 FOR UPDATE`,
+            WHERE event_id = $1 AND mission_id = $2`,
           [eventId, missionId],
         )
       ).rows[0];

@@ -25,6 +25,8 @@ import {
 import {
   enqueueMissionEvaluate,
   failedAttemptCount,
+  failTask,
+  promoteRunnable,
   requeueTask,
   transitionTask,
   type TxCtx,
@@ -128,8 +130,12 @@ export async function claimAttempt(
         ? task.repair
         : null;
     const kind: AttemptKind = spec ? spec.kind : n === 1 ? 'initial' : 'retry';
+    // A repair/replan keeps the context the task inherited from its parent
+    // (its question still rests on it, C10) and drops only the entries whose
+    // receipt has since been superseded, retracted or has expired: those are
+    // exactly what the repair replaces with fresh reads.
     const inherited: DependencyVector = spec
-      ? []
+      ? await liveInherited(client, task.inherited_dependency_vector)
       : task.inherited_dependency_vector;
 
     const leased = await transitionTask(tx, task, 'leased', {
@@ -204,6 +210,22 @@ export async function claimAttempt(
       leaseMs,
     };
   });
+}
+
+/** The inherited vector without receipts the ledger no longer treats as current evidence. */
+async function liveInherited(
+  client: pg.PoolClient,
+  vector: DependencyVector,
+): Promise<DependencyVector> {
+  if (vector.length === 0) return vector;
+  const dead = await client.query<{ id: string }>(
+    `SELECT id FROM ledger.observation_receipts
+      WHERE id = ANY ($1::uuid[])
+        AND status IN ('superseded', 'retracted', 'expired')`,
+    [vector.map((entry) => entry.receiptId)],
+  );
+  const gone = new Set(dead.rows.map((row) => row.id));
+  return vector.filter((entry) => !gone.has(entry.receiptId));
 }
 
 /** leased -> running; fenced like a publication. */
@@ -386,14 +408,15 @@ export async function reapExpired(
         ['leased', 'running', 'waiting'].includes(task.status)
       ) {
         const failures = await failedAttemptCount(client, task.id);
-        if (
-          failures >= task.max_attempts &&
-          (task.status === 'running' || task.status === 'waiting')
-        ) {
-          await transitionTask(tx, task, 'failed', {
+        // A task whose worker dies between claim and start is `leased`; it
+        // counts against maxAttempts like any other expired attempt (otherwise
+        // a poison task would be requeued forever).
+        if (failures >= task.max_attempts) {
+          await failTask(tx, task, {
             reason: 'attempts_exhausted',
             bumpFence: true,
           });
+          await promoteRunnable(tx, mission.id);
           await enqueueMissionEvaluate(client, mission.id);
           if (task.role === 'postcondition')
             await releaseGate(tx, mission.id, task.id);
