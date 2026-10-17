@@ -1,0 +1,53 @@
+npm warn deprecated hast@1.0.0: Renamed to rehype
+npm warn deprecated lodash.get@4.4.2: This package is deprecated. Use the optional chaining (?.) operator instead.
+npm warn tarball tarball data for @types/unist@https://registry.npmjs.org/@types/unist/-/unist-2.0.11.tgz (sha512-CmBKiL6NNo/OqgmMn95Fk9Whlp2mtvIv+KNpQKN2F4SjvrEesubTRWGYSg+BnWZOnlCaSTU1sMpsBOzgbYhnsA==) seems to be corrupted. Trying again.
+npm warn tarball tarball data for @types/unist@https://registry.npmjs.org/@types/unist/-/unist-2.0.11.tgz (sha512-CmBKiL6NNo/OqgmMn95Fk9Whlp2mtvIv+KNpQKN2F4SjvrEesubTRWGYSg+BnWZOnlCaSTU1sMpsBOzgbYhnsA==) seems to be corrupted. Trying again.
+npm warn tarball tarball data for p-timeout@https://registry.npmjs.org/p-timeout/-/p-timeout-7.0.2.tgz (sha512-prbX4Z3YszrFNgH+MW5Zoeq3baXrMtP/MQnFeET90UB/GtGcGDQ5Usg9OCy6ETjTTntOw1SL2z9fMPUppN3Guw==) seems to be corrupted. Trying again.
+npm warn tarball tarball data for supports-color@https://registry.npmjs.org/supports-color/-/supports-color-7.2.0.tgz (sha512-qpCAvRl9stuOHveKsn7HncJRvv501qIacKzQlO/+Lwxc9+0q2wLyv4Dfvt80/DPn2pqOBsJdDiogXGR9+OvwRw==) seems to be corrupted. Trying again.
+npm warn tarball tarball data for chalk@https://registry.npmjs.org/chalk/-/chalk-4.1.2.tgz (sha512-oKnbhFyRIXpUuez8iBMmyEa4nbj4IOQyuhc/wy9kY7/WVPcwIO9VA668Pu8RkO7+0G76SLROeyw9CpQ061i4mA==) seems to be corrupted. Trying again.
+npm warn tarball tarball data for @types/unist@https://registry.npmjs.org/@types/unist/-/unist-2.0.11.tgz (sha512-CmBKiL6NNo/OqgmMn95Fk9Whlp2mtvIv+KNpQKN2F4SjvrEesubTRWGYSg+BnWZOnlCaSTU1sMpsBOzgbYhnsA==) seems to be corrupted. Trying again.
+npm warn deprecated node-domexception@1.0.0: Use your platform's native DOMException instead
+npm warn tarball tarball data for @copilotkit/channels-whatsapp@https://registry.npmjs.org/@copilotkit/channels-whatsapp/-/channels-whatsapp-0.11.0.tgz (sha512-Kgw9F+CPINxT2zCjh0ASiFO4YGqCLsk+mibkotSwfBwI8jSErwXKc66PoYV9z5R/pmGtHfCzWyH2ODJPxWeP8A==) seems to be corrupted. Trying again.
+npm warn tarball tarball data for @composio/json-schema-to-zod@https://registry.npmjs.org/@composio/json-schema-to-zod/-/json-schema-to-zod-0.3.3.tgz (sha512-QmgYo4IeK5/34Iqo1jSx6fSnLEyL++07FlW5Y6SfGFOhyb5htnY+vZPjs/tL8puJYhiEU7FV7kXdu5EAQoGrSA==) seems to be corrupted. Trying again.
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+npm warn tar TAR_ENTRY_ERROR ENOENT: no such file or directory, lstat '/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/node_modules/mermaid/dist'
+
+added 1030 packages in 2m
+npm ci --no-audit --no-fund  11.87s user 17.83s system 19% cpu 2:28.68 total
+exit=0

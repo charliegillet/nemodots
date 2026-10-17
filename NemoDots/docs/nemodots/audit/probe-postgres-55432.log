@@ -1,0 +1,20 @@
+2026-10-17 13:10:47.389 PDT [80655] LOG:  starting PostgreSQL 16.13 (Homebrew) on aarch64-apple-darwin24.6.0, compiled by Apple clang version 17.0.0 (clang-1700.6.3.2), 64-bit
+2026-10-17 13:10:47.389 PDT [80655] LOG:  listening on IPv4 address "127.0.0.1", port 55432
+2026-10-17 13:10:47.389 PDT [80655] LOG:  listening on Unix socket "/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/.local/audit-probe/.s.PGSQL.55432"
+2026-10-17 13:10:47.390 PDT [80655] FATAL:  postmaster became multithreaded during startup
+2026-10-17 13:10:47.390 PDT [80655] HINT:  Set the LC_ALL environment variable to a valid locale.
+2026-10-17 13:10:47.390 PDT [80655] LOG:  database system is shut down
+2026-10-17 13:11:13.456 PDT [80841] LOG:  starting PostgreSQL 16.13 (Homebrew) on aarch64-apple-darwin24.6.0, compiled by Apple clang version 17.0.0 (clang-1700.6.3.2), 64-bit
+2026-10-17 13:11:13.457 PDT [80841] LOG:  listening on IPv4 address "127.0.0.1", port 55432
+2026-10-17 13:11:13.457 PDT [80841] LOG:  listening on Unix socket "/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots/.local/audit-probe/.s.PGSQL.55432"
+2026-10-17 13:11:13.460 PDT [80844] LOG:  database system was shut down at 2026-10-17 13:10:47 PDT
+2026-10-17 13:11:13.464 PDT [80841] LOG:  database system is ready to accept connections
+2026-10-17 13:11:13.691 PDT [80853] ERROR:  CREATE DATABASE cannot run inside a transaction block
+2026-10-17 13:11:13.691 PDT [80853] STATEMENT:  create database nemodots_audit_probe; create role nemodots_app login password 'probe-only'; 
+2026-10-17 13:11:13.726 PDT [80841] LOG:  received fast shutdown request
+2026-10-17 13:11:13.726 PDT [80841] LOG:  aborting any active transactions
+2026-10-17 13:11:13.728 PDT [80841] LOG:  background worker "logical replication launcher" (PID 80847) exited with exit code 1
+2026-10-17 13:11:13.728 PDT [80842] LOG:  shutting down
+2026-10-17 13:11:13.728 PDT [80842] LOG:  checkpoint starting: shutdown immediate
+2026-10-17 13:11:13.729 PDT [80842] LOG:  checkpoint complete: wrote 3 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=2, longest=0.001 s, average=0.001 s; distance=0 kB, estimate=0 kB; lsn=0/151DAD0, redo lsn=0/151DAD0
+2026-10-17 13:11:13.731 PDT [80841] LOG:  database system is shut down

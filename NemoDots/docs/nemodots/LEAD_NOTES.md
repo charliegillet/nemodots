@@ -9,6 +9,7 @@ These amendments take precedence over BUILD_PROMPT.md and TEST_PROMPT.md where t
 - The original checkout `/Users/charlie/hackathons/crusoe-hackathon` is on branch `charlie` and another session is actively building there. **Never read from, write to, or run git in that directory.**
 - **Only the designated integrator agent runs git** (`git add <explicit paths>` + `git commit`). Builders, reviewers and verifiers never run `git add/commit/stash/checkout/reset/switch/clean/rebase/push`. Never push. Never `git add -A` from the worktree root.
 - Never stage `.env`, `NemoDots/.env`, `.mcp.json`, `.references/`, `artifacts/`, `NemoDots/.local/`, `node_modules/`.
+- The user asked for every commit to be pushed continuously: the lead runs an auto-push watcher that pushes `nemodots` to `origin` (github.com/charliegillet/crusoe-hackathon) after each commit. Agents still never run `git push` themselves.
 - Commit messages end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 
 ## Engineering team (Claude) — user override
@@ -44,7 +45,7 @@ The user asked for **Fable for planning, review and verification** and **Opus fo
 
 ## External dependencies
 
-- **CopilotKit Intelligence: unavailable.** Obtaining a key requires an account sign-in, which this run cannot do. Conversation persistence (TEST_PROMPT gate 4.8) is **BLOCKED**. NemoDots mission control, ledger, coordinator and UI must not depend on Intelligence; check how OpenDots boots without it and make the mission page usable in that state, honestly labeled.
+- **CopilotKit Intelligence: AVAILABLE (updated 2026-10-17 ~13:40 PDT).** The user supplied a hosted key; it is set as `CPK_INTELLIGENCE_API_KEY` in the gitignored `NemoDots/.env`. Verified live: `CopilotKitIntelligence.createThread` + `getThreadMessages` succeeded (probe `.local/keycheck/probe.ts`; it created one test thread, user `nemodots-keycheck`). This supersedes any earlier note or task-prompt text saying Intelligence is BLOCKED: OpenDots conversations now work, and TEST_PROMPT gate 4.8 (conversation reload) must actually be run, not marked BLOCKED. Still: NemoDots mission control, ledger, coordinator and UI must NOT depend on Intelligence (keep them working and honestly labeled when the key is absent), and Intelligence features beyond conversations (Learning, Slack, voice) stay disabled for the incident scope. Never print or commit the key.
 - Composio, voice, Slack, Automatic Learning, web-search browser, computers: disabled for the incident scope.
 - No public deployment, no pushing, no messages.
 

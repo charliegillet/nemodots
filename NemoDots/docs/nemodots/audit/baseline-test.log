@@ -1,0 +1,18 @@
+
+> opendots@0.1.0 test
+> cross-env DO_NOT_TRACK=1 vitest run
+
+(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - import "./src/build/dark-theme" without a file extension (vite.config.ts:3:27). Add the file extension
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+
+ RUN  v4.1.11 /Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots
+
+
+ Test Files  54 passed (54)
+      Tests  344 passed (344)
+   Start at  13:15:03
+   Duration  7.69s (transform 1.88s, setup 0ms, import 17.65s, tests 12.82s, environment 8ms)
+
+env DO_NOT_TRACK=1 SCARF_ANALYTICS=false npm test  29.46s user 4.79s system 416% cpu 8.228 total
+test exit=0

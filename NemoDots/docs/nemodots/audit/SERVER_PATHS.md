@@ -1,0 +1,343 @@
+# OpenDots server execution paths (Phase 0 audit)
+
+Audited checkout: `/Users/charlie/hackathons/crusoe-hackathon-nemodots/NemoDots` (OpenDots `ab39f250`, imported as a subtree). All paths below are relative to that directory; `file:line` references were read from the actual source on 2026-10-17. Nothing in this document is inferred from upstream documentation alone; where a claim depends on a library internal that could not be verified yet, it is marked **UNVERIFIED**.
+
+Scope: the Node/Hono server (`src/server/**`), the shared schemas it uses (`src/shared/**`), the client-side approval callbacks it depends on (`src/client/Chat.tsx`, `ConnectionActionCard.tsx`, `page-review-decision.ts`), and the optional browser worker (`src/browser/**`). The React UI itself is out of scope except where it completes a server flow.
+
+---
+
+## 1. Boot, configuration and the model provider
+
+### 1.1 Process entry
+
+`src/server/index.ts`
+
+| Line | What happens |
+| --- | --- |
+| 18-27 | `HOST` (default `127.0.0.1`), `PORT` (default 4310). Binding to anything other than `127.0.0.1`/`::1`/`localhost` throws unless `OWNER_TOKEN` is at least 24 chars. |
+| 28-33 | `DATABASE_PATH` (default `data/opendots.sqlite`). Two **separate** `node:sqlite` `DatabaseSync` handles are opened on the same file: `Store` (tasks/settings/memories/telemetry) and `WorkspaceStore` (spaces/dots/threads/pages/computers/connections/calls/captures). `OWNER_ID` default `opendots-owner`. |
+| 34-63 | `PlatformConfig` is built straight from `process.env`. Model: `OPENAI_API_KEY` → `apiKey`, `OPENAI_MODEL` → `model`, `OPENAI_BASE_URL` → `baseUrl` (default `https://api.openai.com/v1`). Intelligence key resolution is in `platform-config.ts:13-26` (`CPK_INTELLIGENCE_API_KEY` preferred over `INTELLIGENCE_API_KEY`; `INTELLIGENCE_GATEWAY_WS_URL` over `INTELLIGENCE_WS_URL`). `runtimeUrl` (line 61) is the server's **own loopback** `/api/copilotkit` URL, used by headless turns. |
+| 64 | `new Platform(store, workspace, config)` (see 1.2). |
+| 65-91 | `researchConfig` (`mode: 'live'`) and the `Runner` for scheduled tasks. The runner's `execute` callback always goes through `platform.turn(threadId, prompt, signal, {opendotsSource:'scheduled_task'})` (lines 78-89); the legacy `research()` path in `research.ts:54` is therefore **not** reached in production, only via tests/`mode: 'sample'`. |
+| 95-114 | `createApp(...)`, then global security headers + CSP (103-111), `/api/*` 404 fallthrough, static client. |
+| 115-139 | `serve()`; on listen: `runner.start()` and `platform.start()` (Channels readiness). Graceful shutdown via `shutdown.ts`. |
+
+### 1.2 Platform construction (`src/server/platform.ts`)
+
+| Line | What happens |
+| --- | --- |
+| 38-48 | `SetupTelemetry`, `ComputerService(workspace, config, paused)`, `ConnectionService(workspace.connections)`, `PageService(workspace, () => intelligence)` are **always** constructed, with or without Intelligence. |
+| 49 | **If `config.intelligenceKey` is missing the constructor returns here.** `this.intelligence` and `this.handler` stay `undefined`. This is the state NemoDots will run in (Intelligence is BLOCKED per LEAD_NOTES). |
+| 50-58 | `CopilotKitIntelligence({apiKey, apiUrl, wsUrl, getLearningContainerId})`. |
+| 59-80 | Optional Slack channel (`createSlackChannel`) with a `DotAgent(..., channel=true)` factory. |
+| 81-107 | `CopilotRuntime({ intelligence, agents: () => one DotAgent per Dot (channel=false), channels, identifyUser: () => owner })`. **`identifyUser` always returns the single `OWNER_ID`**; there is no multi-user identity. |
+| 108-112 | `createCopilotHonoHandler({ runtime, basePath: '/api/copilotkit', cors: { origin: [] } })`. |
+| 185-211 | `Platform.handle(request)`: without `handler` → `503 Setup required` (185-190). Otherwise parses the JSON body and calls `validateRuntimeScope(request, workspace, body)` (`runtime-scope.ts`) before delegating to the SDK handler. This is the only entry for every AG-UI run (browser chat, page chat, headless/voice/scheduled turns). |
+| 212-231 | `Platform.turn(threadId, prompt, signal, metadata)`: `requireReady()` then `runThreadTurn(runtimeUrl, ownerToken header, dotId, threadId, ...)` (`headless.ts:24-84`) which does an HTTP round trip to the server's own runtime with `IntelligenceAgent`. Requires Intelligence. |
+
+### 1.3 Behaviour without Intelligence (relevant to the BLOCKED state)
+
+- `POST /api/conversations` → `503 Setup required: INTELLIGENCE_API_KEY (or CPK_INTELLIGENCE_API_KEY)` (`workspace-routes.ts:154-158`, `platform-config.ts:77-107`).
+- `/api/copilotkit/*` → `503` (`platform.ts:186-190`). No agent run can start.
+- `DotAgent.run` would also refuse: `dot-agent.ts:120-132` throws `Intelligence and model configuration are required.` and records `setup_failed/configuration_missing`.
+- `POST /api/tasks` → `503` (`app.ts:129-134`); `platform.turn` throws from `requireReady` (`platform.ts:122-128`).
+- Voice `begin` → `requireReady` throws (`voice.ts:34`).
+- Page chat `POST /spaces/:s/pages/:id/conversation` → `PageService.conversation` calls `this.intelligence()` which throws from `requireReady` (`platform.ts:45-48`, `page-service.ts:60`); surfaced as 503 by `page-routes.ts:142-154`.
+- **Still working**: workspace/space/dot CRUD, manual page CRUD (`page-routes.ts:62-108`), computer routes, connection routes, settings/memories, `/api/state`, `/api/workspace` (reports `setup.missing`).
+
+Consequence for NemoDots: the mission controller cannot be a Dot conversation turn. Its planner/worker model calls must be issued by a NemoDots-owned loop that constructs its own adapter (see 1.4) and never goes through `DotAgent`/`CopilotRuntime`.
+
+### 1.4 How the model provider is constructed
+
+There are three independent provider constructions in the server; only the first is the chat agent path.
+
+1. **DotAgent (TanStack AI OpenAI-compatible adapter)** — `src/server/dot-agent.ts:332-337`
+   ```ts
+   const adapter = openaiCompatibleText(this.config.model, {
+     apiKey: this.config.apiKey,
+     baseURL: this.config.baseUrl ?? 'https://api.openai.com/v1',
+     api: 'chat-completions',
+     maxRetries: 1,
+   });
+   ```
+   Imported from `@tanstack/ai-openai/compatible` (line 20). Used in `chat({...})` at 385-412 with `modelOptions: { max_completion_tokens: 2200 }` (398) and `agentLoopStrategy: maxIterations(5 | 10)` (399-405; 10 only when Composio tools or learned skills are present). The upstream test `tests/tanstack-agent.test.ts:120-125` confirms the request lands at `${baseUrl}/chat/completions` with `model` and `max_completion_tokens` in the JSON body. **No `tool_choice` is set** (good: LEAD_NOTES says `tool_choice: "required"` breaks on Nemotron). **No per-request telemetry** (tokens, timing, returned model) is captured anywhere in `dot-agent.ts`.
+
+   Nemotron-specific risk: reasoning is on by default and `max_completion_tokens: 2200` is shared with reasoning, so a Nemotron turn can finish with empty `content` and `finish_reason="length"`. NemoDots' own adapter must set `reasoning_effort: "none"` (or `chat_template_kwargs.enable_thinking=false`) or allow ≥1024 completion tokens and read `message.reasoning`. Whether `modelOptions` passes arbitrary keys (e.g. `reasoning_effort`) through the compatible adapter is recorded in §6 (library notes).
+
+2. **Legacy research brief (raw fetch)** — `src/server/research.ts:149-180`: `POST ${baseUrl}/chat/completions` with `temperature: 0.3`, `max_tokens: 1800`, system+user messages, `Authorization: Bearer ${apiKey}`. Not reached in production (`index.ts:75-91` always supplies `execute`), but it is a second, un-instrumented OpenAI-compatible client in the tree.
+
+3. **Voice** — `src/server/voice.ts:113-122` and `259-268`: hard-coded `https://api.openai.com/v1/realtime/calls` with `VOICE_API_KEY`. `OPENAI_BASE_URL` does not affect it. Disabled for the incident scope.
+
+Other outbound endpoints the model path can reach: Parallel MCP `https://search.parallel.ai/mcp` (`parallel.ts:128`), the optional browser worker `BROWSER_URL/browse` (`dot-agent.ts:193-204`), OpenBot supervisor/computer HTTP (`computer-service.ts`), arbitrary owner-configured MCP servers (`connections.ts:39-52`), Composio (`composio.ts`), Intelligence (`platform.ts:50`, `headless.ts`), CopilotKit telemetry (`setup-telemetry.ts:85`).
+
+---
+
+## 2. Authentication, origin and scope checks
+
+### 2.1 HTTP boundary (`src/server/app.ts:31-92`) — applies to every `/api/*` route
+
+| Line | Check |
+| --- | --- |
+| 31-37 | 1,000,000-byte body limit → 413. |
+| 39-40 | `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`. |
+| 41-65 | **Host allowlist**: `localhost`, `127.0.0.1`, `[::1]` plus hostnames of configured `APP_ORIGIN`s. When `OWNER_TOKEN` is unset, any other request host → 403 (`Unrecognized host.`) (DNS-rebinding defence, tested at `tests/app.test.ts:258`). |
+| 66-69 | **Origin header** must exactly equal one of `APP_ORIGIN` list, or (if none configured) the request URL's own origin. Dev defaults `http://localhost:5173`, `http://127.0.0.1:5173` come from `app-origin.ts:1-13`. |
+| 70-71 | `Sec-Fetch-Site: cross-site` → 403 regardless of Origin. |
+| 72-85 | If `OWNER_TOKEN` is set: `Authorization: Bearer <token>` compared with `timingSafeEqual` → else 401. |
+| 86-90 | Non-GET/HEAD requests must carry `Content-Type: application/json` → else 415 (blocks form posts). |
+| 93-100 | Sub-routers mounted under `/api`: `computerRoutes`, `connectionRoutes`, `workspaceRoutes` (which itself mounts `pageRoutes` at `workspace-routes.ts:30`). |
+
+The client sends the token from `sessionStorage` (`src/client/api.ts:1-45`).
+
+The browser worker has its own bearer check (`src/browser/index.ts:15-26`, `BROWSER_SECRET` ≥ 24 chars) and SSRF guards (`src/browser/security.ts`).
+
+### 2.2 Runtime scope (`src/server/runtime-scope.ts`) — applies to `/api/copilotkit/*`
+
+Called from `Platform.handle` (`platform.ts:198`). Whole-path matching (not prefix) against an allowlist: `info`, `threads`, `threads/subscribe`, `agent/:id/(run|connect|suggest)`, `agent/:id/stop/:thread`, `threads/:id/(messages|events|state|archive)`, `threads/:id` (PATCH/DELETE, with reserved suffixes denied, lines 43-58). Every `agentId` candidate (path, body, query) must be an existing Dot and agree with the path (61-70); every `threadId` candidate must pass `workspace.requireThread(threadId, agentId)` (71-80), i.e. be bound to this owner and that Dot. Inspector/debug routes are denied. Tests: `tests/runtime-scope.test.ts`.
+
+### 2.3 Thread / Space / Dot authority (`src/server/workspace.ts`)
+
+- `requireThread(id, dotId?)` (294-299): thread must exist in `thread_bindings` for `ownerId` and, if given, match `dotId`. Used by every per-conversation route and by `pageAccess`.
+- `canAccessSpace(dotId, spaceId)` (184-188): `dot_spaces` grant table; migration at 45-57 runs once.
+- Space membership for Dots is edited only by owner routes `POST /dots`, `PUT /dots/:id` (`workspace-routes.ts:74-143`).
+- Owner page routes (`page-routes.ts:62-108`) check **Space existence** only (`Pages.requireSpace`), not Dot grants: the owner is the authority there.
+
+### 2.4 In-turn permission drift (`src/server/dot-agent.ts:133-168`)
+
+`check()` snapshots `store.settings()` and the Dot's permissions + `connections.fingerprint(dotId)` at turn start and re-evaluates every 100 ms (162-168) and before/after every tool execution. Any change (pause, research/memory/apps toggles, Space grants, learning settings, connection edits) calls `abortRun()`, which aborts the `AbortController` passed to the adapter and tools. Tests: `tests/tanstack-agent.test.ts` "aborts the TanStack provider request when the owner pauses work". This is the existing mechanism closest to "abort affected inference best-effort when evidence changes" and can be reused by passing a NemoDots invalidation predicate into the same `check()` closure.
+
+---
+
+## 3. The DotAgent turn: where the model sees things and where tools are registered
+
+`DotAgent.run(input)` (`src/server/dot-agent.ts:64-470`) is the only place a model prompt is assembled for a Dot. Order of operations:
+
+| Line | Step |
+| --- | --- |
+| 72-85 | Turn time limit `AGENT_RUN_TIMEOUT_MS` (default 90 s, `platform-config.ts:10`) → `RUN_ERROR`. |
+| 103-119 | Resolve Dot; for Slack (`channel=true`) auto-bind the thread; `requireThread(input.threadId, dot.id)`. |
+| 120-132 | Refuse without Intelligence key, model key or model id. |
+| 169-173 | `new ComputerService(...)`; `computer.configured` gates computer tools. |
+| 174-231 | **Tool: `read_public_page` (browser mode)** only when research allowed, `WEB_SEARCH_PROVIDER=browser`, and no computer. Fetches `BROWSER_URL/browse`, saves a capture (`workspace.saveCapture`, 211-222), returns `{title,url,text(≤24000)}`. |
+| 232-300 | **Tools: `search_web`, `read_public_page` (Parallel mode)** — default when research allowed. Calls `parallelSources` (MCP `web_search` → `web_fetch`, ≤5 sources, `parallel.ts:111-200`), saves capture, returns `{sources, limitations}`. |
+| 301-312 | **Client tools**: from `input.tools` only `review_space_page` and `request_connection_action` survive the filter; none for Slack. `approvals` = client offered `request_connection_action`. |
+| 313-320 | **Connected MCP tools** via `connectionTools(...)` (§4.3). |
+| 321-327 | `pageAccess(workspace, dot.spaceId, threadId, check)` and `pages.context()` = the page bound to this thread (full `Page` row including `content` and `revision`). |
+| 328-331 | **Memories**: all `store.memories()` texts when memory allowed (no IDs). |
+| 332-337 | Adapter (§1.4). |
+| 339-354 | **Composio tools** (async) when `COMPOSIO_API_KEY`, settings `appsAllowed` and `dot.appsAllowed`. |
+| 356-363 | `serverTools` = research tools + Composio tools + `pageTools(pages)` + `computerTools(...)` if configured. |
+| 364 | **System prompt**: Dot name, `dot.instructions`, tool availability text, `Preferences: ${JSON.stringify(memories)}`, `Default page destination: ${dot.spaceId}`, `Current page (...): ${JSON.stringify(pageContext ?? null)}` (entire page incl. content), `Current time`. |
+| 365-414 | `new BuiltInAgent({ type: 'tanstack', learnedSkills?, factory })`. The **factory** (375-413) runs per model loop: `check()`, `convertInputToTanStackAI` after dropping `system`/`developer` messages from the client (377-384), then `chat({ adapter, messages, systemPrompts: [prompt, ...converted.systemPrompts, learnedSkills.catalog?], abortController, threadId, runId, modelOptions, agentLoopStrategy, tools })`. |
+| 406-411 | **The complete tool list**: `tanstackTools(serverTools)` + `connected` + `converted.tools` (client tools) + `learnedSkillTools(ctx, check)`. |
+| 415-427 | `inner.run({...input, tools: [canonical pageReviewTool?, canonical connectionActionTool?], forwardedProps: {}})` — client-supplied tool descriptions and `forwardedProps` are discarded (tested `tests/tanstack-agent.test.ts:126-129`). |
+| 428-456 | Event forwarding; Slack gets a generic `channelError()`. |
+
+### 3.1 Tool registration mechanics
+
+- Server tools are CopilotKit `defineTool({name, description, parameters: zod, execute})` objects (`ToolDefinition` from `@copilotkit/runtime/v2`). `tanstackTools()` (`src/server/tanstack-tools.ts:8-17`) maps each to TanStack `toolDefinition({name, description, inputSchema: parameters}).server(execute)`; a tool without `execute` throws.
+- Connected MCP tools are built **directly** as TanStack `toolDefinition(...).server(...)` in `connection-tools.ts:16-24` (JSON-schema `inputSchema`, not zod).
+- Learned-skill tools wrap CopilotKit's snapshot-bound executors with explicit zod schemas (`tanstack-tools.ts:21-49`); only `copilotkit_load_skill` and `copilotkit_read_skill_file` are accepted, anything else throws.
+- Client tools come out of `convertInputToTanStackAI(...).tools`; they have no server executor, so the loop ends the turn with a pending tool call that the browser's `useHumanInTheLoop` renderers answer (`src/client/Chat.tsx:193-213`).
+- Zod validation of tool arguments happens inside TanStack before `execute` (tested: "validates tool arguments before making a page change", `tests/tanstack-agent.test.ts:212-230`, the model receives a validation error as the tool result).
+
+### 3.2 Every model-visible read in a Dot turn
+
+| # | Read | Source of truth | Where injected | Version info available at injection |
+| --- | --- | --- | --- | --- |
+| R1 | Dot instructions, name | `dots` (SQLite) | prompt `dot-agent.ts:364` | none (Dot row has no revision) |
+| R2 | Memories | `memories` (SQLite, `store.ts:299`) | prompt (texts only) | `Memory.id`, `createdAt` exist but are dropped |
+| R3 | Current page (title+content+revision) | `pages` via `pages.forThread` (`pages.ts:275`) | prompt as JSON | `page.revision`, `updatedAt` present in the JSON |
+| R4 | Conversation history | Intelligence thread (`ctx.input.messages`) | messages | message IDs only; replayed every turn |
+| R5 | Learned-skill catalog | Intelligence Learning snapshot | `systemPrompts` | snapshot/revision held by SDK context (UNVERIFIED field names) |
+| R6 | `list_authorized_spaces` | `spaces`/`dot_spaces` | tool result | none |
+| R7 | `list_space_pages` | `pages` | tool result `{id,spaceId,title,parentId,revision,url}` | `revision` |
+| R8 | `read_space_page` | `pages` | tool result (full `Page`) | `revision`, `updatedAt` |
+| R9 | `search_web`/`read_public_page` | Parallel / browser worker | tool result + `captures` row | none (URL + excerpt) |
+| R10 | MCP tools (direct, non-approval) | remote MCP server | tool result `{isError,text≤20000}` (`connections.ts:96-129`) | none |
+| R11 | Composio tools | Composio | `{data,error}` | none |
+| R12 | `computer_snapshot/read/screenshot/files_list/files_read/exec` output | OpenBot computer | tool result (raw JSON, secrets redacted `computer-service.ts:109-117`, `exec` echo of `command` removed 370-374) | none |
+| R13 | `copilotkit_load_skill`/`read_skill_file` | Intelligence | tool result | skill snapshot |
+| R14 | Voice: last 12 messages (`platform.history`, `platform.ts:168-184`) and live transcript (`workspace-routes.ts:206`) | Intelligence / browser | Realtime instructions / compute prompt | none |
+| R15 | Scheduled prompt (`claim.prompt`) and Slack message text | `tasks` / Slack | user message via `runThreadTurn` | task id |
+
+None of these currently create a read-set record; R3/R7/R8 are the only ones that carry a revision number.
+
+---
+
+## 4. Every mutating path, how it is gated, and how approvals work
+
+### 4.1 Page mutations
+
+| Path | Entry | Gate | Executes | Idempotency / CAS |
+| --- | --- | --- | --- | --- |
+| Tool `create_space_page` | `page-tools.ts:77-83` → `pageAccess.create` (`page-tools.ts:40-41`) | `resolve()` re-checks `canAccessSpace` + `check()` on **each call** (`page-tools.ts:12-19`) | `Pages.create` (`pages.ts:108-136`) | new UUID, `revision=1`; no dedupe |
+| Tool `edit_space_page` | `page-tools.ts:84-91` → `pageAccess.edit` | same | `Pages.update` (`pages.ts:202-238`): `BEGIN IMMEDIATE`, `revision === expectedRevision` else `PageError 409`, `UPDATE ... WHERE id=? AND revision=?`, `revision+1` | **optimistic CAS on `revision`** |
+| Client tool `review_space_page` | model emits call; browser `PageReviewCard` → `decidePageReview` (`src/client/page-review-decision.ts:40-61`) → `POST /api/conversations/:id/reviewed-page` (`page-routes.ts:29-51`) | `requireThread`, `canAccessSpace(thread.dotId, spaceId)` | `Pages.createReviewed` (`pages.ts:156-201`): `BEGIN IMMEDIATE`; receipt keyed `(threadId, toolCallId)` with the bound draft; a retry with a different Space or draft → 409; a deleted page is reported, never recreated (`page-routes.ts:21-23`, `pages.ts:302`) | **payload-bound, idempotent receipt** — the closest existing analogue to NemoDots' "approval binds exact payload" |
+| Owner HTTP | `POST/PATCH/DELETE /api/spaces/:spaceId/pages[/:id]` (`page-routes.ts:70-108`) | HTTP boundary only | `Pages.create/update/delete` | same CAS on PATCH |
+| Save conversation | `POST /api/conversations/:id/page` (`page-routes.ts:123-141`) → `PageService.saveConversation` (`page-service.ts:97-146`) | `requireThread`, Space grant | `Pages.create` with `sourceThreadId` | needs Intelligence |
+| Delete | `Pages.delete` (`pages.ts:285-313`) reparents children (bumps their `revision`), deletes `page_threads`, keeps `page_reviews` | | | |
+
+Note: `Pages.update` keeps `BEGIN IMMEDIATE` on the `WorkspaceStore` connection while the `Store` connection is separate; both use WAL with `busy_timeout=5000` (`workspace.ts:21`, `store.ts:30`).
+
+### 4.2 Computer actions (OpenBot)
+
+- **Agent path**: `computerTools()` (`computer-tools.ts:4-29`) registers `computer_<action>` for every key of `computerInputs` (`src/shared/computer-types.ts:49-105`) except `human_*`: `navigate, read, snapshot, screenshot, click, type, key, scroll, files_list, files_read, files_write, exec`. Each executes `service.action(dotId, name, input, 'agent', signal)`.
+- **Owner path**: `POST /api/dots/:id/computer/actions` (`computer-routes.ts:46-60`) → `action(..., 'owner', c.req.raw.signal)`; also `permissions` (PATCH), `start`, `stop`, `take`, `release`.
+- **Execution boundary**: `ComputerService.action` (`computer-service.ts:324-380`): unknown action → throw (331-332); zod parse of input (333); `audited()` writes a `computer_audit` row `(id, dotId, action, actor, outcome='pending')` **before** dispatch and sets `succeeded/failed` after (`computer-service.ts:230-246`, `computer-store.ts:27-43`; metadata only, no arguments); `allowed(id, kind, actor)` checks Dot exists, service configured, per-Dot permission (`enabled` and `browser|files|shell`), and global pause for agents (50-63); a 50 ms watcher re-checks permission and cancels mid-flight (348-354); per-Dot HMAC token (41-45); endpoint identity pinned to `${namespace}-computer-${dotId}` (152-184). Shell (`exec`) is reachable by the model whenever the owner enables `shell` for that Dot.
+- The audit log is bounded to the latest 1000 completed rows per Dot (`computer-store.ts:38-42`). It records neither arguments nor result digests.
+- In this environment the OpenBot services need Docker, which is absent (LEAD_NOTES); `computer.configured` will be false, so no `computer_*` tools are registered (`dot-agent.ts:360-362`).
+
+### 4.3 Connected MCP tools and the owner-approval flow
+
+Registration: `connectionTools(connections, dotId, threadId, check, signal, approvals)` (`connection-tools.ts:7-51`) exposes `ConnectionService.tools(dotId)` = `exposedTools(store.list(dotId))` (`connections.ts:82-95`): names are `${slug(connection.name,20)}__${slug(tool.name,40)}` with `_n` suffixes, assigned over **all** tools (enabled or not) so disabling one never renames another; only `enabled` tools are returned.
+
+Tool classification: at discovery (`connections.ts:171-205`) `readOnly = annotations.readOnlyHint === true`; `requiresApproval` defaults to `!readOnly`, but **the owner can flip both `enabled` and `requiresApproval` per tool** (`PATCH /api/connections/:id/tools/:name`, `connection-routes.ts:50-65`). `readOnlyHint` is a server-supplied hint, not proof (comment at `src/shared/connection-types.ts:7`).
+
+Execution (`connection-tools.ts:24-50`):
+1. `check()`; `connections.resolve(dotId, exposed.name)` re-reads current settings so a tool disabled mid-turn fails.
+2. If `requiresApproval`:
+   - web chat (`approvals=true`): `store.createApproval({threadId, dotId, connectionId, tool, arguments})` (`connection-store.ts:104-124`, table `mcp_approvals`) and return `{status:'approval_required', approvalId, instruction}`. **Nothing executes.**
+   - headless/Slack (`approvals=false`): return `{status:'unavailable', message}`.
+3. Otherwise `connections.call(current, input, signal)` → fresh MCP session per call (`connections.ts:152-170`, 60 s timeout), `client.callTool`, `normalizeResult` (text ≤ 20,000 chars). Errors are returned as `{isError:true,text}`, never thrown.
+
+Approval callback (the **only** path that runs an approval-gated tool):
+1. Model calls client tool `request_connection_action {approvalId, summary}` (`src/shared/connection-types.ts:38-49`).
+2. Browser `ConnectionActionCard` (`src/client/ConnectionActionCard.tsx:47-66`) loads the **server's** record via `GET /api/conversations/:id/connection-approvals/:approvalId` (`connection-routes.ts:89-103`) and shows connection, tool title, description and stored arguments; the model's `summary` is not what the owner approves.
+3. Owner clicks approve → `POST /api/conversations/:id/connection-actions {toolCallId, approvalId}` (`ConnectionActionCard.tsx:111-121`; schema at `connection-routes.ts:114-117` **omits** `summary` and is `.strict()` via `connectionActionSchema`, so extra `arguments` in the body → 400, tested `tests/connections.test.ts:286-292`).
+4. Server (`connection-routes.ts:113-158`): `requireThread`; `recovered()` returns a saved result only when `previous.approvalId === body.approvalId` (409 otherwise); `approvalFor()` (72-88) checks the approval belongs to this thread, is < 1 h old (`APPROVAL_TTL_MS`), and the exact `(connectionId, toolName)` is still enabled for that Dot (`connections.bound`); `actionForApproval` rejects reuse under a different `toolCallId` (409); `claimAction` is an `INSERT OR IGNORE` on PK `(threadId, toolCallId)` with `status='running'` (`connection-store.ts:170-185`) — the loser of a double submit gets the recovered result or `409 already running`; then `connections.call(exposed, approval.arguments)` with the **stored** arguments and **no request signal** (comment line 154: finishes even if the tab closes); `finishAction` stores the result.
+5. The card then calls `respond({approved:true, ...result})` so the tool result reaches the model through Intelligence on the next run.
+
+Approval invariants already present: payload binding to a server-side record, single execution per approval, per-thread/Dot scoping, expiry, re-check that the tool is still enabled, result recovery. **Absent**: any evidence/version predicate, any check that the world state assumed when the approval was created still holds, and a transactional boundary around check+claim+execute (claim is a single-statement insert; the external call is outside any transaction — correct for an external effect, but there is no `outcome_unknown` state if the process dies between `claimAction` and `finishAction`: the row stays `running` forever and the card polls it every 2 s, `ConnectionActionCard.tsx:84-104`).
+
+### 4.4 Composio tools — executes writes without approval
+
+`composioTools()` (`composio-tools.ts:19-55`) registers every `function` tool returned by the Composio session and executes `session.execute(fn.name, input)` immediately (36-45). Gating is only: `COMPOSIO_API_KEY` present, workspace `appsAllowed`, `dot.appsAllowed`, and the toolkit allowlist baked into the session policy hash (`composio.ts:26-30`; session reused while the hash matches). Composio tools act on the owner's real accounts (prompt text at `dot-agent.ts:364`), including `COMPOSIO_MANAGE_CONNECTIONS` (rendered specially in `Chat.tsx`). There is no read/write classification and no owner approval. Disabled for the incident scope (LEAD_NOTES) — NemoDots must keep `appsAllowed=false` for incident Dots and treat this path as outside the guarantee.
+
+### 4.5 Research / browser
+
+`search_web`/`read_public_page` are reads, but they **write** `captures` (`workspace.saveCapture`, `workspace.ts:385-392`, one row per thread, overwritten) which the UI reads via `GET /api/conversations/:id/capture`. In browser mode the worker is a separate process (`src/browser/index.ts`) with its own secret, SSRF validation and a `busy` flag (single concurrent request).
+
+### 4.6 Owner-only control-plane mutations (HTTP, no model access)
+
+`PATCH /api/settings` (pause, research/memory/apps toggles; aborts runner and voice, `app.ts:186-210`), memories CRUD (`app.ts:211-241`), tasks (`app.ts:110-185`), Spaces/Dots (`workspace-routes.ts:56-143`), connections add/refresh/tool toggles/delete (`connection-routes.ts:35-69`; `add` performs live MCP discovery), computer permissions/start/stop/take/release, page CRUD (§4.1), setup telemetry (`workspace-routes.ts:31-46`).
+
+### 4.7 Background / headless / channel invocation
+
+| Path | Mechanics | Tools available |
+| --- | --- | --- |
+| Scheduled task | `Runner.runTick` (`runner.ts:56-113`) claims one task at a time (`if (this.active.size) return`, 1 s tick), lease = `max(180 s, 2×timeout)`, ownership re-checked every 100 ms via `store.owns(claim)` (lease UUID equality, `store.ts:247-250`); expired leases are marked `interrupted` and wait for explicit retry (`store.ts:217-225`). `execute` → `platform.turn` → `runThreadTurn` (`headless.ts:24-84`): HTTP `GET runtimeUrl/info`, then `IntelligenceAgent.runAgent()` against the server's own `/api/copilotkit` with the owner token. | The turn is a normal web `DotAgent` (channel=false) but `input.tools` is empty, so **no** `review_space_page`, **no** approvals; connection write tools return `unavailable`; page/computer/Composio/research tools **do** execute. |
+| Voice compute | `POST /api/voice/calls/:id/compute` → `VoiceService.compute` (`voice.ts:176-205`, 6 turns per call, dedup by `toolCallId`) → `platform.turn`. | same as scheduled |
+| Voice receipt | `syncReceipt` (`voice.ts:226-248`) → `platform.turn` with `opendotsSource: 'voice_receipt'`. | same |
+| Slack | `createSlackChannel` → `DotAgent(channel=true)`; eligibility requires the configured team and user allowlist (`slack-channel.ts:31-61`); run errors are replaced by a generic message. | `clientTools = []` (`dot-agent.ts:303-305`); page/computer/Composio/research tools execute. |
+
+The `Runner`/`Store` task machine is **not** reusable as an incident coordinator: single in-flight task, SQLite, lease identity is a random UUID compared by equality (no monotonic fencing token), timestamps for expiry, `Result` shape is a research brief.
+
+---
+
+## 5. Where a central interception point for provenance and policy can live
+
+Ranked by coverage. Line numbers are the exact insertion points.
+
+### 5.1 Model-call boundary (prompt + tools + adapter): `src/server/dot-agent.ts:375-413`
+
+The `BuiltInAgent` `factory` is the single place where, for a Dot turn, the system prompt (`prompt`, line 364 → `systemPrompts` 388-394), the replayed history (`converted.messages`), the adapter (`adapter`) and the **entire tool list** (406-411) meet. A `ModelCallRecord`/`ContextSnapshot` for Dot turns can be computed here from the already-resolved inputs: `pageContext.revision`, memory IDs (change line 329-331 to keep `{id, text}`), `dot` row, message IDs, `ctx.learnedSkills` snapshot, and the tool-schema hash of the array at 406-411. Wrapping the array in a `withProvenance(tools, scope)` helper gives one choke point for **every** server-executed tool in a turn (CopilotKit-defined tools, MCP tools, learned-skill tools) because each is a TanStack tool with a `.server(execute)` executor; the helper can record arguments/result digests and enforce a policy before calling the original executor. The adapter object returned at 332 can be wrapped the same way to capture request/response telemetry (see §6 for the adapter's surface).
+
+Limitation: this covers Dot conversations only, which are BLOCKED without Intelligence. NemoDots' own planner/worker loop must call the same helper from its own `chat()` construction so there is exactly one context compiler and one tool wrapper in the codebase.
+
+### 5.2 Tool conversion: `src/server/tanstack-tools.ts:8-17`
+
+`tanstackTools()` already touches every CopilotKit `defineTool` server tool. Adding an executor wrapper here is minimal, but it misses MCP tools (`connection-tools.ts:16-24` builds TanStack tools directly) and learned-skill tools (`tanstack-tools.ts:21-49`). Use 5.1 (or route all three builders through one `wrapExecutor`) rather than this alone.
+
+### 5.3 Domain-service execution boundaries (cover direct HTTP and background paths too)
+
+| Domain | Boundary | Why it is the right place |
+| --- | --- | --- |
+| Pages | `Pages.create` (`pages.ts:108`), `Pages.update` (`pages.ts:202`), `Pages.createReviewed` (`pages.ts:156`), `Pages.delete` (`pages.ts:285`) | every page mutation (tool, owner route, review callback, saveConversation) funnels here; `update` already runs `BEGIN IMMEDIATE` + revision CAS, so a per-page version receipt can be emitted in the same transaction |
+| MCP | `ConnectionService.call` (`connections.ts:281-302`) | both the direct read path and the approval callback call it; a policy hook here sees `exposed.connection.id`, `exposed.tool.name`, `args` |
+| MCP approval | `connection-routes.ts:134-155` between `approvalFor` and `connections.call` | the place to add "re-validate evidence/dependency snapshot bound at approval time" before dispatch; `createApproval` (`connection-store.ts:104-124`) is where a dependency vector would be **bound** |
+| Computers | `ComputerService.action` (`computer-service.ts:324-380`), specifically inside `audited()` (230-246) | one audit receipt already brackets agent and owner actions; extend the receipt rather than adding a second one |
+| Composio | `composio-tools.ts:36-45` executor | only path; outside the NemoDots guarantee (keep disabled) |
+| Research | `dot-agent.ts:237-272` `capture()` and 185-228 | reads; record source URL + digest when saving the capture |
+
+### 5.4 HTTP layer
+
+`app.ts:38-92` is the one middleware every `/api/*` route passes; NemoDots routes mounted under `/api` (e.g. `app.route('/api', nemodotsRoutes(...))` next to `app.ts:93-100`) inherit host/origin/token/content-type checks for free. `Platform.handle` (`platform.ts:185-211`) is the single entry for all AG-UI runs including headless ones, but is unreachable without Intelligence.
+
+### 5.5 Abort/invalidation hook
+
+`DotAgent`'s `check()` closure (`dot-agent.ts:137-160`) is evaluated every 100 ms and around every tool call; adding a predicate (e.g. "this turn's read set has been invalidated") makes the existing `abortRun()` machinery stop inference and tools best-effort. The same pattern (interval + `AbortController` + re-check at tool boundaries) is what a NemoDots worker loop should copy.
+
+---
+
+## 6. Library surface that the interception depends on (verified from `node_modules`)
+
+Installed versions read from `node_modules/*/package.json`: `@copilotkit/runtime` 1.75.0, `@tanstack/ai` 0.63.0, `@tanstack/ai-openai` 0.25.1, `@tanstack/openai-base` 0.12.1, `@ag-ui/client` 0.0.59, `zod` 4.6.5, `hono` 4.13.11, nested `openai` 6.49.0 under `@tanstack/ai-openai/node_modules/openai` (a separate top-level `openai` 7.23.0 also exists for another dependency).
+
+### 6.1 `openaiCompatibleText` → OpenAI SDK client (`@tanstack/ai-openai/dist/esm/compatible/index.js:41-47`)
+
+```js
+function openaiCompatibleText(model, config) {
+  const { name = "openai-compatible", api = "chat-completions", strictFallbackWarning, ...clientOptions } = config;
+  const client = new OpenAI(clientOptions);           // openai@6.49.0 ClientOptions
+  ...return new OpenAICompatibleChatAdapter(client, model, name, { strictFallbackWarning });
+```
+
+- Every unknown config key is passed straight to the `openai` SDK client. `ClientOptions` (`openai/client.d.ts:84-167`) includes `baseURL`, `apiKey`, `timeout` (SDK default 10 min), **`fetch`**, **`maxRetries`** (SDK default 2; OpenDots sets 1), **`defaultHeaders`**, `logger`/`logLevel`. **A custom `fetch` wrapper injected at `dot-agent.ts:332-337` (or in NemoDots' own adapter construction) is the lowest-friction place to record provider host, status, timing, first-token time, raw `usage`, returned `model`, and retries without forking the adapter.**
+- Retry policy (`openai/client.js:558-620`): retries on `x-should-retry: true`, HTTP 408/409/429/≥500 and connection errors; honours `retry-after-ms`/`retry-after`; otherwise exponential backoff `min(0.5s·2^n, 8s)` with up to 25 % jitter. With `maxRetries: 1` a Crusoe `429 max_requests_limit` gets exactly one retry after ~0.5 s — not enough for the ≤4-in-flight rule in LEAD_NOTES; NemoDots must throttle client-side and raise retries for inference (not for mutating tools).
+- `OpenAICompatibleChatAdapter` (`compatible/adapter.js:3-13`) sets `maxTokensKey = "max_tokens"` and overrides `extractReasoning(chunk)` to read `delta.reasoning_content ?? delta.reasoning`, so Nemotron reasoning deltas are emitted as separate `reasoning` message chunks instead of being lost.
+
+### 6.2 Request construction (`@tanstack/openai-base/dist/esm/adapters/chat-completions-text.js`)
+
+- `chatStream` (29-50): `client.chat.completions.create({ ...requestParams, stream: true, stream_options: { include_usage: true } }, extractRequestOptions(options.request))`. Streaming is always on; usage is always requested.
+- `mapOptionsToRequest` (790-816): all `systemPrompts` are joined with `\n` into **one** `system` message (794-797); messages are converted; **`modelOptions` is spread verbatim into the request body** (810) ahead of `model`, `messages`, `tools`. Therefore `max_completion_tokens: 2200` reaches Crusoe unchanged (matches `tests/tanstack-agent.test.ts:125`), and NemoDots can pass `reasoning_effort: "none"` or `chat_template_kwargs: { enable_thinking: false }` through `modelOptions` without adapter changes. `response_format: json_schema` (strict) is added when `outputSchema` is set (800-808) — the structured-output path; `structuredOutput` (143-190) throws explicitly on `finish_reason === "length"` (166) and on empty content (168), which is exactly the Nemotron reasoning-budget failure mode.
+- Stream processing (513-780): tracks `chunk.usage` → `lastUsage` (533) and `chunk.model` → `lastModel` (534) so the **returned model identity** is available on the RUN_FINISHED metadata; reasoning chunks are emitted as a `reasoning` role message (546-600).
+- Usage normalisation (`openai-base/dist/esm/usage.js:13-45`): `cachedTokens` is set only when `prompt_tokens_details.cached_tokens` (or `usage.cached_tokens`) is **truthy**. A `null`/absent value and a literal `0` both disappear from the normalised `TokenUsage`. Per LEAD_NOTES, "cached tokens unavailable" must be recorded as `null`, not zero, so NemoDots must read the **raw** `usage` object (via the `fetch` wrapper in 6.1 or a custom adapter subclass) rather than relying on TanStack's normalised usage.
+
+### 6.3 TanStack `chat()` tool execution and first-class middleware (`@tanstack/ai/dist/esm/activities/chat/`)
+
+- `toolDefinition()` (`tools/tool-definition.js:58-98`) returns `{__toolSide:'definition', ...}` with `.server(execute)` → `{__toolSide:'server', ..., execute}` and `.client(execute?)`. Nothing else distinguishes server from client tools at runtime: **a tool with an `execute` function runs on the server; a tool without one becomes a client request** (`tools/tool-calls.js:504`, `559`; `index.js:1521`, `2151`). TanStack also supports `needsApproval`/`approvalSchema` on tool definitions (`tool-definition.js:59`, `tool-calls.js:559-575`), unused by OpenDots, which implements approvals at the application level (§4.3).
+- Server execution (`tools/tool-calls.js:169-220`, `326-345`): arguments are JSON-parsed, validated with the Standard-Schema `inputSchema` (zod v4 qualifies; the JSON-Schema `inputSchema` of MCP tools is **not** validated here), then `tool.execute(args, { toolCallId, context: userContext, abortSignal, emitCustomEvent })`; output is validated when `outputSchema` is present; errors become a tool result string `Error executing tool: ...` with `state: "output-error"` rather than aborting the run.
+- **Middleware** (`middleware/types.d.ts`): `chat({ middleware: [...] })` (`TextActivityOptions.middleware`, `index.d.ts:64-96`) exposes `onConfig(ctx, {messages, systemPrompts, tools, modelOptions, metadata})` (may return a partial override), `onStart`, `onIteration`, `onShouldContinue`, `onChunk`, **`onBeforeToolCall(ctx, {toolCall, tool, args, toolName, toolCallId})` returning `void | {type:'transformArgs', args} | {type:'skip', result} | {type:'abort', reason}`**, `onAfterToolCall({ok, duration, result, error})`, `onToolPhaseComplete`, `onUsage(TokenUsage)`, `onFinish({finishReason, duration, content, usage})`, `onAbort`, `onError`. `ChatMiddlewareContext` carries `requestId`, `runId`, `threadId`, `iteration`, `provider`, `model`, `systemPrompts`, `messages`, `toolNames`, `modelOptions`, `signal`, `abort()`, `emitCustomEvent`, and the caller's typed `context`. This is a first-class place to (a) compute the context digest / stable-prefix hash and write a `ModelCallRecord` in `onConfig`, (b) enforce the adapter policy and read-set/fencing predicates in `onBeforeToolCall` with `skip` or `abort`, (c) record result digests in `onAfterToolCall`, and (d) attach normalised usage in `onUsage`/`onFinish`. It is not used anywhere in OpenDots today; it can be added to `dot-agent.ts:385-412` and must be used by NemoDots' own loops.
+- `TextActivityOptions.context` is passed to every tool executor as `context.context`; NemoDots can carry `{missionId, taskId, attemptId, fencingToken, readSetId}` there so tools derive identity server-side instead of from model-supplied IDs.
+
+### 6.4 `BuiltInAgent` factory mode (`@copilotkit/runtime/dist/agent/index.mjs`)
+
+- Factory config is detected by `"factory" in config` (417-419); `canOverride()` returns `false` for factory mode (427-429), so `forwardedProps` cannot override model/prompt — consistent with OpenDots' tests.
+- `runFactory` (967-1083): emits `RUN_STARTED`, builds `ctx = { input, abortController, abortSignal, interrupt }`, appends `tool` messages for resumed interrupts (987-1001), awaits `prepareLearnedSkills(skillRegistry)` and calls `config.factory({...ctx, input, learnedSkills})` **once per run** (1005-1020), then converts the TanStack stream with `convertTanStackStream(...)` into AG-UI events. Pending client tool calls are surfaced as an `interrupt` outcome on `RUN_FINISHED` (1032, 1045-1056); the browser answers them on the next run (this is how `review_space_page`/`request_connection_action` results get back to the model).
+- Consequence: the `chat()` call inside the factory (`dot-agent.ts:385-412`) is the whole model loop for a run; wrapping that single `chat()` (adapter `fetch`, `middleware`, `tools`) covers every model request and tool execution of a Dot turn.
+
+---
+
+## 7. Verification status, pre-existing problems and blockers
+
+| Item | Status | Evidence |
+| --- | --- | --- |
+| Source reading of every file listed in the task (`dot-agent.ts`, `computer-service.ts`, `computer-tools.ts`, `computer-routes.ts`, `computer-store.ts`, `connections.ts`, `connection-tools.ts`, `connection-routes.ts`, `connection-store.ts`, `composio.ts`, `composio-tools.ts`, `tanstack-tools.ts`, `page-tools.ts`, `page-service.ts`, `page-routes.ts`, `pages.ts`, `runner.ts`, `store.ts`, `workspace.ts`, `workspace-routes.ts`, `app.ts`, `app-origin.ts`, `runtime-scope.ts`, `platform.ts`, `platform-config.ts`, `headless.ts`, `voice.ts`, `slack-channel.ts`, `learning.ts`, `research.ts`, `parallel.ts`, `setup-telemetry.ts`, `index.ts`, `shutdown.ts`, `src/shared/*`, `src/browser/index.ts`, `src/browser/security.ts`, client approval files) | PASS (read in full) | this document |
+| Library internals (§6) | PASS (read from installed `node_modules`) | §6 file:line references |
+| `npm ci` baseline | **FAIL, run by another Phase 0 agent, not by this one** | `.local/baseline/npm-ci.log` ends with `npm error code ENOENT ... node_modules/type-graphql/node_modules/semver` and `exit=1` after ~4m45s; the log also shows repeated "tarball data ... seems to be corrupted. Trying again" warnings. The packages cited in §6 are present, but the tree is not known to be complete. A single agent must re-run `npm ci` alone (no concurrent installs in the same directory) before `npm run typecheck`/`lint`/`test`/`build` baselines are trusted. |
+| Upstream `typecheck`/`lint`/`test`/`build` | NOT_RUN (owned by the baseline auditor; not run here to avoid racing the failed install) | — |
+| Live Crusoe behaviour of `max_completion_tokens` / `reasoning_effort` passthrough | NOT_RUN (static reading only; passthrough mechanism verified in code at `chat-completions-text.js:810`) | — |
+| Intelligence-dependent paths (Dot turns, headless turns, page chat) | BLOCKED (no Intelligence key; §1.3 describes exact behaviour) | `platform.ts:49`, `185-190` |
+| OpenBot computer service | BLOCKED (Docker absent); `computer.configured=false` → no `computer_*` tools registered | `computer-service.ts:34-40`, `dot-agent.ts:360-362` |
+
+### Facts later engineers must not get wrong
+
+1. **No Dot turn can run in this environment.** `Platform` has no runtime handler without an Intelligence key (`platform.ts:49`). NemoDots' coordinator must own its own TanStack `chat()` loop with its own `openaiCompatibleText` adapter and its own tool list; it cannot "ask a Dot".
+2. **One system message.** TanStack joins all `systemPrompts` into a single `system` message (`chat-completions-text.js:794-797`); the "stable authorized prefix" for prefix caching must therefore be the leading bytes of that single string followed by the tool array, not separate messages.
+3. **`modelOptions` is spread verbatim** into the Crusoe request (`chat-completions-text.js:810`). Put `reasoning_effort`/`chat_template_kwargs`/`max_completion_tokens` there. `tool_choice` is unset by default; keep it that way.
+4. **Cached-token telemetry:** TanStack's normalised usage drops `cached_tokens` when it is `0` or `null` (`usage.js:28-31`). Read the raw body via a custom `fetch` passed to `openaiCompatibleText` to distinguish "unavailable" from "zero".
+5. **Server tool = tool with `execute`.** Anything placed in `chat({tools})` with an `execute` runs server-side immediately after schema validation, with no approval unless the application adds one. MCP tools' JSON-Schema inputs are not validated by TanStack (`tool-calls.js:181`, Standard Schema only).
+6. **Approval binding exists only for MCP tools** (`mcp_approvals`/`mcp_actions`, §4.3) and page reviews (`page_reviews`, §4.1). Composio writes (§4.4), page `create/edit` tools, computer `exec`/`files_write`/browser actions and all Parallel/browser reads execute without owner approval.
+7. **The existing approval callback has no evidence revalidation and no `outcome_unknown` state** (`connection-routes.ts:134-157`; a crash between `claimAction` and `finishAction` leaves `status='running'`). NemoDots' ActionIntent path must not reuse this table.
+8. **Two SQLite connections, one file, WAL, `busy_timeout=5000`** (`store.ts:30`, `workspace.ts:21`). All OpenDots state is SQLite with ad-hoc `ALTER TABLE` migrations at boot. Page `revision` is the only authoritative version number in the workspace; Dot/Space/memory rows have none.
+9. **`Runner`/`Store` is a single-slot scheduler** (`runner.ts:57`), lease = random UUID compared for equality, expiry by wall clock — not reusable for the incident coordinator.
+10. **Permission drift aborts turns** via `check()` every 100 ms (`dot-agent.ts:137-168`); the same closure pattern is the right place to plug "read set invalidated → abort".
+11. **Auth is single-owner**: `identifyUser` always returns `OWNER_ID` (`platform.ts:85-88`); Space isolation is per Dot via `dot_spaces`. NemoDots routes mounted under `/api` inherit host/origin/token/JSON checks from `app.ts:38-92` and should derive owner/Space scope from the server, never from request IDs.
+12. **Pin-free headless turns** would require Intelligence (`headless.ts:34-37` needs `/api/copilotkit/info`); do not plan on `platform.turn` for mission steps.
+
+### Dependencies reported (not edited by this auditor)
+
+- Baseline auditor: re-run `npm ci` alone and record exit code; check `type-graphql` nesting (`node_modules/type-graphql/node_modules/semver` ENOENT).
+- Architect: decide whether Dot-turn instrumentation (`dot-agent.ts:332-337`, `385-412`) is in scope while Intelligence is BLOCKED, or whether Phase 4 instruments it statically with a fixture test only.
+- Integration engineer: adapter construction for NemoDots should pass `fetch`, `maxRetries`, `defaultHeaders` through `openaiCompatibleText`'s `clientOptions` (§6.1) and use TanStack `middleware` (§6.3) rather than wrapping each tool by hand.

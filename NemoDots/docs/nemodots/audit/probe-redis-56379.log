@@ -1,0 +1,12 @@
+80671:C 17 Oct 2026 13:10:47.671 * oO0OoO0OoO0Oo Redis is starting oO0OoO0OoO0Oo
+80671:C 17 Oct 2026 13:10:47.672 * Redis version=8.6.2, bits=64, commit=00000000, modified=1, pid=80671, just started
+80671:C 17 Oct 2026 13:10:47.672 * Configuration loaded
+80671:M 17 Oct 2026 13:10:47.673 * monotonic clock: ARM CNTVCT @ 24 ticks/us
+80671:M 17 Oct 2026 13:10:47.674 * Running mode=standalone, port=56379.
+80671:M 17 Oct 2026 13:10:47.675 # WARNING: The TCP backlog setting of 511 cannot be enforced because kern.ipc.somaxconn is set to the lower value of 128.
+80671:M 17 Oct 2026 13:10:47.675 * Server initialized
+80671:M 17 Oct 2026 13:10:47.676 * Ready to accept connections tcp
+80671:M 17 Oct 2026 13:10:47.676 # WARNING: Redis does not require authentication. Redis will accept connections from any local client.
+80671:M 17 Oct 2026 13:10:48.771 * User requested shutdown...
+80671:M 17 Oct 2026 13:10:48.771 * Removing the pid file.
+80671:M 17 Oct 2026 13:10:48.771 # Redis is now ready to exit, bye bye...

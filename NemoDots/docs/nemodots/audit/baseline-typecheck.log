@@ -1,0 +1,6 @@
+
+> opendots@0.1.0 typecheck
+> tsc --noEmit
+
+npm run typecheck  5.71s user 0.29s system 202% cpu 2.964 total
+typecheck exit=0
