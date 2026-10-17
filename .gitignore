@@ -1,3 +1,10 @@
 .env
 .env.*
 !.env.example
+
+# NemoDots worktree local-only
+.references/
+artifacts/
+.local/
+node_modules/
+.mcp.json
