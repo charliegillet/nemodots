@@ -37,6 +37,7 @@ export const ENTRY_FILES = {
   appServer: 'src/server/index.ts',
   bootstrap: 'src/server/nemodots/bootstrap.ts',
   workerMain: 'src/server/nemodots/worker-main.ts',
+  testHooks: 'src/server/nemodots/actions/test-hooks.ts',
 } as const;
 
 export function assertEntryFiles(names: (keyof typeof ENTRY_FILES)[]) {
@@ -371,18 +372,23 @@ export class Sut {
     this.spawnChild('app', ENTRY_FILES.appServer, this.appEnv());
   }
 
-  startWorker() {
-    return this.spawnChild('worker', ENTRY_FILES.workerMain, this.appEnv());
+  startWorker(name: 'worker' | 'worker2' = 'worker') {
+    return this.spawnChild(name, ENTRY_FILES.workerMain, this.appEnv());
+  }
+
+  /** Names (never values) of the environment the app and worker are given. */
+  appEnvNames(): string[] {
+    return Object.keys(this.appEnv()).sort();
   }
 
   /** pid of a child this harness started (app, worker, checkout), or null. */
-  pidOf(name: 'app' | 'worker' | 'checkout'): number | null {
+  pidOf(name: 'app' | 'worker' | 'worker2' | 'checkout'): number | null {
     const child = this.children.get(name);
     return child && child.exitCode === null && child.pid ? child.pid : null;
   }
 
   /** SIGSTOP / SIGCONT / SIGKILL of a child this harness started (zombie-worker scenarios). */
-  signal(name: 'app' | 'worker', signal: NodeJS.Signals): boolean {
+  signal(name: 'app' | 'worker' | 'worker2', signal: NodeJS.Signals): boolean {
     const child = this.children.get(name);
     if (!child || child.exitCode !== null) return false;
     return child.kill(signal);

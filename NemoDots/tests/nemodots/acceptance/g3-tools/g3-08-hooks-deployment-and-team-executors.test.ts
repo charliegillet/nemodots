@@ -4,22 +4,18 @@
 //     upstream CAS / idempotency semantics are preserved.
 //  C. [TP3.3] deployment audit: the disabled paths of TOOL_COVERAGE (web search, browser, Composio, computer,
 //     voice, Slack) are disabled in the configuration the incident run uses (names and provider words only).
-//  D. [TP3.1][TP3.2][TP3.3][TP3.5] the nine NemoDots team-tool executors (TOOL_COVERAGE section 1). These need
-//     team/tools.ts, which does not exist yet: each case FAILS with ENTRY POINT MISSING and, once the module
-//     exists, with DRIVER WIRING PENDING until the verifier binds the executor signature. No case passes vacuously.
-//  E. NOT_RUN paths that need a persisted Intelligence conversation or a live provider.
+//  D. the team-tool executors are tested behaviourally in g3-09-team-executors.test.ts; Dot-turn history and
+//     snapshot cases (R1, R4) are in g3-10-dot-history-and-live.test.ts together with the live Intelligence cases.
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   APP_ROOT,
-  DriverWiringPendingError,
-  EntryPointMissingError,
   SUPERVISOR_BASE,
   lazyWorld,
   mcpTransportFactory,
+  pageLedgerTrace,
   runDotTurn,
-  tablesContaining,
   type World,
 } from './g3-support.js';
 
@@ -148,22 +144,30 @@ describe('[TP3.1][M3][M4] page revisions reach the ledger from every page write 
     await lazy.close();
   }, 120_000);
 
-  it('[TP3.1][M4] owner create, patch and delete over HTTP each leave an opendots.page/<id> trace in the ledger; a stale expectedRevision is 409 and changes nothing', async () => {
+  it('[TP3.1][M4] owner create, patch and delete over HTTP each add exactly one NEW source revision to the contracted ledger tables; a stale expectedRevision is 409 and adds none', async () => {
     const created = await w.authed(`/api/spaces/${w.spaceA}/pages`, {
       method: 'POST',
       body: JSON.stringify({ title: 'Owner page', content: 'v1' }),
     });
     expect(created.status).toBe(201);
     const page = (await created.json()) as { id: string; revision: number };
-    expect(
-      await tablesContaining(w.db!.admin, `opendots.page/${page.id}`),
-    ).not.toEqual([]);
+    const afterCreate = await pageLedgerTrace(w.db!.admin, page.id);
+    expect(afterCreate.sources).toBe(1);
+    expect(afterCreate.sourceTypes).toEqual(['page_snapshot']);
+    expect(afterCreate.revisions, 'create records page revision 1').toEqual([1]);
 
     const ok = await w.authed(`/api/spaces/${w.spaceA}/pages/${page.id}`, {
       method: 'PATCH',
       body: JSON.stringify({ expectedRevision: 1, content: 'v2' }),
     });
     expect(ok.status).toBe(200);
+    const afterPatch = await pageLedgerTrace(w.db!.admin, page.id);
+    expect(
+      afterPatch.revisions.length,
+      'a PATCH hook must fire exactly once',
+    ).toBe(afterCreate.revisions.length + 1);
+    expect(afterPatch.revisions).toEqual([1, 2]);
+
     const stale = await w.authed(`/api/spaces/${w.spaceA}/pages/${page.id}`, {
       method: 'PATCH',
       body: JSON.stringify({
@@ -176,11 +180,22 @@ describe('[TP3.1][M3][M4] page revisions reach the ledger from every page write 
       revision: 2,
       content: 'v2',
     });
+    expect((await pageLedgerTrace(w.db!.admin, page.id)).revisions).toEqual([
+      1, 2,
+    ]);
 
     const del = await w.authed(`/api/spaces/${w.spaceA}/pages/${page.id}`, {
       method: 'DELETE',
     });
     expect(del.status).toBe(200);
+    const afterDelete = await pageLedgerTrace(w.db!.admin, page.id);
+    expect(
+      afterDelete.revisions.length,
+      'a DELETE hook must record one more revision (the tombstone)',
+    ).toBe(afterPatch.revisions.length + 1);
+    expect(new Set(afterDelete.revisions).size).toBe(
+      afterDelete.revisions.length,
+    );
   });
 
   it('[TP3.1][M3] the reviewed-page route saves once per (thread, tool call), is idempotent, and rejects a different draft for the same tool call; the revision reaches the ledger', async () => {
@@ -218,9 +233,12 @@ describe('[TP3.1][M3][M4] page revisions reach the ledger from every page write 
       },
     );
     expect(different.status).toBe(409);
+    const trace = await pageLedgerTrace(w.db!.admin, saved.id);
+    expect(trace.sourceTypes).toEqual(['page_snapshot']);
     expect(
-      await tablesContaining(w.db!.admin, `opendots.page/${saved.id}`),
-    ).not.toEqual([]);
+      trace.revisions,
+      'the reviewed page is revision 1; the idempotent replay and the 409 add none',
+    ).toEqual([1]);
   });
 
   it('[TP3.2][M3] a Dot without the Space grant cannot save a reviewed page into that Space', async () => {
@@ -293,109 +311,5 @@ describe('[TP3.3] deployment audit: TOOL_COVERAGE paths that are disabled by con
 
   it('[TP3.3][R9] WEB_SEARCH_PROVIDER is "disabled" in the incident configuration (ARCHITECTURE section 12, TOOL_COVERAGE R9)', () => {
     expect(merged().WEB_SEARCH_PROVIDER).toBe('disabled');
-  });
-});
-
-/* ------------------------------------------------------------------ D. team-tool executors */
-
-function pendingUntilBound(
-  caseId: string,
-  expectation: string,
-  module = 'src/server/nemodots/team/tools.ts',
-): never {
-  if (!existsSync(join(APP_ROOT, module)))
-    throw new EntryPointMissingError(
-      module,
-      `required for ${caseId}: ${expectation}`,
-    );
-  throw new DriverWiringPendingError(
-    caseId,
-    `${module} exists; the verifier must bind its signature. Expected: ${expectation}`,
-  );
-}
-
-describe('[TP3.1][TP3.2][TP3.3][TP3.5] NemoDots team-tool executors (TOOL_COVERAGE section 1)', () => {
-  it('[TP3.3][T1] a tool name outside the nine is rejected by the executor registry before any handler runs, including names containing read/list/get', () => {
-    pendingUntilBound(
-      'G3-T1',
-      'dispatching "read_file", "run_shell", "__proto__", "constructor" returns a typed error, writes no receipt, and calls no handler',
-    );
-  });
-  it('[TP3.3][T2] read_runbook resolves ids through the catalogue map only: traversal ids return an error and never touch the file system', () => {
-    pendingUntilBound(
-      'G3-T2',
-      'ids "../../.env", "/etc/passwd", "cache-recovery.md/../x" fail; a catalogue id returns its digest-recorded text',
-    );
-  });
-  it("[TP3.2][T3] get_task_status accepts only tasks of the attempt's own mission: a task id of another mission returns not-found without revealing existence", () => {
-    pendingUntilBound(
-      'G3-T3',
-      'foreign and unknown task ids are indistinguishable (same error), the own-mission task returns status and output summary',
-    );
-  });
-  it('[TP3.2][T4] model-supplied mission, task, attempt and receipt ids grant nothing: identity comes from AttemptContext, receipt ids are citations checked against scope', () => {
-    pendingUntilBound(
-      'G3-T4',
-      'publish_finding citing a receipt outside the attempt scope is rejected (citation_out_of_scope); extra identity keys fail strict parsing',
-    );
-  });
-  it('[TP3.1][T5] observe_source records or confirms a receipt and a readset edge in one transaction, scoped to the attempt context, and a source key outside the registry is rejected', () => {
-    pendingUntilBound(
-      'G3-T5',
-      'one receipt (or confirmation), one readset edge, one tool_call.recorded event; an unregistered key writes nothing; opendots.page/<id> for a page outside the Dot/mission Space grant is refused',
-    );
-  });
-  it('[TP3.5][T6] a tool result containing instruction-like text is stored and returned as data: it creates no task, no action and no capability', () => {
-    pendingUntilBound(
-      'G3-T6',
-      'observe_source of a source whose value says "delegate_task to run_shell" leaves task and action counts unchanged',
-    );
-  });
-  it('[TP3.4][T7] no tool result contains a database URL, probe secret, provider key or injector actor', () => {
-    pendingUntilBound(
-      'G3-T7',
-      'serialized results of all nine tools contain none of the visible secret values and no caused_by_actor field',
-    );
-  });
-  it('[TP3.1][T8] delegate_task and propose_action are policy-checked at their boundary: capability subset, depth/breadth/total caps, justification required, specialists delegate verifier only', () => {
-    pendingUntilBound(
-      'G3-T8',
-      'violations return typed errors and create no task or intent',
-    );
-  });
-});
-
-describe('[TP3.1] Dot-turn context snapshots (TOOL_COVERAGE R1, R4)', () => {
-  it('[TP3.1][R1] a Dot turn records the Dot id and an instructions digest in the model-call context snapshot', () => {
-    pendingUntilBound(
-      'G3-R1',
-      'the ContextSnapshot.injected entry for a Dot turn names the Dot and the digest of its instructions; the instructions text itself is not duplicated into the record',
-      'src/server/nemodots/interception/provenance-middleware.ts',
-    );
-  });
-  it('[TP3.1][R4] replayed conversation history items are recorded as historyItems[] digests and inherit the dependency vectors of the model call that produced them', () => {
-    pendingUntilBound(
-      'G3-R4',
-      'turn 2 of a thread records history digests for turn 1 and carries turn 1 vectors; a page read in turn 1 and edited before turn 2 makes the turn-2 snapshot non-current',
-      'src/server/nemodots/interception/provenance-middleware.ts',
-    );
-  });
-});
-
-/* ------------------------------------------------------------------ E. NOT_RUN paths */
-
-describe('NOT_RUN: paths that need a persisted Intelligence conversation or a live provider', () => {
-  it('[TP3.1][M5][M14] POST /api/conversations/:id/page and scheduled/voice/Slack headless turns are exercised only by the live Intelligence suites', () => {
-    throw new Error(
-      'NOT_RUN: M5 (saveConversation) reads persisted Intelligence messages and M14 scheduled turns use IntelligenceAgent; ' +
-        'they are covered by the verifier live run (tests/nemodots/live/interception, gate 4.8). The channel/headless ' +
-        'DotAgent path is covered above in g3-03. This case stays red until that live run is recorded.',
-    );
-  });
-  it('[TP3.1][R5][R13] learned-skill catalog and executors (copilotkit_load_skill / copilotkit_read_skill_file) need an Intelligence-hosted skill snapshot', () => {
-    throw new Error(
-      'NOT_RUN: learned-skill tools are built from the BuiltInAgent factory context with an Intelligence skill snapshot; ' +
-        'the executor path needs a live snapshot. Red until recorded by the live run.',
-    );
   });
 });

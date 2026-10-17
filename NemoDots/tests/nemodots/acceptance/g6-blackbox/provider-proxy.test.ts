@@ -67,6 +67,72 @@ const chat = (base: string) =>
   });
 
 describe('G6.10 provider proxy (deterministic adapter)', () => {
+  it('G6.10 logs the model, body digest, upstream host and timing of each model call and never the body or credential', async () => {
+    const base = await start(null);
+    const response = await chat(base);
+    await response.arrayBuffer();
+    const entry = proxy!.log[0];
+    expect(entry).toMatchObject({
+      modelCall: true,
+      disposition: 'forwarded',
+      upstreamStatus: 200,
+      model: 'm',
+      stream: false,
+      upstreamHost: `127.0.0.1:${upstreamPort}`,
+      upstreamError: null,
+    });
+    expect(entry.bodyDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect(entry.endedAt!).toBeGreaterThanOrEqual(entry.at);
+    const serialized = JSON.stringify(proxy!.log);
+    expect(serialized).not.toContain('test-token');
+    expect(serialized).not.toContain('messages');
+    // identical bodies share a digest (retries of one call), different bodies do not
+    await (await chat(base)).arrayBuffer();
+    expect(proxy!.log[1].bodyDigest).toBe(entry.bodyDigest);
+    await (
+      await fetch(`${base}/chat/completions`, {
+        method: 'POST',
+        body: JSON.stringify({ model: 'other' }),
+      })
+    ).arrayBuffer();
+    expect(proxy!.log[2].bodyDigest).not.toBe(entry.bodyDigest);
+    expect(proxy!.log[2].model).toBe('other');
+  });
+
+  it('G6.10 disrupted requests are logged with model and digest too, so retries can be grouped', async () => {
+    const base = await start({
+      mode: 'http_503',
+      startAfterModelCalls: 0,
+      requests: 2,
+    });
+    for (let n = 0; n < 3; n += 1) await (await chat(base)).arrayBuffer();
+    const [a, b, c] = proxy!.log;
+    expect([a.disposition, b.disposition, c.disposition]).toEqual([
+      'http_503',
+      'http_503',
+      'forwarded',
+    ]);
+    expect(new Set([a.bodyDigest, b.bodyDigest, c.bodyDigest]).size).toBe(1);
+    expect(a.upstreamHost).toBeNull();
+    expect(a.endedAt).not.toBeNull();
+  });
+
+  it('G6.10 checkModels asks the upstream GET /models with the app credential held in memory only', async () => {
+    const base = await start(null);
+    expect((await proxy!.checkModels(['m'])).checked).toBe(false); // no credential seen yet
+    await (await chat(base)).arrayBuffer();
+    const listing = await proxy!.checkModels(['m', 'absent']);
+    expect(listing.checked).toBe(true);
+    expect(seen.some((s) => s.method === 'GET' && s.url === '/v1/models')).toBe(
+      true,
+    );
+    expect(seen.find((s) => s.method === 'GET')!.auth).toBe(
+      'Bearer test-token',
+    );
+    // the stub answers {ok,path} without a data array: nothing is listed
+    expect(listing.listed).toEqual({ m: false, absent: false });
+  });
+
   it('G6.10 forwards unchanged when no disruption is configured, keeping path, body and auth', async () => {
     const base = await start(null);
     const response = await chat(base);

@@ -303,33 +303,79 @@ describe('[TP3.2] missions are scoped: unknown and foreign ids reveal nothing, s
     );
     expect(snapshotA).not.toContain(b);
 
-    const controller = new AbortController();
-    const response = await fetch(
-      `${URL_BASE}/api/nemodots/missions/${a}/events`,
-      {
-        headers: { ...owner, 'Last-Event-ID': '0' },
-        signal: controller.signal,
-      },
-    );
-    expect(response.status).toBe(200);
-    expect(response.headers.get('content-type') ?? '').toContain(
-      'text/event-stream',
-    );
-    const reader = response.body!.getReader();
-    let received = '';
-    const deadline = Date.now() + 2000;
-    while (Date.now() < deadline) {
-      const next = await Promise.race([
-        reader.read(),
-        new Promise<{ done: true; value: undefined }>((resolve) =>
-          setTimeout(() => resolve({ done: true, value: undefined }), 600),
-        ),
-      ]);
-      if (next.done) break;
-      received += new TextDecoder().decode(next.value);
+    // Open BOTH streams, make mission B emit events while A's stream is open, wait (no fixed sleep) until B's own
+    // stream has delivered B's event, then make A emit and wait for A's own event. A server that broadcasts every
+    // mission's events to every stream would show B's id on A's stream.
+    const open = (id: string) => {
+      const controller = new AbortController();
+      let text = '';
+      const done = (async () => {
+        const response = await fetch(
+          `${URL_BASE}/api/nemodots/missions/${id}/events`,
+          {
+            headers: { ...owner, 'Last-Event-ID': '0' },
+            signal: controller.signal,
+          },
+        );
+        expect(response.status).toBe(200);
+        expect(response.headers.get('content-type') ?? '').toContain(
+          'text/event-stream',
+        );
+        const reader = response.body!.getReader();
+        const decoder = new TextDecoder();
+        for (;;) {
+          const next = await reader.read().catch(() => ({ done: true, value: undefined }));
+          if (next.done) break;
+          text += decoder.decode(next.value, { stream: true });
+        }
+      })().catch(() => undefined);
+      return {
+        text: () => text,
+        until: async (needle: string, timeoutMs = 20_000) => {
+          const deadline = Date.now() + timeoutMs;
+          while (!text.includes(needle) && Date.now() < deadline)
+            await new Promise((r) => setTimeout(r, 25));
+          return text.includes(needle);
+        },
+        stop: async () => {
+          controller.abort();
+          await done;
+        },
+      };
+    };
+    const streamA = open(a);
+    const streamB = open(b);
+    try {
+      expect(
+        await streamA.until(a),
+        "A's stream delivers an event of its own (at least its creation)",
+      ).toBe(true);
+      const cancelB = await w.authed(`/api/nemodots/missions/${b}/cancel`, {
+        method: 'POST',
+        body: '{}',
+      });
+      expect(cancelB.status).toBe(200);
+      expect(
+        await streamB.until(b),
+        "B's own stream delivered B's event",
+      ).toBe(true);
+      const cancelA = await w.authed(`/api/nemodots/missions/${a}/cancel`, {
+        method: 'POST',
+        body: '{}',
+      });
+      expect(cancelA.status).toBe(200);
+      // A's later event arrived on A's stream: count A's frames before and after
+      const framesOfA = () => (streamA.text().match(/^data:/gm) ?? []).length;
+      const deadline = Date.now() + 20_000;
+      while (framesOfA() < 2 && Date.now() < deadline)
+        await new Promise((r) => setTimeout(r, 25));
+      expect(framesOfA(), 'A emitted a second event (its cancellation)').toBeGreaterThanOrEqual(2);
+      expect(streamA.text(), "B's id must never appear on A's stream").not.toContain(b);
+      expect(streamB.text(), "A's id must never appear on B's stream").not.toContain(a);
+    } finally {
+      await streamA.stop();
+      await streamB.stop();
     }
-    controller.abort();
-    expect(received).not.toContain(b);
   });
 
   it('[TP3.2] telemetry summary rejects a malformed missionId and never returns another mission data', async () => {

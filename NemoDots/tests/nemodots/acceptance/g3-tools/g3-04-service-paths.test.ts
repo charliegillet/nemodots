@@ -7,7 +7,9 @@
 // effect (MCP handler / computer supervisor), regardless of tool names or readOnlyHint.
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import {
+  REFUSAL,
   SUPERVISOR_BASE,
+  expectRefusedCall,
   mcpTransportFactory,
   lazyWorld,
   runDotTurn,
@@ -258,29 +260,54 @@ describe('Part B: incident Dot (policy installed by the NemoDots composition)', 
     },
   );
 
-  it('[TP3.3][R10] a Dot turn of the incident Dot is not offered connection tools, and a model call to one reaches no MCP server', async () => {
+  it('[TP3.3][R10] in a Dot turn the incident Dot either is not offered the connection tools or is refused visibly, and its call reaches no MCP server; the ordinary Dot is offered them and the call IS attempted (control)', async () => {
     const { service, calls } = await serviceFor(w);
+    // the upstream Dot turn builds its OWN per-turn ConnectionService with the real HTTP transport, so the in-memory
+    // handler above is unreachable from a turn: the effect oracle is the outbound request to MAIL_URL.
     connectionWith(w, w.incident.id, calls);
-    const exposedNames: string[] = service
+    const incidentNames: string[] = service
       .tools(w.incident.id)
       .map((t: { name: string }) => t.name);
-    expect(exposedNames.length).toBeGreaterThan(0);
+    expect(incidentNames.length).toBeGreaterThan(0);
+    const args = { query: 'x', to: 'a@example.com', body: 'x', id: '1' };
     const turn = await runDotTurn(w, w.incident.id, [
       {
-        toolCalls: exposedNames.map((name, i) => ({
+        toolCalls: incidentNames.map((name, i) => ({
           id: `m${i}`,
           name,
-          arguments: { query: 'x', to: 'a@example.com', body: 'x', id: '1' },
+          arguments: args,
         })),
       },
       { text: 'done' },
     ]);
-    for (const name of exposedNames)
-      expect(turn.requests[0].toolNames).not.toContain(name);
-    expect(w.model.outbound.filter((o) => o.url.startsWith(MAIL_URL))).toEqual(
-      [],
-    );
-    expect(Object.values(calls).flat()).toEqual([]);
+    expect(turn.runError, 'the turn ran').toBeUndefined();
+    const offered = turn.requests[0].toolNames;
+    incidentNames.forEach((name, i) => {
+      if (offered.includes(name))
+        // offered-but-refused (TOOL_COVERAGE: "not registered or fails closed"): the refusal must be visible
+        expectRefusedCall(turn, `m${i}`, `incident ${name}`, REFUSAL);
+    });
+    expect(
+      w.model.outbound.filter((o) => o.url.startsWith(MAIL_URL)),
+      'no request left for the MCP server',
+    ).toEqual([]);
+
+    // control: the same connection on the ORDINARY Dot is offered and the call is attempted (the spy sees it)
+    connectionWith(w, w.normal.id, calls);
+    const ordinaryNames: string[] = service
+      .tools(w.normal.id)
+      .map((t: { name: string }) => t.name);
+    const control = await runDotTurn(w, w.normal.id, [
+      {
+        toolCalls: [{ id: 'k0', name: ordinaryNames[0], arguments: args }],
+      },
+      { text: 'done' },
+    ]);
+    expect(control.requests[0].toolNames).toContain(ordinaryNames[0]);
+    expect(
+      w.model.outbound.filter((o) => o.url.startsWith(MAIL_URL)).length,
+      'the ordinary Dot call reaches the transport',
+    ).toBeGreaterThan(0);
   });
 
   it('[TP3.1][M6] agent computer actions for an incident Dot are refused before the supervisor (never recorded as a success); the owner path stays available and is recorded', async () => {

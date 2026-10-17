@@ -89,8 +89,16 @@ export interface LineageCall {
   attemptId: string;
   createdAtMs: number;
   /** the dependency vector of the call's recorded context snapshot */
-  contextVector: { sourceKey: string; sourceRevision: number; receiptId: string }[];
-  outputVector: { sourceKey: string; sourceRevision: number; receiptId: string }[];
+  contextVector: {
+    sourceKey: string;
+    sourceRevision: number;
+    receiptId: string;
+  }[];
+  outputVector: {
+    sourceKey: string;
+    sourceRevision: number;
+    receiptId: string;
+  }[];
 }
 
 export interface CrashStateAtKill {

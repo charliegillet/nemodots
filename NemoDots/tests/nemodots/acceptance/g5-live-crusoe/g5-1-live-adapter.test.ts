@@ -35,6 +35,24 @@ beforeAll(async () => {
   adapter = await createAdapter();
 });
 
+/**
+ * The Crusoe quota is shared with other agents; 429 bursts put rate_limited
+ * attempts in front of the served one. A call whose attempts include a 429 is
+ * provider saturation, not an adapter result: repeat it (still real inference).
+ */
+async function calm<
+  T extends { attempts: { error: { class: string } | null }[] },
+>(run: () => Promise<T>, tries = 5): Promise<T> {
+  let last!: T;
+  for (let i = 0; i < tries; i++) {
+    last = await run();
+    if (!last.attempts.some((a) => a.error?.class === 'rate_limited'))
+      return last;
+    await new Promise((r) => setTimeout(r, 6000 * (i + 1)));
+  }
+  return last;
+}
+
 describe('G5.1 endpoint and model through the app adapter', () => {
   it('G5.1a adapter is live, bound to OPENAI_BASE_URL host (Crusoe), and the requested model is the primary Nemotron', () => {
     expect(adapter.mode).toBe('live');
@@ -70,12 +88,14 @@ describe('G5.1 endpoint and model through the app adapter', () => {
 describe('G5.2 text, tool call + continuation, streaming, cancellation', () => {
   it('G5.2a real text completion: content from the model, finish stop, one attempt, numeric token counts', async () => {
     const nonce = randomBytes(4).toString('hex');
-    const r = await adapter.complete(
-      chat(
-        live.model,
-        `Repeat this token exactly and nothing else: ZX-${nonce}`,
+    const r = await calm(() =>
+      adapter.complete(
+        chat(
+          live.model,
+          `Repeat this token exactly and nothing else: ZX-${nonce}`,
+        ),
+        ctx('worker'),
       ),
-      ctx('worker'),
     );
     expect(r.outcome).toBe('completed');
     expect(r.finishReason).toBe('stop');
@@ -238,7 +258,8 @@ describe('G5.2 text, tool call + continuation, streaming, cancellation', () => {
         ctx('worker'),
       );
       expect(ok.outcome).toBe('completed');
-      expect(proxy.seen).toHaveLength(1);
+      // one request per attempt (shared-quota 429s add attempts, never extra calls)
+      expect(proxy.seen).toHaveLength(ok.attempts.length);
     } finally {
       await proxy.close();
     }
@@ -248,24 +269,31 @@ describe('G5.2 text, tool call + continuation, streaming, cancellation', () => {
     const proxy = await startProxy(live.baseUrl);
     try {
       const viaProxy = await createAdapter({ OPENAI_BASE_URL: proxy.baseUrl });
-      const controller = new AbortController();
-      const pending = viaProxy.complete(
-        chat(
-          live.model,
-          'Count from 1 to 600, one number per line, no other text.',
-          {
-            stream: true,
-            maxTokens: 2000,
-          },
-        ),
-        ctx('worker', controller.signal),
-      );
-      setTimeout(() => controller.abort(), 1500);
-      const r = await pending;
+      let r!: Awaited<ReturnType<typeof viaProxy.complete>>;
+      let firstSeen = 0;
+      for (let i = 0; i < 4; i++) {
+        firstSeen = proxy.seen.length;
+        const controller = new AbortController();
+        const pending = viaProxy.complete(
+          chat(
+            live.model,
+            'Count from 1 to 600, one number per line, no other text.',
+            {
+              stream: true,
+              maxTokens: 2000,
+            },
+          ),
+          ctx('worker', controller.signal),
+        );
+        setTimeout(() => controller.abort(), 1500);
+        r = await pending;
+        if (r.attempts[0]?.error?.class !== 'rate_limited') break;
+        await new Promise((res) => setTimeout(res, 8000 * (i + 1)));
+      }
       expect(r.outcome).toBe('aborted');
       await new Promise((res) => setTimeout(res, 500));
-      expect(proxy.seen).toHaveLength(1);
-      expect(proxy.seen[0].clientClosedEarly).toBe(true);
+      expect(proxy.seen.length - firstSeen).toBe(1);
+      expect(proxy.seen[firstSeen].clientClosedEarly).toBe(true);
       expect(proxy.current()).toBe(0);
       const ok = await viaProxy.complete(
         chat(live.model, 'Reply with exactly: OK'),
@@ -283,12 +311,14 @@ describe('G5.7 client timing is first NONEMPTY content, per call (not aggregate 
   afterAll(async () => proxy?.close());
 
   it('G5.7a live stream: startedAt <= headersAt <= firstContentAt <= finishedAt, all client clocks', async () => {
-    const r = await adapter.complete(
-      chat(live.model, 'Write one short sentence about caches.', {
-        stream: true,
-        maxTokens: 200,
-      }),
-      ctx('worker'),
+    const r = await calm(() =>
+      adapter.complete(
+        chat(live.model, 'Write one short sentence about caches.', {
+          stream: true,
+          maxTokens: 200,
+        }),
+        ctx('worker'),
+      ),
     );
     const a = r.attempts.at(-1)!; // shared-quota 429s can precede the served attempt
     expect(a.firstContentAt).not.toBeNull();

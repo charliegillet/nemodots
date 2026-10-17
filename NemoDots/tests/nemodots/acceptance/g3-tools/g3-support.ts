@@ -22,6 +22,7 @@ import {
 import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
+import { expect } from 'vitest';
 import { createClient } from 'redis';
 import { migrate } from '../../../../src/server/nemodots/db/migrate.js';
 import { stackRoleUrls, withDatabase } from '../../helpers/test-db.js';
@@ -218,6 +219,10 @@ export async function tablesContaining(
 export interface PageLedgerTrace {
   /** ledger.sources rows whose key is exactly opendots.page/<id> */
   sources: number;
+  /** source_type of those rows (expected: page_snapshot) */
+  sourceTypes: string[];
+  /** trust class of the page receipts (expected: page_snapshot) */
+  trusts: string[];
   /** source_revision values recorded in ledger.source_revisions, ascending */
   revisions: number[];
   /** source_revision values of ledger.observation_receipts (status any), ascending */
@@ -238,9 +243,9 @@ export async function pageLedgerTrace(
   pageId: string,
 ): Promise<PageLedgerTrace> {
   const key = `opendots.page/${pageId}`;
-  const sources = await adminQuery<{ id: string }>(
+  const sources = await adminQuery<{ id: string; source_type: string }>(
     adminUrl,
-    `SELECT id FROM ledger.sources WHERE key = $1`,
+    `SELECT id, source_type FROM ledger.sources WHERE key = $1`,
     [key],
   );
   const ids = sources.map((row) => row.id);
@@ -252,9 +257,9 @@ export async function pageLedgerTrace(
       )
     : [];
   const receipts = ids.length
-    ? await adminQuery<{ id: string; source_revision: number }>(
+    ? await adminQuery<{ id: string; source_revision: number; trust: string }>(
         adminUrl,
-        `SELECT id, source_revision FROM ledger.observation_receipts WHERE source_id = ANY($1::uuid[]) ORDER BY source_revision`,
+        `SELECT id, source_revision, trust FROM ledger.observation_receipts WHERE source_id = ANY($1::uuid[]) ORDER BY source_revision`,
         [ids],
       )
     : [];
@@ -275,6 +280,8 @@ export async function pageLedgerTrace(
   }
   return {
     sources: ids.length,
+    sourceTypes: sources.map((row) => row.source_type),
+    trusts: [...new Set(receipts.map((row) => row.trust))],
     revisions: revisions.map((row) => Number(row.source_revision)),
     receiptRevisions: receipts.map((row) => Number(row.source_revision)),
     receiptIdByRevision: Object.fromEntries(
@@ -364,11 +371,7 @@ export async function controlledStateFingerprint(
  * Seeds the checkout configuration (test-local values, admin role) and a Redis sentinel under the world's
  * prefix, so that a write to an existing key, a new action row or a namespace flush is visible to the fingerprint.
  */
-export async function seedControlledState(world: {
-  db: Acc3Database | null;
-  redisPrefix: string;
-}): Promise<void> {
-  if (!world.db) throw new Error('seedControlledState needs the NemoDots database');
+export async function seedConfigRows(adminUrl: string): Promise<void> {
   const entries: [string, string][] = [
     ['cache.namespace', '"acc3-ns-a"'],
     ['db.pool_max', '2'],
@@ -376,18 +379,26 @@ export async function seedControlledState(world: {
   ];
   for (const [key, value] of entries) {
     await adminQuery(
-      world.db.admin,
+      adminUrl,
       `INSERT INTO checkout.config_entries (key, value, version, caused_by_actor)
        VALUES ($1, $2::jsonb, 1, 'seed') ON CONFLICT (key) DO NOTHING`,
       [key, value],
     );
     await adminQuery(
-      world.db.admin,
+      adminUrl,
       `INSERT INTO checkout.config_versions (key, version, value, caused_by_actor)
        VALUES ($1, 1, $2::jsonb, 'seed') ON CONFLICT (key, version) DO NOTHING`,
       [key, value],
     );
   }
+}
+
+export async function seedControlledState(world: {
+  db: Acc3Database | null;
+  redisPrefix: string;
+}): Promise<void> {
+  if (!world.db) throw new Error('seedControlledState needs the NemoDots database');
+  await seedConfigRows(world.db.admin);
   const client = createClient({ url: acc3RedisUrl() });
   await client.connect();
   try {
@@ -825,7 +836,15 @@ export interface WorldOptions {
   appsAllowedSetting?: boolean;
   /** serve the Hono app on PORTS.app */
   serve?: boolean;
+  /** an InferencePort handed to the composition (deps.inference); the production code must use it for every model call */
+  inference?: unknown;
+  /** NEMODOTS_WORKERS (default 0: no worker is started) */
+  workers?: number;
+  /** extra environment for the composition */
+  env?: Record<string, string | undefined>;
 }
+
+export type McpTransportFactoryFn = (target: unknown) => unknown;
 
 export interface World {
   up: Upstream;
@@ -848,7 +867,16 @@ export interface World {
   agentConfig: Record<string, unknown>;
   sqlitePath: string;
   baseUrl: string;
+  /** the environment handed to createNemoDots (secrets are not part of it) */
+  env: Record<string, string | undefined>;
+  redisPrefix: string;
   authed: (path: string, init?: RequestInit) => Promise<Response>;
+  /**
+   * A real restart: nd.stop(), close both SQLite handles, then a NEW composition (createNemoDots on the same
+   * PostgreSQL database and SQLite path), a new Store/Platform and a new Hono app. Nothing in memory survives.
+   * `transport` replaces the MCP transport of the new Platform's ConnectionService.
+   */
+  restart: (options?: { transport?: McpTransportFactoryFn }) => Promise<void>;
   close: () => Promise<void>;
 }
 
@@ -907,6 +935,7 @@ export async function openWorld(options: WorldOptions = {}): Promise<World> {
     store.updateSettings({ appsAllowed: options.appsAllowedSetting });
 
   let nd: AnyModule | null = null;
+  let worldEnv: Record<string, string | undefined> = {};
   let created: Awaited<ReturnType<typeof createAcc3Database>> | null = null;
   const redisPrefix = `nemodots:acc3:${tag}`;
   // An empty hand-authored fixture: the adapter refuses any request without an entry, so no answer is improvised.
@@ -947,23 +976,34 @@ export async function openWorld(options: WorldOptions = {}): Promise<World> {
         NEMODOTS_CHECKOUT_URL: `http://127.0.0.1:${PORTS.checkout}`,
         NEMODOTS_INFERENCE_MODE: 'fixture',
         NEMODOTS_FIXTURE_PATH: fixturePath,
-        NEMODOTS_WORKERS: '0',
+        NEMODOTS_WORKERS: String(options.workers ?? 0),
         NEMODOTS_INCIDENT_DOT_IDS:
           (options.listIncidentDot ?? true) ? incidentDot.id : '',
+        ...(options.env ?? {}),
       };
-      nd = await bootstrap(env, { workspace });
+      worldEnv = env;
+      nd = await bootstrap(env, {
+        workspace,
+        ...(options.inference ? { inference: options.inference } : {}),
+      });
       if (typeof nd.start === 'function') await nd.start();
     }
     const config = { mode: 'live' as const, baseUrl: 'https://example.com' };
-    const app = up.createApp({
-      store,
-      runner: new up.Runner(store, config),
-      config,
-      platform,
-      ownerToken: OWNER_TOKEN,
-      origin: `http://127.0.0.1:${PORTS.app}`,
-      ...(nd ? { nemodots: nd } : {}),
-    });
+    const buildApp = (
+      store_: AnyModule,
+      platform_: AnyModule,
+      nd_: AnyModule | null,
+    ) =>
+      up.createApp({
+        store: store_,
+        runner: new up.Runner(store_, config),
+        config,
+        platform: platform_,
+        ownerToken: OWNER_TOKEN,
+        origin: `http://127.0.0.1:${PORTS.app}`,
+        ...(nd_ ? { nemodots: nd_ } : {}),
+      });
+    const app = buildApp(store, platform, nd);
     let server: { close: (cb?: () => void) => void } | null = null;
     if (options.serve) {
       const { serve } = await import('@hono/node-server');
@@ -976,28 +1016,7 @@ export async function openWorld(options: WorldOptions = {}): Promise<World> {
     const model = new ScriptedModel();
     model.install();
     const baseUrl = `http://127.0.0.1:${PORTS.app}`;
-    const authed = (path: string, init: RequestInit = {}) =>
-      (options.serve
-        ? fetch(`${baseUrl}${path}`, {
-            ...init,
-            headers: {
-              ...(init.body ? TEXT_JSON : {}),
-              Authorization: `Bearer ${OWNER_TOKEN}`,
-              Origin: baseUrl,
-              ...(init.headers as Record<string, string> | undefined),
-            },
-          })
-        : Promise.resolve(
-            app.request(`http://127.0.0.1:${PORTS.app}${path}`, {
-              ...init,
-              headers: {
-                ...(init.body ? TEXT_JSON : {}),
-                Authorization: `Bearer ${OWNER_TOKEN}`,
-                ...(init.headers as Record<string, string> | undefined),
-              },
-            }),
-          )) as Promise<Response>;
-    return {
+    const world: World = {
       up,
       store,
       workspace,
@@ -1013,17 +1032,73 @@ export async function openWorld(options: WorldOptions = {}): Promise<World> {
       agentConfig,
       sqlitePath,
       baseUrl,
-      authed,
+      env: worldEnv,
+      redisPrefix,
+      authed: (path: string, init: RequestInit = {}) =>
+        (options.serve
+          ? fetch(`${baseUrl}${path}`, {
+              ...init,
+              headers: {
+                ...(init.body ? TEXT_JSON : {}),
+                Authorization: `Bearer ${OWNER_TOKEN}`,
+                Origin: baseUrl,
+                ...(init.headers as Record<string, string> | undefined),
+              },
+            })
+          : Promise.resolve(
+              world.app.request(`http://127.0.0.1:${PORTS.app}${path}`, {
+                ...init,
+                headers: {
+                  ...(init.body ? TEXT_JSON : {}),
+                  Authorization: `Bearer ${OWNER_TOKEN}`,
+                  ...(init.headers as Record<string, string> | undefined),
+                },
+              }),
+            )) as Promise<Response>,
+      restart: async (restartOptions = {}) => {
+        if (options.serve)
+          throw new Error('restart() is not supported on a served world');
+        if (!wantNd) throw new Error('restart() needs the NemoDots composition');
+        const bootstrap = await loadExport<
+          (
+            env: Record<string, string | undefined>,
+            deps: unknown,
+          ) => Promise<AnyModule> | AnyModule
+        >('src/server/nemodots/bootstrap.ts', 'createNemoDots');
+        if (world.nd && typeof world.nd.stop === 'function')
+          await world.nd.stop();
+        world.store.close();
+        world.workspace.close();
+        const store2 = new up.Store(':memory:');
+        const workspace2 = new up.WorkspaceStore(sqlitePath, 'owner');
+        const platform2 = new up.Platform(store2, workspace2, platformConfig);
+        if (restartOptions.transport)
+          platform2.connections = new up.ConnectionService(
+            workspace2.connections,
+            restartOptions.transport,
+          );
+        const nd2 = await bootstrap(worldEnv, {
+          workspace: workspace2,
+          ...(options.inference ? { inference: options.inference } : {}),
+        });
+        if (typeof nd2.start === 'function') await nd2.start();
+        world.store = store2;
+        world.workspace = workspace2;
+        world.platform = platform2;
+        world.nd = nd2;
+        world.app = buildApp(store2, platform2, nd2);
+      },
       close: async () => {
         model.uninstall();
         if (server)
           await new Promise<void>((done) => server!.close(() => done()));
         try {
-          if (nd && typeof nd.stop === 'function') await nd.stop();
+          if (world.nd && typeof world.nd.stop === 'function')
+            await world.nd.stop();
         } finally {
           try {
-            store.close();
-            workspace.close();
+            world.store.close();
+            world.workspace.close();
           } finally {
             if (created) await created.drop();
             rmSync(fixturePath, { force: true });
@@ -1035,6 +1110,7 @@ export async function openWorld(options: WorldOptions = {}): Promise<World> {
         }
       },
     };
+    return world;
   } catch (error) {
     try {
       if (nd && typeof nd.stop === 'function') await nd.stop();
@@ -1083,6 +1159,8 @@ export async function runDotTurn(
     clientTools?: ('review' | 'approval')[];
     threadId?: string;
     beforeStep?: () => void;
+    /** AG-UI messages replayed before the user prompt (conversation history of earlier turns). */
+    history?: unknown[];
   } = {},
 ): Promise<TurnResult & { threadId: string }> {
   const { lastValueFrom, toArray } = await import('rxjs');
@@ -1117,8 +1195,9 @@ export async function runDotTurn(
     state: {},
     context: [],
     messages: [
+      ...(options.history ?? []),
       {
-        id: `u-${threadId}`,
+        id: `u-${threadId}-${++threadSeq}`,
         role: 'user',
         content: options.prompt ?? 'Please help with the incident pages.',
       },
@@ -1186,3 +1265,46 @@ export function lazyWorld(
 /** Wording of a visible policy refusal. Deliberately broad on phrasing, strict on the fact that a refusal is shown. */
 export const REFUSAL =
   /denied|refus|not (allowed|permitted|available|enabled|authori[sz]ed)|polic|disabled|blocked|forbidden|incident|unavailable|unknown/i;
+
+/** Refusals that come from the upstream Space grant check or from a NemoDots policy. */
+export const ACCESS_REFUSAL =
+  /space access|revoked|not granted|denied|refus|forbidden|not (allowed|permitted|available|authori[sz]ed|found)|polic|disabled|blocked|incident|unknown/i;
+
+/**
+ * A negative case must show that the turn RAN and that the tool call was answered with a visible refusal.
+ * A turn that crashed before tool execution, or a tool that never ran, must not satisfy a "nothing happened"
+ * assertion.
+ */
+export function expectRefusedCall(
+  turn: TurnResult,
+  toolCallId: string,
+  label: string,
+  pattern: RegExp = ACCESS_REFUSAL,
+) {
+  expect(turn.runError, `${label}: the turn must not crash`).toBeUndefined();
+  const result = turn.resultOf(toolCallId);
+  expect(result, `${label}: the model must receive a tool result`).toBeDefined();
+  expect(result, `${label}: the result must be a visible refusal`).toMatch(
+    pattern,
+  );
+}
+
+/** True when a client tool call was emitted to the browser and no server-side result exists for it. */
+export function clientCallPending(
+  turn: TurnResult,
+  toolCallId: string,
+): { emitted: boolean; resultedOnServer: boolean } {
+  const emitted = turn.events.some(
+    (event) =>
+      /^TOOL_CALL_(START|ARGS|END)$/.test(event.type) &&
+      event.toolCallId === toolCallId,
+  );
+  const resultEvent = turn.events.some(
+    (event) =>
+      event.type === 'TOOL_CALL_RESULT' && event.toolCallId === toolCallId,
+  );
+  return {
+    emitted,
+    resultedOnServer: resultEvent || turn.resultOf(toolCallId) !== undefined,
+  };
+}

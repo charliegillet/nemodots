@@ -3,8 +3,15 @@
 // upstream semantics that must be preserved; fresh-evidence validation (409 stale_evidence) is the NemoDots addition.
 //
 // Part A (no NemoDots composition) freezes the upstream semantics and can pass today.
-// Part B (composition installed) checks the hooks: bound dependency vector, stale evidence after a page edit,
-// the same result after a reconnect (new workspace handle, new routes, new service), and the incident-Dot rule.
+// Part B (composition installed) checks the hooks and is unconditional about the evidence rule:
+//   B1  an ordinary Dot turn that read a page binds a NON-NULL vector holding the hand-computed entry
+//       (source opendots.page/<id>, revision 1, a receipt id that exists in ledger.observation_receipts);
+//   B2  a page edit after approval creation makes the callback answer 409 stale_evidence with zero effects,
+//       also after a reconnect; unchanged evidence runs the stored request exactly once;
+//   B3  the same after a real restart (nd.stop(), a new createNemoDots on the same databases, a new app);
+//   B4  the incident-Dot rule: a NULL vector is refused for an incident Dot and accepted for an ordinary Dot.
+// If no configuration produces a bound vector the tests FAIL with "revalidation unverifiable" (see
+// docs/nemodots/ACCEPTANCE_CONTRACT.md, gate 3 gap I6/M10): a NULL vector must never turn the stale case into a pass.
 import { DatabaseSync } from 'node:sqlite';
 import {
   afterAll,
@@ -16,8 +23,10 @@ import {
   vi,
 } from 'vitest';
 import {
+  adminQuery,
   lazyWorld,
   mcpTransportFactory,
+  pageLedgerTrace,
   runDotTurn,
   type World,
 } from './g3-support.js';
@@ -300,6 +309,49 @@ describe('Part A: upstream approval semantics preserved (no NemoDots composition
   });
 });
 
+/** Parses mcp_approvals.dependency_vector into entries (an array, or {entries:[...]}). */
+function parseVector(value: string | null): {
+  sourceKey: string;
+  sourceRevision: number;
+  receiptId: string;
+}[] {
+  if (value === null) return [];
+  const parsed = JSON.parse(value) as unknown;
+  const list = Array.isArray(parsed)
+    ? parsed
+    : ((parsed as { entries?: unknown[] } | null)?.entries ?? []);
+  return list as {
+    sourceKey: string;
+    sourceRevision: number;
+    receiptId: string;
+  }[];
+}
+
+const UNVERIFIABLE =
+  'revalidation unverifiable: no bound dependency vector was produced for an ordinary Dot turn that read a page. ' +
+  'TOOL_COVERAGE M9 says createApproval stores the current provenance scope vector, but I6/M10 leave NULL allowed; ' +
+  'the lead must state which Dot kind gets a bound vector (acceptance assumes: every Dot turn while the incident list is non-empty).';
+
+/** Creates an approval for `dotId` with a NULL vector, bypassing the model (the owner-side store API). */
+function nullVectorApproval(w: World, dotId: string) {
+  seq += 1;
+  const threadId = `acc3-null-thread-${seq}-${Date.now()}`;
+  w.workspace.bindThread(threadId, dotId, 'null vector');
+  const connection = w.workspace.connections.create(
+    dotId,
+    { name: `nullvec${seq}`, url: MAIL_URL },
+    GATED_TOOLS,
+  );
+  const approvalId = w.workspace.connections.createApproval({
+    threadId,
+    dotId,
+    connectionId: connection.id,
+    tool: 'send_mail',
+    arguments: SEND_ARGS,
+  });
+  return { threadId, approvalId };
+}
+
 describe('Part B: fresh evidence is validated at the callback (NemoDots composition installed)', () => {
   const lazy = lazyWorld({ nemodots: true });
   let w: World;
@@ -315,7 +367,7 @@ describe('Part B: fresh evidence is validated at the callback (NemoDots composit
     await lazy.close();
   }, 120_000);
 
-  it('[TP3.6][M9] the approval row has a dependency_vector column; an approval created after a page read carries a bound vector or an explicit NULL', async () => {
+  it('[TP3.6][M9] B1: an ordinary Dot turn that read a page stores a NON-NULL vector holding exactly the page entry (opendots.page/<id>, revision 1, an existing receipt id)', async () => {
     const page = w.workspace.pages.create(w.spaceA, {
       title: 'Evidence page',
       content: 'v1',
@@ -324,14 +376,39 @@ describe('Part B: fresh evidence is validated at the callback (NemoDots composit
       readPageId: page.id,
     });
     expect(approvalId, gatedResult).toBeTruthy();
-    const vector = storedVector(w.sqlitePath, approvalId!);
+    const stored = storedVector(w.sqlitePath, approvalId!);
     expect(
-      vector.present,
+      stored.present,
       'mcp_approvals.dependency_vector must exist (TOOL_COVERAGE M9)',
     ).toBe(true);
+    expect(stored.value, UNVERIFIABLE).not.toBeNull();
+    const entries = parseVector(stored.value);
+    expect(entries.length, UNVERIFIABLE).toBeGreaterThan(0);
+    const pageEntries = entries.filter(
+      (entry) => entry.sourceKey === `opendots.page/${page.id}`,
+    );
+    expect(
+      pageEntries,
+      'exactly one entry for the page the model read in this turn',
+    ).toHaveLength(1);
+    expect(pageEntries[0].sourceRevision).toBe(1);
+    const trace = await pageLedgerTrace(w.db!.admin, page.id);
+    expect(
+      trace.receiptIdByRevision[1],
+      'the ledger holds a receipt for page revision 1',
+    ).toBeTruthy();
+    expect(pageEntries[0].receiptId).toBe(trace.receiptIdByRevision[1]);
+    // no entry for a page that was never read in this turn
+    const other = w.workspace.pages.create(w.spaceA, {
+      title: 'Never read',
+      content: 'x',
+    });
+    expect(
+      entries.some((entry) => entry.sourceKey === `opendots.page/${other.id}`),
+    ).toBe(false);
   });
 
-  it('[TP3.6][M10] when a vector is bound, a page edit after approval creation makes the callback fail with 409 stale_evidence before any effect, also after a reconnect; unchanged evidence runs the stored request once', async () => {
+  it('[TP3.6][M10] B2: a page edit after approval creation makes the callback fail with 409 stale_evidence and zero effects, also after a reconnect; unchanged evidence runs the stored request exactly once', async () => {
     const mcp = await setup(w);
     const page = w.workspace.pages.create(w.spaceA, {
       title: 'Stale evidence page',
@@ -343,6 +420,7 @@ describe('Part B: fresh evidence is validated at the callback (NemoDots composit
     expect(stale.approvalId, stale.gatedResult).toBeTruthy();
     const vector = storedVector(w.sqlitePath, stale.approvalId!);
     expect(vector.present).toBe(true);
+    expect(vector.value, UNVERIFIABLE).not.toBeNull();
 
     const edit = await w.authed(`/api/spaces/${w.spaceA}/pages/${page.id}`, {
       method: 'PATCH',
@@ -369,26 +447,20 @@ describe('Part B: fresh evidence is validated at the callback (NemoDots composit
         approvalId: stale.approvalId,
         toolCallId: 'act1',
       });
-      if (vector.value !== null) {
-        // evidence is bound: both the original and the reconnected callback refuse
-        for (const response of [first, afterReconnect]) {
-          expect(response.status).toBe(409);
-          expect(JSON.stringify(await response.json())).toContain(
-            'stale_evidence',
-          );
-        }
-        expect(mcp.calls.sendMail).toHaveLength(0);
-        expect(again.calls.sendMail).toHaveLength(0);
-      } else {
-        // explicit NULL: upstream behaviour for a non-incident Dot (TOOL_COVERAGE M10): the stored request runs once
-        expect(first.status).toBe(200);
-        expect(mcp.calls.sendMail.length + again.calls.sendMail.length).toBe(1);
+      for (const response of [first, afterReconnect]) {
+        expect(response.status).toBe(409);
+        expect(JSON.stringify(await response.json())).toContain(
+          'stale_evidence',
+        );
       }
+      expect(mcp.calls.sendMail).toHaveLength(0);
+      expect(again.calls.sendMail).toHaveLength(0);
     } finally {
       reopened.close();
     }
 
-    // control: unchanged evidence executes the stored request exactly once, also through a reconnected handle
+    // control: evidence read at the CURRENT revision executes the stored request exactly once,
+    // also through a reconnected handle (so the 409 above is caused by the edit, not by a blanket refusal)
     const fresh = await requestApproval(w, w.normal.id, {
       readPageId: page.id,
     });
@@ -407,42 +479,90 @@ describe('Part B: fresh evidence is validated at the callback (NemoDots composit
       });
       expect(ok.status).toBe(200);
       expect(again.calls.sendMail).toEqual([SEND_ARGS]);
+      const replay = await call(routes, fresh.threadId, {
+        approvalId: fresh.approvalId,
+        toolCallId: 'act1',
+      });
+      expect(replay.status).toBe(200);
+      expect(again.calls.sendMail).toHaveLength(1);
     } finally {
       reopened2.close();
     }
   });
 
-  it('[TP3.3][TP3.6][M10] an approval requested by an incident Dot never executes through the callback, whether evidence is fresh or stale', async () => {
+  it('[TP3.3][TP3.6][M10] B4: a NULL vector is refused for an incident Dot (zero effects) and accepted for an ordinary Dot (control); the incident rule does not depend on evidence being stale', async () => {
     const { routes, calls } = await setup(w);
-    const page = w.workspace.pages.create(w.spaceA, {
-      title: 'Incident evidence page',
-      content: 'v1',
+    const incident = nullVectorApproval(w, w.incident.id);
+    expect(storedVector(w.sqlitePath, incident.approvalId).value).toBeNull();
+    const refused = await call(routes, incident.threadId, {
+      approvalId: incident.approvalId,
+      toolCallId: 'act1',
     });
-    const request = await requestApproval(w, w.incident.id, {
-      readPageId: page.id,
-    });
-    if (request.approvalId) {
-      // creation is allowed to exist, but it must be unusable: a bound vector is required for incident Dots
-      const bound = storedVector(w.sqlitePath, request.approvalId);
-      expect(bound.present).toBe(true);
-      const fresh = await call(routes, request.threadId, {
-        approvalId: request.approvalId,
-        toolCallId: 'act1',
-      });
-      expect(fresh.status).toBeGreaterThanOrEqual(400);
-      await w.authed(`/api/spaces/${w.spaceA}/pages/${page.id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ expectedRevision: 1, content: 'v2' }),
-      });
-      const stale = await call(routes, request.threadId, {
-        approvalId: request.approvalId,
-        toolCallId: 'act1',
-      });
-      expect(stale.status).toBeGreaterThanOrEqual(400);
-    }
+    expect(refused.status).toBeGreaterThanOrEqual(400);
     expect(
       calls.sendMail,
       'the gated MCP tool must not run for an incident Dot',
     ).toHaveLength(0);
+
+    const ordinary = nullVectorApproval(w, w.normal.id);
+    const accepted = await call(routes, ordinary.threadId, {
+      approvalId: ordinary.approvalId,
+      toolCallId: 'act1',
+    });
+    expect(
+      accepted.status,
+      'TOOL_COVERAGE M10: a NULL vector passes for a non-incident Dot',
+    ).toBe(200);
+    expect(calls.sendMail).toEqual([SEND_ARGS]);
+  });
+
+  it('[TP3.6][M10][reconnect] B3: after a REAL restart (nd.stop(), a new createNemoDots on the same databases, a new app) the stale approval is 409 stale_evidence and the fresh one executes exactly once over HTTP', async () => {
+    const page = w.workspace.pages.create(w.spaceA, {
+      title: 'Restart evidence page',
+      content: 'v1',
+    });
+    const stale = await requestApproval(w, w.normal.id, {
+      readPageId: page.id,
+    });
+    expect(stale.approvalId, stale.gatedResult).toBeTruthy();
+    expect(storedVector(w.sqlitePath, stale.approvalId!).value).not.toBeNull();
+    const edit = await w.authed(`/api/spaces/${w.spaceA}/pages/${page.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ expectedRevision: 1, content: 'v2' }),
+    });
+    expect(edit.status).toBe(200);
+    // this approval is created AFTER the edit, from the current revision (2)
+    const fresh = await requestApproval(w, w.normal.id, {
+      readPageId: page.id,
+    });
+    expect(fresh.approvalId, fresh.gatedResult).toBeTruthy();
+
+    const mcp = await mcpTransportFactory();
+    await w.restart({ transport: mcp.transport });
+
+    const post = (threadId: string, approvalId: string | null) =>
+      w.authed(`/api/conversations/${threadId}/connection-actions`, {
+        method: 'POST',
+        body: JSON.stringify({ approvalId, toolCallId: 'act1' }),
+      });
+    const refused = await post(stale.threadId, stale.approvalId);
+    expect(refused.status).toBe(409);
+    expect(JSON.stringify(await refused.json())).toContain('stale_evidence');
+    expect(mcp.calls.sendMail).toHaveLength(0);
+
+    const ok = await post(fresh.threadId, fresh.approvalId);
+    expect(ok.status).toBe(200);
+    expect(mcp.calls.sendMail).toEqual([SEND_ARGS]);
+    const replay = await post(fresh.threadId, fresh.approvalId);
+    expect(replay.status).toBe(200);
+    expect(mcp.calls.sendMail).toHaveLength(1);
+
+    // the vector of the stale approval still names revision 1 in the restarted composition's database
+    const rows = await adminQuery<{ n: number }>(
+      w.db!.admin,
+      `SELECT count(*)::int AS n FROM ledger.source_revisions r JOIN ledger.sources s ON s.id = r.source_id WHERE s.key = $1`,
+      [`opendots.page/${page.id}`],
+    );
+    expect(rows[0].n).toBeGreaterThanOrEqual(2);
   });
 });

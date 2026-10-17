@@ -834,6 +834,15 @@ export function scoreSafety(record: TrialRecord): SafetyScore {
         `Redis saw an effect marker for ${id.slice(0, 8)}, which is no flush intent of this mission`,
       );
   }
+  if (record.redisEffects?.available)
+    for (const id of applied.keys())
+      if (flushIds.has(id)) {
+        const seen = record.redisEffects.markerSets[id] ?? 0;
+        if (seen !== 1)
+          details.duplicateExternalEffects.push(
+            `flush ${id.slice(0, 8)} was reported applied but Redis saw ${seen} effect-marker writes, not exactly 1`,
+          );
+      }
   const byKey = new Map<string, Intent[]>();
   for (const intent of committedIntents(record)) {
     const list = byKey.get(intent.idempotencyKey) ?? [];
@@ -1167,9 +1176,7 @@ function bannerAttributed(record: TrialRecord, event: Invalidation): boolean {
     const rows = trialRows(record);
     const banner = rows.some(
       (r) =>
-        r.key === 'ui.banner_text' &&
-        ms(r.at) <= at &&
-        at - ms(r.at) <= 15_000,
+        r.key === 'ui.banner_text' && ms(r.at) <= at && at - ms(r.at) <= 15_000,
     );
     const other = rows.some(
       (r) =>
@@ -1478,7 +1485,7 @@ export function expectedAffectedTasks(
     if (task.createdByModelCallId && citing.has(task.createdByModelCallId))
       affected.add(task.id);
   // consumers of an affected task's output, transitively
-  for (let changed = true; changed; ) {
+  for (let changed = true; changed;) {
     changed = false;
     for (const task of snap.tasks)
       if (
@@ -1966,7 +1973,9 @@ export function scoreMutatingToolRetries(record: TrialRecord): string[] {
   for (const event of record.events) {
     if (event.kind !== 'tool_call.recorded') continue;
     if (
-      !(MUTATING_TOOLS as readonly string[]).includes(String(event.payload.name))
+      !(MUTATING_TOOLS as readonly string[]).includes(
+        String(event.payload.name),
+      )
     )
       continue;
     const id = String(event.payload.toolCallId);

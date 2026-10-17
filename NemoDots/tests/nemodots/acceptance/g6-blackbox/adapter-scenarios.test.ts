@@ -8,15 +8,18 @@
 // Expected values come from ARCHITECTURE 9.1/9.2 and the oracle invariants. The
 // healthy baseline is read from the seeded database at run time (never
 // hard-coded here) because the baseline lives only in sandbox/seed.ts.
+import pg from 'pg';
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import { CheckoutHealthResponseSchema } from '../../../../src/server/nemodots/contracts/index.js';
 import { PROBE } from '../oracle/checkout-invariants.js';
 import { newOwnerToken } from './helpers/config.js';
 import { NemoApi, checkoutRequest, loadSample, sleep } from './helpers/http.js';
+import { createClient } from 'redis';
+import { redisTrialUrl, trialRedisPrefix } from './helpers/config.js';
 import { Sut } from './helpers/sut.js';
 import { StepApplier, probeHeader, verifierProbe } from './helpers/trial.js';
-import { VerifierDb } from './helpers/verifier-db.js';
-import { scoreProbe } from './helpers/scoring.js';
+import { RedisEffectWatcher, VerifierDb } from './helpers/verifier-db.js';
+import { auditTaggedOrders, scoreProbe } from './helpers/scoring.js';
 
 let sut: Sut | undefined;
 let api: NemoApi;
@@ -392,5 +395,133 @@ describe('G6.2/G6.10 deterministic adapter: honest modes', () => {
     expect(created.status).not.toBe(201);
     const missions = await api.get<unknown[]>('/missions');
     expect(missions.body).toEqual([]);
+  });
+});
+
+describe('G6.4 deterministic adapter: the harness reads with its own read-only role', () => {
+  it('G6.4 the reader is a separate harness-only role that cannot write or read control data', async () => {
+    await use('sandbox');
+    expect(await db.currentUser()).toMatch(/^acc6_ro_/);
+    const reader = new pg.Client({ connectionString: sut!.readerUrl });
+    await reader.connect();
+    try {
+      await expect(
+        reader.query('UPDATE checkout.inventory SET quantity = quantity'),
+      ).rejects.toThrow(/permission denied/);
+      await expect(
+        reader.query("INSERT INTO checkout.config_versions (key) VALUES ('x')"),
+      ).rejects.toThrow(/permission denied/);
+      await expect(
+        reader.query('SELECT * FROM control.scenario_runs'),
+      ).rejects.toThrow(/permission denied/);
+      // the three schemas the invariants need are readable
+      for (const table of [
+        'checkout.orders',
+        'ledger.model_call_records',
+        'coordinator.task_attempts',
+      ])
+        await reader.query(`SELECT 1 FROM ${table} LIMIT 1`);
+    } finally {
+      await reader.end();
+    }
+  });
+
+  it('G6.4 the app and worker environment holds the architecture roles only: no admin, no checkout, no reader', async () => {
+    await use('sandbox');
+    const names = sut!.appEnvNames();
+    expect(names).toEqual(
+      expect.arrayContaining([
+        'NEMODOTS_PG_URL_APP',
+        'NEMODOTS_PG_URL_INJECTOR',
+        'NEMODOTS_PG_URL_VERIFIER',
+      ]),
+    );
+    for (const forbidden of [
+      'NEMODOTS_PG_URL_ADMIN',
+      'NEMODOTS_PG_URL_CHECKOUT',
+    ])
+      expect(names).not.toContain(forbidden);
+    expect(names.filter((n) => /READER|ACC6/i.test(n))).toEqual([]);
+  });
+
+  it('G6.4 config history carries parseable start times; commit timestamps are used exactly when the server tracks them', async () => {
+    await use('sandbox');
+    const rows = await db.configVersions();
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect(Number.isNaN(Date.parse(row.at))).toBe(false);
+      if (db.commitTimestamps)
+        expect(Number.isNaN(Date.parse(row.commitAt ?? ''))).toBe(false);
+      else expect(row.commitAt ?? null).toBeNull();
+    }
+  });
+
+  it('G6.4 the verifier probe leaves the audit clean and the normalized evidence values unchanged', async () => {
+    await use('sandbox');
+    const probe = await verifierProbe(db, 1);
+    expect(probe.normalized!.after).toEqual(probe.normalized!.before);
+    const tagged = await db.taggedOrders();
+    expect(tagged.filter((o) => o.probeRunId === probe.runId)).toHaveLength(1);
+    // the stray runtime-tagged rows of other probes in this database would be reported
+    const audit = auditTaggedOrders({
+      probe,
+      taggedOrders: tagged,
+      snapshot: null,
+      snapshotAfterProbe: null,
+      events: [],
+    } as never);
+    const foreign = tagged.filter((o) => o.probeRunId !== probe.runId);
+    expect(audit.length > 0).toBe(foreign.length > 0);
+  });
+});
+
+describe('G6.6 deterministic adapter: independent Redis effect counting', () => {
+  it('G6.6 the keyspace watcher counts effect markers per action, ignores NX no-ops, and restores the server setting', async () => {
+    await use('sandbox');
+    const prefix = `${trialRedisPrefix('adapter-watch')}`;
+    const admin = createClient({ url: redisTrialUrl() });
+    await admin.connect();
+    const before = (await admin.configGet('notify-keyspace-events')) as Record<
+      string,
+      string
+    >;
+    const watcher = await RedisEffectWatcher.start(prefix);
+    try {
+      const marker = `${prefix}:effect:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa`;
+      await admin.set(marker, '1', { NX: true }); // first effect
+      await admin.set(marker, '1', { NX: true }); // duplicate attempt: a no-op, no event
+      await admin.set(
+        `${prefix}:effect:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb`,
+        '1',
+      );
+      await admin.set(
+        `${prefix}:effect:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb`,
+        '2',
+      ); // forced second write
+      await admin.set(`${prefix}:fence:checkout`, '3');
+      await admin.set(`${prefix}:cache:ns:v1:products`, '[]');
+      await admin.unlink(`${prefix}:cache:ns:v1:products`);
+      await sleep(400);
+      const seen = watcher.peek();
+      expect(seen.available, seen.reason ?? '').toBe(true);
+      expect(seen.markerSets).toEqual({
+        'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa': 1,
+        'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb': 2,
+      });
+      expect(seen.fenceSets).toBe(1);
+      expect(seen.cacheDeletes).toBe(1);
+    } finally {
+      await watcher.stop();
+      const after = (await admin.configGet('notify-keyspace-events')) as Record<
+        string,
+        string
+      >;
+      expect(after['notify-keyspace-events']).toBe(
+        before['notify-keyspace-events'],
+      );
+      for await (const keys of admin.scanIterator({ MATCH: `${prefix}:*` }))
+        if (keys.length) await admin.unlink(keys);
+      await admin.quit();
+    }
   });
 });

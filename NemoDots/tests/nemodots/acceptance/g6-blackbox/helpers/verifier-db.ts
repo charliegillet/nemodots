@@ -62,13 +62,10 @@ export class VerifierDb {
       application_name: 'acc6-reader',
     });
     await client.connect();
-    let tracked = false;
-    try {
-      const shown = await client.query('SHOW track_commit_timestamp');
-      tracked = shown.rows[0]?.track_commit_timestamp === 'on';
-    } catch {
-      tracked = false;
-    }
+    const tracked = await client
+      .query('SHOW track_commit_timestamp')
+      .then((shown) => shown.rows[0]?.track_commit_timestamp === 'on')
+      .catch(() => false);
     return new VerifierDb(client, tracked);
   }
 
@@ -396,7 +393,9 @@ export class RedisEffectWatcher {
         'notify-keyspace-events',
       )) as Record<string, string>;
       this.previousFlags = current['notify-keyspace-events'] ?? '';
-      const wanted = new Set(this.previousFlags.replace(/A/g, 'g$lshzxetd').split(''));
+      const wanted = new Set(
+        this.previousFlags.replace(/A/g, 'g$lshzxetd').split(''),
+      );
       for (const flag of KEYSPACE_FLAGS) wanted.add(flag);
       await this.admin.configSet(
         'notify-keyspace-events',

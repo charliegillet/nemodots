@@ -129,6 +129,45 @@ export class StepApplier {
     await this.injector?.end().catch(() => undefined);
   }
 
+  /**
+   * One unconditional injector write that waits for its own commit and returns
+   * the version it produced. Unlike apply() it does not assert version
+   * arithmetic, so it can be used while another transaction holds the row.
+   */
+  async writeUnconditionally(
+    key: string,
+    value: string | number | boolean,
+  ): Promise<{ versionAfter: number | null; committedAtMs: number }> {
+    const authority = (await importEntry('versionAuthority')) as {
+      advanceConfigUnconditionally?: (
+        client: pg.ClientBase,
+        input: unknown,
+      ) => Promise<{ versionAfter?: number }>;
+    };
+    if (typeof authority.advanceConfigUnconditionally !== 'function')
+      throw new EntryPointMissingError(
+        'src/server/nemodots/sandbox/version-authority.ts#advanceConfigUnconditionally',
+        'module has no such export',
+      );
+    const client = this.injector!;
+    await client.query('BEGIN');
+    try {
+      const result = await authority.advanceConfigUnconditionally(client, {
+        key,
+        value,
+        causedBy: { actor: 'injector' },
+      });
+      await client.query('COMMIT');
+      return {
+        versionAfter: result?.versionAfter ?? null,
+        committedAtMs: Date.now(),
+      };
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    }
+  }
+
   async apply(index: number, step: Step): Promise<StepApplication> {
     const before = (await this.db.configEntries())[step.key];
     const application: StepApplication = {
@@ -546,7 +585,9 @@ export async function runTrial(
       // mission started and no separate worker yet, nothing may hold a lease.
       await sleep(4000);
       record.crash!.leaseOwnersBeforeWorker = [
-        ...new Set((await db.runningAttempts(missionId)).map((a) => a.leaseOwner)),
+        ...new Set(
+          (await db.runningAttempts(missionId)).map((a) => a.leaseOwner),
+        ),
       ];
       sut.startWorker();
       record.crash!.workerStartedAtMs = Date.now();
@@ -835,6 +876,9 @@ export async function verifierProbe(
     orderId,
     reads,
     businessAfter: await db.snapshot().catch(() => null),
-    normalized: { before: normalizedBefore, after: await db.normalizedValues() },
+    normalized: {
+      before: normalizedBefore,
+      after: await db.normalizedValues(),
+    },
   };
 }

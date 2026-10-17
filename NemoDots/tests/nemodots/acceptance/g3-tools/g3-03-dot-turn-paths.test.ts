@@ -9,24 +9,45 @@
 // Until src/server/nemodots/bootstrap.ts exists every test here FAILS with ENTRY POINT MISSING.
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import {
+  ACCESS_REFUSAL,
   INJECTION,
   REFUSAL,
   SUPERVISOR_BASE,
+  adminQuery,
+  clientCallPending,
   controlledStateFingerprint,
+  expectRefusedCall,
   lazyWorld,
+  pageLedgerTrace,
   runDotTurn,
-  tablesContaining,
+  seedControlledState,
   type World,
 } from './g3-support.js';
 
-const lazy = lazyWorld({ nemodots: true }, (world) => {
+// The controlled configuration and a Redis sentinel are SEEDED before any hostile turn, so a write to an
+// existing key, a new action/task/finding row or a namespace flush changes the fingerprint.
+const lazy = lazyWorld({ nemodots: true }, async (world) => {
   world.store.updateSettings({
     researchAllowed: true,
     memoryAllowed: true,
     appsAllowed: true,
   });
   world.agentConfig = BASE_CONFIG();
+  await seedControlledState(world);
 });
+const fingerprint = () => controlledStateFingerprint(w.db!.admin, w.redisPrefix);
+
+/** Context snapshots (the contracted ledger.context_snapshots table) whose injected record names `needle`. */
+async function snapshotsNaming(needle: string): Promise<number> {
+  const rows = await adminQuery<{ n: number }>(
+    w.db!.admin,
+    `SELECT count(*)::int AS n FROM ledger.context_snapshots WHERE injected::text LIKE '%' || $1 || '%'`,
+    [needle],
+  );
+  return rows[0].n;
+}
+
+const UNKNOWN_TOOL = /unknown|not found|no such|not (available|allowed|registered|permitted)|invalid|refus|denied|disabled/i;
 let w: World;
 const BASE_CONFIG = () => ({
   intelligenceKey: 'acc3-fixture',
@@ -90,11 +111,29 @@ describe('[TP3.1] model-visible reads record scoped provenance (TOOL_COVERAGE R3
     ]);
     expect(turn.runError).toBeUndefined();
     expect(turn.resultOf('c1') ?? '').toContain('Runbook page');
-    const hits = await tablesContaining(w.db!.admin, `opendots.page/${p.id}`);
-    expect(
-      hits,
-      'the page read must appear as an opendots.page/<id> source in the NemoDots ledger',
-    ).not.toEqual([]);
+    // hand-computed: one source opendots.page/<id> of type page_snapshot, a receipt for page revision 1
+    const first = await pageLedgerTrace(w.db!.admin, p.id);
+    expect(first.sources).toBe(1);
+    expect(first.sourceTypes).toEqual(['page_snapshot']);
+    expect(first.trusts).toEqual(['page_snapshot']);
+    expect(first.receiptRevisions).toContain(1);
+    // the receipt tracks the page revision that was read: edit to revision 2, read again, expect revision 2
+    const edited = await w.authed(`/api/spaces/${w.spaceA}/pages/${p.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ expectedRevision: 1, content: 'second body' }),
+    });
+    expect(edited.status).toBe(200);
+    const again = await runDotTurn(w, w.incident.id, [
+      {
+        toolCalls: [
+          { id: 'c2', name: 'read_space_page', arguments: { id: p.id } },
+        ],
+      },
+      { text: 'read it again' },
+    ]);
+    expect(again.resultOf('c2') ?? '').toContain('second body');
+    const second = await pageLedgerTrace(w.db!.admin, p.id);
+    expect(second.receiptRevisions).toEqual([1, 2]);
     const telemetry = await w.authed('/api/nemodots/telemetry/summary');
     expect(telemetry.status).toBe(200);
     expect(
@@ -167,15 +206,23 @@ describe('[TP3.1] memories and the current page (TOOL_COVERAGE R2, R3)', () => {
 
   it('[TP3.1][R2] with memory enabled, a memory that reaches an incident Dot is recorded in the ledger (enabled reads are instrumented), otherwise it is withheld', async () => {
     const memory = w.store.saveMemory('ACC3-MEMORY-ENABLED-0043');
+    // ordinary Dot: memory is enabled, so it MUST reach the model and MUST be recorded (not conditional)
+    const ordinary = await runDotTurn(w, w.normal.id, [{ text: 'hello' }]);
+    expect(ordinary.requests[0].instructionText).toContain(
+      'ACC3-MEMORY-ENABLED-0043',
+    );
+    expect(
+      await snapshotsNaming(memory.id),
+      'a memory shown to a Dot must carry its id into ledger.context_snapshots.injected',
+    ).toBeGreaterThanOrEqual(1);
+    // incident Dot with memory enabled: either withheld, or shown AND recorded
+    const before = await snapshotsNaming(memory.id);
     const turn = await runDotTurn(w, w.incident.id, [{ text: 'hello' }]);
     const reached = turn.requests[0].instructionText.includes(
       'ACC3-MEMORY-ENABLED-0043',
     );
     if (reached)
-      expect(
-        await tablesContaining(w.db!.admin, memory.id),
-        'a memory shown to an incident Dot must carry its id into the model-call record',
-      ).not.toEqual([]);
+      expect(await snapshotsNaming(memory.id)).toBeGreaterThan(before);
   });
 
   it('[TP3.1][R3] the current page of a conversation is shown to the Dot as untrusted data and its revision is recorded in the ledger', async () => {
@@ -191,9 +238,10 @@ describe('[TP3.1] memories and the current page (TOOL_COVERAGE R2, R3)', () => {
     });
     expect(turn.requests[0].instructionText).toContain('CURRENT-PAGE-BODY');
     expect(turn.requests[0].instructionText).toMatch(/untrusted/i);
-    expect(
-      await tablesContaining(w.db!.admin, `opendots.page/${p.id}`),
-    ).not.toEqual([]);
+    // ledger.context_snapshots.injected.pageSnapshots names this page at its revision (hand-computed: 1)
+    const trace = await pageLedgerTrace(w.db!.admin, p.id);
+    expect(trace.injectedRevisions).toEqual([1]);
+    expect(trace.receiptRevisions).toContain(1);
   });
 });
 
@@ -274,7 +322,7 @@ describe('[TP3.1] mutations are policy-checked at their execution boundary (TOOL
 
   it('[TP3.1][M14] a channel (headless, no client tools) turn of the incident Dot cannot edit pages either', async () => {
     const p = page(w.spaceA, 'Channel target');
-    await runDotTurn(
+    const incidentTurn = await runDotTurn(
       w,
       w.incident.id,
       [
@@ -295,7 +343,91 @@ describe('[TP3.1] mutations are policy-checked at their execution boundary (TOOL
       ],
       { channel: true },
     );
+    // the channel path did execute tools and refused visibly (a crashed turn proves nothing)
+    expectRefusedCall(incidentTurn, 'h1', 'incident channel edit', REFUSAL);
     expect(w.workspace.pages.get(w.spaceA, p.id).revision).toBe(1);
+    // control: the SAME channel path for the unlisted Dot succeeds, so the channel does execute server tools
+    const free = page(w.spaceA, 'Channel control');
+    const controlTurn = await runDotTurn(
+      w,
+      w.normal.id,
+      [
+        {
+          toolCalls: [
+            {
+              id: 'h2',
+              name: 'edit_space_page',
+              arguments: {
+                id: free.id,
+                content: 'channel edit',
+                expectedRevision: 1,
+              },
+            },
+          ],
+        },
+        { text: 'done' },
+      ],
+      { channel: true },
+    );
+    expect(controlTurn.runError).toBeUndefined();
+    expect(w.workspace.pages.get(w.spaceA, free.id).revision).toBe(2);
+  });
+
+  it('[TP3.1][M3][I7] an incident-Dot turn with the review client tool ends with a PENDING client call: no server-side result, and no page exists until the owner posts the reviewed-page route', async () => {
+    const before = pagesIn(w.spaceA);
+    const turn = await runDotTurn(
+      w,
+      w.incident.id,
+      [
+        {
+          toolCalls: [
+            {
+              id: 'rv1',
+              name: 'review_space_page',
+              arguments: {
+                title: 'Incident review draft',
+                content: 'draft body',
+                spaceId: w.spaceA,
+              },
+            },
+          ],
+        },
+        { text: 'unreachable: the run must stop at the client tool' },
+      ],
+      { clientTools: ['review'] },
+    );
+    expect(turn.runError).toBeUndefined();
+    expect(
+      turn.requests[0].toolNames,
+      'the client tool is offered to the model',
+    ).toContain('review_space_page');
+    const pending = clientCallPending(turn, 'rv1');
+    expect(pending.emitted, 'TOOL_CALL events reached the client').toBe(true);
+    expect(
+      pending.resultedOnServer,
+      'withToolPolicy must not give the client tool an executor (finding I7)',
+    ).toBe(false);
+    expect(
+      turn.requests,
+      'the model is not called again until the client answers',
+    ).toHaveLength(1);
+    expect(pagesIn(w.spaceA)).toBe(before);
+
+    // the owner approves through the reviewed-page route; only then does the page exist
+    const approved = await w.authed(
+      `/api/conversations/${turn.threadId}/reviewed-page`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          title: 'Incident review draft',
+          content: 'draft body',
+          spaceId: w.spaceA,
+          toolCallId: 'rv1',
+        }),
+      },
+    );
+    expect(approved.status).toBe(201);
+    expect(pagesIn(w.spaceA)).not.toBe(before);
   });
 });
 
@@ -335,9 +467,11 @@ describe('[TP3.2] model-supplied ids and revoked grants grant nothing', () => {
       },
       { text: 'done' },
     ]);
-    for (const id of ['s1', 's2', 's3', 's4'])
-      expect(turn.resultOf(id) ?? '', id).not.toContain('B-ONLY-CONTENT');
-    expect(turn.resultOf('s1') ?? '').not.toContain(pb.id);
+    for (const id of ['s1', 's2', 's3', 's4']) {
+      expectRefusedCall(turn, id, `cross-Space ${id}`, ACCESS_REFUSAL);
+      expect(turn.resultOf(id), id).not.toContain('B-ONLY-CONTENT');
+    }
+    expect(turn.resultOf('s1')).not.toContain(pb.id);
     expect(pagesIn(w.spaceB)).toBe(beforeB);
     expect(w.workspace.pages.get(w.spaceB, pb.id).content).toBe(
       'B-ONLY-CONTENT',
@@ -408,8 +542,10 @@ describe('[TP3.2] model-supplied ids and revoked grants grant nothing', () => {
         },
         { text: 'done' },
       ]);
+      expect(turn.runError).toBeUndefined();
       expect(turn.resultOf('r1') ?? '').toContain('REVOCABLE-CONTENT');
-      expect(turn.resultOf('r2') ?? '').not.toContain('REVOCABLE-CONTENT');
+      expectRefusedCall(turn, 'r2', 'read after revocation', ACCESS_REFUSAL);
+      expect(turn.resultOf('r2')).not.toContain('REVOCABLE-CONTENT');
     } finally {
       restore();
     }
@@ -537,8 +673,8 @@ describe('[TP3.3][TP3.4] disabled and unknown capabilities fail closed; no shell
 
   it('[TP3.3] tool names the model invents (including ones containing read/list/get) execute nothing and change nothing', async () => {
     const p = page(w.spaceA, 'Unknown tool target');
-    const before =
-      pagesIn(w.spaceA) + (await controlledStateFingerprint(w.db!.admin));
+    const before = pagesIn(w.spaceA);
+    const stateBefore = await fingerprint();
     const names = [
       'run_shell',
       'read_everything',
@@ -567,21 +703,29 @@ describe('[TP3.3][TP3.4] disabled and unknown capabilities fail closed; no shell
         /supervisor\.acc3|composio|parallel/i.test(o.url),
       ),
     ).toEqual([]);
-    expect(
-      pagesIn(w.spaceA) + (await controlledStateFingerprint(w.db!.admin)),
-    ).toBe(before);
-    for (let i = 0; i < names.length; i += 1)
-      expect(turn.resultOf(`u${i}`) ?? '', names[i]).not.toMatch(
+    expect(pagesIn(w.spaceA)).toBe(before);
+    const stateAfter = await fingerprint();
+    expect(stateAfter.state, 'config, intents, tasks, findings, outbox, Redis').toBe(
+      stateBefore.state,
+    );
+    expect(stateAfter.receipts, 'no receipt for an unknown tool').toBe(
+      stateBefore.receipts,
+    );
+    // the turn ran and every invented tool was answered with a visible error
+    for (let i = 0; i < names.length; i += 1) {
+      expectRefusedCall(turn, `u${i}`, names[i], UNKNOWN_TOOL);
+      expect(turn.resultOf(`u${i}`), names[i]).not.toMatch(
         /root:|BEGIN [A-Z ]*PRIVATE KEY/,
       );
+    }
   });
 });
 
 describe('[TP3.5] instruction-like page text stays data', () => {
   it('[TP3.5][R8] a page whose prose is an injection payload reaches the next model request only as a tool-role message, never as instructions, and triggers no action', async () => {
     const p = page(w.spaceA, 'Hostile page', INJECTION);
-    const before =
-      pagesIn(w.spaceA) + (await controlledStateFingerprint(w.db!.admin));
+    const before = pagesIn(w.spaceA);
+    const stateBefore = await fingerprint();
     const turn = await runDotTurn(w, w.incident.id, [
       {
         toolCalls: [
@@ -604,14 +748,18 @@ describe('[TP3.5] instruction-like page text stays data', () => {
         r.content.includes('IGNORE ALL PREVIOUS INSTRUCTIONS'),
       ),
     ).toBe(true);
-    expect(
-      pagesIn(w.spaceA) + (await controlledStateFingerprint(w.db!.admin)),
-    ).toBe(before);
+    expect(pagesIn(w.spaceA)).toBe(before);
+    const stateAfter = await fingerprint();
+    // the INJECTION payload asks for set_config and a Redis namespace flush: neither may have happened
+    expect(stateAfter.state).toBe(stateBefore.state);
+    // the legitimate read may add receipts, never remove them
+    expect(stateAfter.receipts).toBeGreaterThanOrEqual(stateBefore.receipts);
   });
 
   it('[TP3.5][M4] an owner page edit that mimics a ledger fact cannot change controlled configuration values', async () => {
-    const before = await controlledStateFingerprint(w.db!.admin);
+    const before = await fingerprint();
     const p = page(w.spaceA, 'Config claims');
+    const traceBefore = await pageLedgerTrace(w.db!.admin, p.id);
     const response = await w.authed(`/api/spaces/${w.spaceA}/pages/${p.id}`, {
       method: 'PATCH',
       body: JSON.stringify({
@@ -621,11 +769,12 @@ describe('[TP3.5] instruction-like page text stays data', () => {
       }),
     });
     expect(response.status).toBe(200);
-    expect(await controlledStateFingerprint(w.db!.admin)).toBe(before);
-    const hits = await tablesContaining(w.db!.admin, `opendots.page/${p.id}`);
+    expect((await fingerprint()).state).toBe(before.state);
+    const traceAfter = await pageLedgerTrace(w.db!.admin, p.id);
     expect(
-      hits,
-      'the page revision is a traceable ledger dependency, not a config value',
-    ).not.toEqual([]);
+      traceAfter.revisions.length,
+      'the edit adds exactly one source revision (a traceable ledger dependency, not a config value)',
+    ).toBe(traceBefore.revisions.length + 1);
+    expect(traceAfter.revisions).toContain(2);
   });
 });
