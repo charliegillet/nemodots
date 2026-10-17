@@ -8,44 +8,71 @@
 // Expected values come from ARCHITECTURE 9.1/9.2 and the oracle invariants. The
 // healthy baseline is read from the seeded database at run time (never
 // hard-coded here) because the baseline lives only in sandbox/seed.ts.
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, describe, expect, it } from 'vitest';
+import { CheckoutHealthResponseSchema } from '../../../../src/server/nemodots/contracts/index.js';
 import { PROBE } from '../oracle/checkout-invariants.js';
 import { newOwnerToken } from './helpers/config.js';
 import { NemoApi, checkoutRequest, loadSample, sleep } from './helpers/http.js';
 import { Sut } from './helpers/sut.js';
-import { StepApplier, verifierProbe } from './helpers/trial.js';
+import { StepApplier, probeHeader, verifierProbe } from './helpers/trial.js';
 import { VerifierDb } from './helpers/verifier-db.js';
-import { scoreInvariants } from './helpers/scoring.js';
-import type { TrialRecord } from './helpers/record.js';
+import { scoreProbe } from './helpers/scoring.js';
 
-let sut: Sut;
+let sut: Sut | undefined;
 let api: NemoApi;
 let db: VerifierDb;
 let applier: StepApplier;
 let baseline: Record<string, unknown> = {};
+let current: 'sandbox' | 'app' | null = null;
+let starting: Promise<void> | null = null;
 const banner = (n: number) => `adapter banner ${n}`;
 
-beforeAll(async () => {
-  const token = newOwnerToken();
-  sut = await Sut.start({
-    trialId: 'adapter-scenarios',
-    ownerToken: token,
-    separateWorker: false,
-    inferenceMode: 'blocked',
-  });
-  api = new NemoApi(token);
-  db = await VerifierDb.connect(sut.database);
-  applier = new StepApplier(sut, api, db);
-  await applier.open();
-  baseline = Object.fromEntries(
-    Object.entries(await db.configEntries()).map(([k, v]) => [k, v.value]),
-  );
-}, 300_000);
+async function teardown() {
+  await applier?.close().catch(() => undefined);
+  await db?.close().catch(() => undefined);
+  await sut?.stop();
+  sut = undefined;
+  current = null;
+}
+
+/**
+ * Starts (or switches to) the requested environment; every test awaits it so a
+ * failure is reported on each test rather than as a skip. "sandbox" is the
+ * checkout API plus PostgreSQL/Redis without the app; "app" adds the OpenDots
+ * server with NemoDots in blocked mode (no inference is ever spent).
+ */
+async function use(kind: 'sandbox' | 'app'): Promise<void> {
+  await starting;
+  if (current === kind) return;
+  starting = (async () => {
+    await teardown();
+    const token = newOwnerToken();
+    sut = await Sut.start({
+      trialId: `adapter-${kind}`,
+      ownerToken: token,
+      separateWorker: false,
+      inferenceMode: 'blocked',
+      withApp: kind === 'app',
+    });
+    api = new NemoApi(token);
+    db = await VerifierDb.connect(sut.database);
+    applier = new StepApplier(sut, api, db);
+    await applier.open();
+    baseline = Object.fromEntries(
+      Object.entries(await db.configEntries()).map(([k, v]) => [k, v.value]),
+    );
+    current = kind;
+  })();
+  try {
+    await starting;
+  } finally {
+    starting = null;
+  }
+}
 
 afterAll(async () => {
-  await applier?.close();
-  await db?.close();
-  await sut?.stop();
+  await starting?.catch(() => undefined);
+  await teardown();
 }, 120_000);
 
 /** owner repair through the public route, with the current version read by the verifier */
@@ -61,12 +88,31 @@ async function ownerSet(key: string, value: unknown) {
   return { response, entry };
 }
 
+/** Polls /health until it reports `want` (health reflects recent errors, so recovery may lag a few seconds). */
+async function waitForHealth(
+  want: string,
+  timeoutMs = 20_000,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const body = (await checkoutRequest('GET', '/health')).body as {
+      status?: string;
+    };
+    const last = body?.status ?? 'unreadable';
+    if (last === want || Date.now() > deadline) return last;
+    await sleep(500);
+  }
+}
+
 async function restoreBaseline(keys: string[]) {
   for (const key of keys) {
-    const current = (await db.configEntries())[key];
-    if (JSON.stringify(current.value) !== JSON.stringify(baseline[key])) {
-      const { response } = await ownerSet(key, baseline[key]);
-      expect(response.status, `restoring ${key}`).toBe(200);
+    const live = (await db.configEntries())[key];
+    if (JSON.stringify(live.value) !== JSON.stringify(baseline[key])) {
+      const step = await inject(
+        key,
+        baseline[key] as string | number | boolean,
+      );
+      expect(step.ok, `restoring ${key}: ${step.error}`).toBe(true);
     }
   }
   await sleep(600); // checkout config cache is 250 ms
@@ -82,6 +128,7 @@ const inject = (key: string, value: string | number | boolean) =>
 
 describe('G6.10 deterministic adapter: healthy checkout baseline', () => {
   it('G6.3 healthy checkout answers health, ready, products and inventory', async () => {
+    await use('sandbox');
     const health = await checkoutRequest('GET', '/health');
     expect(health.status).toBe(200);
     expect((health.body as { status: string }).status).toBe('ok');
@@ -93,6 +140,7 @@ describe('G6.10 deterministic adapter: healthy checkout baseline', () => {
   });
 
   it('G6.4 INV-1 read-only requests leave the business hash unchanged', async () => {
+    await use('sandbox');
     const before = await db.snapshot();
     for (const path of [
       '/health',
@@ -107,15 +155,10 @@ describe('G6.10 deterministic adapter: healthy checkout baseline', () => {
   });
 
   it('G6.3/G6.4 one fresh probe order creates exactly one order, decrements inventory, reads back', async () => {
+    await use('sandbox');
     const before = await db.snapshot();
     const probe = await verifierProbe(db, 2);
-    const record = {
-      probe,
-      snapshot: null,
-      snapshotAfterProbe: null,
-      businessBefore: before,
-    } as unknown as TrialRecord;
-    const checks = scoreInvariants(record);
+    const checks = scoreProbe(probe);
     expect(checks['INV-2'], checks['INV-2'].detail).toMatchObject({ ok: true });
     expect(checks['INV-3'], checks['INV-3'].detail).toMatchObject({ ok: true });
     expect(checks['INV-4'], checks['INV-4'].detail).toMatchObject({ ok: true });
@@ -125,37 +168,38 @@ describe('G6.10 deterministic adapter: healthy checkout baseline', () => {
 });
 
 describe('G6.10 deterministic adapter: documented fault symptoms and bounded repair', () => {
-  it('F5 maintenance flag: 503 writes_disabled, health degraded, owner repair restores ok', async () => {
+  afterEach(async () => {
+    if (current !== 'sandbox') return;
+    // a failed assertion must not leak a fault into the next scenario
+    await restoreBaseline(Object.keys(baseline));
+  });
+
+  it('F5 maintenance flag: 503 writes_disabled, health degraded, a bounded repair restores ok', async () => {
+    await use('sandbox');
     const step = await inject('orders.write_enabled', false);
     expect(step.ok, step.error).toBe(true);
     await sleep(600);
     const order = await checkoutRequest('POST', '/orders', {
-      body: { sku: PROBE.sku, quantity: 1 },
-      headers: { [PROBE.header]: 'acc6-adapter-f5' },
+      body: { items: [{ sku: PROBE.sku, quantity: 1 }] },
+      headers: { [PROBE.header]: probeHeader('acc6-adapter-f5') },
     });
     expect(order.status).toBe(503);
     expect(order.text).toContain('writes_disabled');
     const health = (await checkoutRequest('GET', '/health')).body as {
       status: string;
-      errorClasses: string[];
+      errors: string[];
     };
     expect(health.status).toBe('degraded');
-    expect(health.errorClasses).toContain('writes_disabled');
+    expect(health.errors).toContain('writes_disabled');
     const business = await db.snapshot();
-    const repaired = await ownerSet(
-      'orders.write_enabled',
-      baseline['orders.write_enabled'],
-    );
-    expect(repaired.response.status).toBe(200);
+    await restoreBaseline(['orders.write_enabled']);
     await sleep(600);
-    expect(
-      ((await checkoutRequest('GET', '/health')).body as { status: string })
-        .status,
-    ).toBe('ok');
+    expect(await waitForHealth('ok')).toBe('ok');
     expect((await db.snapshot()).hash).toBe(business.hash); // the failed order wrote nothing
   });
 
   it('F3 pool starvation: 503 pool_timeout under concurrency, health degraded, raising db.pool_max repairs', async () => {
+    await use('sandbox');
     expect((await inject('db.pool_max', 1)).ok).toBe(true);
     expect((await inject('db.statement_timeout_ms', 50)).ok).toBe(true);
     await sleep(600);
@@ -165,18 +209,16 @@ describe('G6.10 deterministic adapter: documented fault symptoms and bounded rep
     expect(timeouts).toBeGreaterThan(0);
     const degraded = (await checkoutRequest('GET', '/health')).body as {
       status: string;
-      errorClasses: string[];
+      errors: string[];
     };
     expect(['degraded', 'down']).toContain(degraded.status);
     await restoreBaseline(['db.pool_max', 'db.statement_timeout_ms']);
     expect((await loadSample(200, 12, PROBE.sku)).poolTimeout503).toBe(0);
-    expect(
-      ((await checkoutRequest('GET', '/health')).body as { status: string })
-        .status,
-    ).toBe('ok');
+    expect(await waitForHealth('ok')).toBe('ok');
   });
 
   it('F2 schema mismatch: 500 cache_decode_error with expected and found schema in /metrics', async () => {
+    await use('sandbox');
     await checkoutRequest('GET', '/products'); // warm the cache under the baseline schema
     const schema = Number(baseline['cache.schema_version']);
     const injected = schema >= 9 ? schema - 1 : schema + 1;
@@ -194,6 +236,7 @@ describe('G6.10 deterministic adapter: documented fault symptoms and bounded rep
   });
 
   it('F4 stale replica routing: an order succeeds while the API inventory view disagrees with the authority', async () => {
+    await use('sandbox');
     expect((await inject('routing.inventory_source', 'replica_stale')).ok).toBe(
       true,
     );
@@ -211,38 +254,31 @@ describe('G6.10 deterministic adapter: documented fault symptoms and bounded rep
     expect(fixed.quantity).toBe(await db.inventoryQuantity(PROBE.sku));
   });
 
-  it('F1 stale namespace needs the injector to seed stale blobs (entry point check)', async () => {
-    const step = await inject('cache.namespace', 'acc6-adapter-ns').then(
-      (s) => s,
-      (error: Error) => ({ ok: false, error: error.message }),
-    );
-    // seedStaleBlobs is only required when a step asks for it; this scenario asks.
-    const withBlobs = await applier
-      .apply(1, {
-        trigger: { kind: 'pre_start' },
-        key: 'cache.namespace',
-        value: 'acc6-adapter-ns2',
-        actor: 'injector',
-        requiresStaleBlobs: true,
-      })
-      .then(
-        () => 'applied',
-        (error: Error) => error.message,
-      );
-    expect(step.ok).toBe(true);
-    expect(withBlobs).toBe('applied');
+  it('F1 stale namespace: blobs of another schema make reads fail with cache_decode_error; restoring the namespace repairs', async () => {
+    await use('sandbox');
+    const step = await applier.apply(0, {
+      trigger: { kind: 'pre_start' },
+      key: 'cache.namespace',
+      value: 'acc6-stale-ns',
+      actor: 'injector',
+      requiresStaleBlobs: true,
+    });
+    expect(step.ok, step.error).toBe(true);
+    await sleep(600);
+    const read = await checkoutRequest('GET', '/products');
+    expect(read.status).toBe(500);
+    expect(read.text).toContain('cache_decode_error');
     await restoreBaseline(['cache.namespace']);
+    expect((await checkoutRequest('GET', '/products')).status).toBe(200);
   });
 
-  it('G6.2 a benign banner change by the owner moves no checkout health or business data', async () => {
+  it('G6.2 a benign banner change moves no checkout health or business data', async () => {
+    await use('sandbox');
     const before = await db.snapshot();
-    const { response } = await ownerSet('ui.banner_text', banner(1));
-    expect(response.status).toBe(200);
+    const step = await inject('ui.banner_text', banner(1));
+    expect(step.ok, step.error).toBe(true);
     await sleep(600);
-    expect(
-      ((await checkoutRequest('GET', '/health')).body as { status: string })
-        .status,
-    ).toBe('ok');
+    expect(await waitForHealth('ok')).toBe('ok');
     expect((await db.snapshot()).hash).toBe(before.hash);
     await restoreBaseline(['ui.banner_text']);
   });
@@ -250,6 +286,7 @@ describe('G6.10 deterministic adapter: documented fault symptoms and bounded rep
 
 describe('G6.6 deterministic adapter: version authority compare-and-set', () => {
   it('G6.6 a stale expectedVersion is rejected with 409 and leaves version and history unchanged', async () => {
+    await use('app');
     const before = (await db.configEntries())['ui.banner_text'];
     const historyBefore = (await db.configVersions()).length;
     const response = await api.post(
@@ -268,6 +305,7 @@ describe('G6.6 deterministic adapter: version authority compare-and-set', () => 
   });
 
   it('G6.6 a correct expectedVersion advances by exactly one and records an owner history row', async () => {
+    await use('app');
     const before = (await db.configEntries())['ui.banner_text'];
     const { response } = await ownerSet('ui.banner_text', banner(3));
     expect(response.status).toBe(200);
@@ -282,6 +320,7 @@ describe('G6.6 deterministic adapter: version authority compare-and-set', () => 
   });
 
   it('G6.6 two simultaneous edits at the same version serialize: exactly one wins', async () => {
+    await use('app');
     const before = (await db.configEntries())['ui.banner_text'];
     const attempt = (n: number) =>
       api.post(`/sandbox/sources/${encodeURIComponent('ui.banner_text')}`, {
@@ -299,6 +338,7 @@ describe('G6.6 deterministic adapter: version authority compare-and-set', () => 
   });
 
   it('G6.6 an injector write is attributed to the injector and never to an action', async () => {
+    await use('sandbox');
     const step = await inject('ui.banner_text', banner(20));
     expect(step.ok, step.error).toBe(true);
     const row = (await db.configVersions()).find(
@@ -309,8 +349,20 @@ describe('G6.6 deterministic adapter: version authority compare-and-set', () => 
   });
 });
 
+describe('G6.10 deterministic adapter: proxied checkout health contract', () => {
+  it('G6.10 GET /sandbox/checkout/health matches the public CheckoutHealthResponse contract', async () => {
+    await use('app');
+    const response = await api.get('/sandbox/checkout/health');
+    expect(response.status).toBe(200);
+    const parsed = CheckoutHealthResponseSchema.safeParse(response.body);
+    expect(parsed.success, JSON.stringify(parsed.error?.issues)).toBe(true);
+    expect(parsed.data?.status).toBe('ok');
+  });
+});
+
 describe('G6.2/G6.10 deterministic adapter: honest modes', () => {
   it('G6.10 in blocked mode mission creation is refused with variable names only', async () => {
+    await use('app');
     const health = await api.get<{ mode: string; missingEnv: string[] }>(
       '/health',
     );
@@ -331,6 +383,7 @@ describe('G6.2/G6.10 deterministic adapter: honest modes', () => {
   });
 
   it('G6.10 a body mode that disagrees with the server mode is refused, never silently relabelled', async () => {
+    await use('app');
     const created = await api.post('/missions', {
       goal: 'Investigate the checkout service.',
       mode: 'live',

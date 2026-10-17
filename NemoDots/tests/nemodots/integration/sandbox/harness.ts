@@ -47,8 +47,10 @@ export interface Sandbox {
       body?: unknown;
       headers?: Record<string, string>;
     },
-  ): Promise<{ status: number; body: any }>;
+  ): Promise<{ status: number; body: Json }>;
   probeHeader(runId: string): Record<string, string>;
+  /** A fetch that routes to the in-process app, for readers/probe under test. */
+  fetch: typeof fetch;
   /** Starts a development-set scenario with the injector role. */
   inject(id: string, seed?: number): Promise<ScenarioRun>;
 }
@@ -119,13 +121,21 @@ export async function withSandbox<T>(
                 init.body === undefined ? undefined : JSON.stringify(init.body),
             });
             const text = await response.text();
-            let body: unknown = null;
+            let body: unknown;
             try {
               body = JSON.parse(text);
             } catch {
               body = text;
             }
             return { status: response.status, body };
+          },
+          fetch: async (input, init) => {
+            const url = new URL(String(input));
+            return app.request(url.pathname + url.search, {
+              method: init?.method,
+              headers: Object.fromEntries(new Headers(init?.headers).entries()),
+              body: init?.body as string | undefined,
+            });
           },
           probeHeader: (runId) => ({
             'x-nemodots-probe': probeHeaderValue(probeSecret, runId),

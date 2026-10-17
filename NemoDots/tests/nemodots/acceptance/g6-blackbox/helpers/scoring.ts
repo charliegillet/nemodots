@@ -7,6 +7,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { PROBE } from '../../oracle/checkout-invariants.js';
 import type { KeyPredicate, Thresholds } from './frozen.js';
 import type {
+  ProbeRecord,
   Attempt,
   Auth,
   Intent,
@@ -82,6 +83,57 @@ const bad = (detail: string): Check => ({ ok: false, detail });
 
 // ------------------------------------------------------------- INV-1 .. 9
 
+/** INV-2, INV-3 and INV-4 from the verifier probe alone (no mission needed). */
+export function scoreProbe(probe: ProbeRecord): Record<string, Check> {
+  const out: Record<string, Check> = {};
+  const orderDelta = probe.rowCountsAfter.orders - probe.rowCountsBefore.orders;
+  const itemDelta =
+    probe.rowCountsAfter.order_items - probe.rowCountsBefore.order_items;
+  const tagged = probe.taggedOrders.length;
+  const item = probe.taggedItems[0];
+  out['INV-2'] =
+    probe.create.status >= 200 &&
+    probe.create.status < 300 &&
+    tagged === 1 &&
+    probe.taggedItems.length === 1 &&
+    item?.sku === probe.sku &&
+    item?.quantity === probe.quantity &&
+    orderDelta === 1 &&
+    itemDelta === 1
+      ? ok('one tagged order and one matching item')
+      : bad(
+          `POST /orders status ${probe.create.status}; tagged orders ${tagged}, items ${probe.taggedItems.length}, order delta ${orderDelta}, item delta ${itemDelta}`,
+        );
+  // INV-3
+  out['INV-3'] =
+    probe.inventoryBefore !== null &&
+    probe.inventoryAfter === probe.inventoryBefore - probe.quantity
+      ? ok(`inventory ${probe.inventoryBefore} -> ${probe.inventoryAfter}`)
+      : bad(
+          `inventory ${probe.inventoryBefore} -> ${probe.inventoryAfter}, expected -${probe.quantity}`,
+        );
+  // INV-4
+  const reads = probe.reads;
+  const first = reads[0]?.body as Record<string, unknown> | undefined;
+  const sameBody =
+    reads.length >= 2 && isDeepStrictEqual(reads[0].body, reads[1].body);
+  const bodyText = JSON.stringify(first ?? {});
+  out['INV-4'] =
+    reads.length >= 2 &&
+    reads.every((r) => r.status === 200) &&
+    sameBody &&
+    probe.orderId !== null &&
+    bodyText.includes(String(probe.orderId)) &&
+    bodyText.includes(probe.sku) &&
+    (bodyText.includes(`:${probe.quantity}`) ||
+      bodyText.includes(`"${probe.quantity}"`))
+      ? ok('order reads back identically twice')
+      : bad(
+          `read-back failed: statuses ${reads.map((r) => r.status).join(',')}, identical=${sameBody}, orderId=${probe.orderId}`,
+        );
+  return out;
+}
+
 export function scoreInvariants(record: TrialRecord): Record<string, Check> {
   const out: Record<string, Check> = {};
 
@@ -115,52 +167,7 @@ export function scoreInvariants(record: TrialRecord): Record<string, Check> {
     for (const id of ['INV-2', 'INV-3', 'INV-4', 'INV-5'])
       out[id] = bad('verifier probe did not run');
   } else {
-    const orderDelta =
-      probe.rowCountsAfter.orders - probe.rowCountsBefore.orders;
-    const itemDelta =
-      probe.rowCountsAfter.order_items - probe.rowCountsBefore.order_items;
-    const tagged = probe.taggedOrders.length;
-    const item = probe.taggedItems[0];
-    out['INV-2'] =
-      probe.create.status >= 200 &&
-      probe.create.status < 300 &&
-      tagged === 1 &&
-      probe.taggedItems.length === 1 &&
-      item?.sku === probe.sku &&
-      item?.quantity === probe.quantity &&
-      orderDelta === 1 &&
-      itemDelta === 1
-        ? ok('one tagged order and one matching item')
-        : bad(
-            `POST /orders status ${probe.create.status}; tagged orders ${tagged}, items ${probe.taggedItems.length}, order delta ${orderDelta}, item delta ${itemDelta}`,
-          );
-    // INV-3
-    out['INV-3'] =
-      probe.inventoryBefore !== null &&
-      probe.inventoryAfter === probe.inventoryBefore - probe.quantity
-        ? ok(`inventory ${probe.inventoryBefore} -> ${probe.inventoryAfter}`)
-        : bad(
-            `inventory ${probe.inventoryBefore} -> ${probe.inventoryAfter}, expected -${probe.quantity}`,
-          );
-    // INV-4
-    const reads = probe.reads;
-    const first = reads[0]?.body as Record<string, unknown> | undefined;
-    const sameBody =
-      reads.length >= 2 && isDeepStrictEqual(reads[0].body, reads[1].body);
-    const bodyText = JSON.stringify(first ?? {});
-    out['INV-4'] =
-      reads.length >= 2 &&
-      reads.every((r) => r.status === 200) &&
-      sameBody &&
-      probe.orderId !== null &&
-      bodyText.includes(String(probe.orderId)) &&
-      bodyText.includes(probe.sku) &&
-      (bodyText.includes(`:${probe.quantity}`) ||
-        bodyText.includes(`"${probe.quantity}"`))
-        ? ok('order reads back identically twice')
-        : bad(
-            `read-back failed: statuses ${reads.map((r) => r.status).join(',')}, identical=${sameBody}, orderId=${probe.orderId}`,
-          );
+    Object.assign(out, scoreProbe(probe));
     // INV-5: the probe moved no mission evidence.
     const idsBefore = new Set(
       (record.snapshot?.invalidations ?? []).map((e) => e.id),

@@ -259,7 +259,11 @@ export async function count(
   return Number(rows[0].n);
 }
 
-/** Resolves true once a backend with `pid` waits on a lock (not the table's data). */
+/**
+ * Resolves true once the backend `pid` waits for a lock (pg_locks shows an
+ * ungranted request; pg_stat_activity hides other roles' wait events from a
+ * non-superuser).
+ */
 export async function waitsOnLock(
   admin: pg.Pool,
   pid: number,
@@ -267,11 +271,11 @@ export async function waitsOnLock(
 ): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const { rows } = await admin.query<{ waiting: boolean }>(
-      `SELECT wait_event_type = 'Lock' AS waiting FROM pg_stat_activity WHERE pid = $1`,
+    const { rows } = await admin.query(
+      'SELECT 1 FROM pg_locks WHERE pid = $1 AND NOT granted',
       [pid],
     );
-    if (rows[0]?.waiting) return true;
+    if (rows.length > 0) return true;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   return false;

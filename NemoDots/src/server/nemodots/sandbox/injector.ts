@@ -206,21 +206,18 @@ export class Injector {
     const waitForProposal = (step: ResolvedStep) =>
       new Promise<string | null>((resolve) => {
         const targets = new Set(Object.keys(step.values ?? {}));
-        let timer: ReturnType<typeof setTimeout> | undefined;
         const finish = (key: string | null) => {
           const at = waiters.indexOf(waiter);
           if (at >= 0) waiters.splice(at, 1);
-          if (timer) {
-            clearTimeout(timer);
-            timers.delete(timer);
-          }
+          clearTimeout(timer);
+          timers.delete(timer);
           resolve(key);
         };
         const waiter = (key: string) => {
           if (targets.has(key)) finish(key);
         };
         waiters.push(waiter);
-        timer = setTimeout(() => finish(null), step.timeoutMs);
+        const timer = setTimeout(() => finish(null), step.timeoutMs);
         timers.add(timer);
         void cancelGate.promise.then(() => finish(null));
       });

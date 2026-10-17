@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- OpenAI wire payloads are untyped JSON */
 // Independent derivations over a mission snapshot and its event stream. They
 // use only recorded data (readsets, inherited vectors, output vectors, event
 // order) and a traversal written here, never production graph code.
@@ -54,7 +55,9 @@ export function affectedTaskIds(snapshot: SnapshotLike, oldReceiptId: string) {
   for (const attempt of snapshot.attempts) {
     if (
       attempt.readSetReceiptIds.includes(oldReceiptId) ||
-      attempt.inheritedDependencyVector.some((e) => e.receiptId === oldReceiptId)
+      attempt.inheritedDependencyVector.some(
+        (e) => e.receiptId === oldReceiptId,
+      )
     )
       affected.add(attempt.taskId);
   }
@@ -66,14 +69,19 @@ export function affectedTaskIds(snapshot: SnapshotLike, oldReceiptId: string) {
 
 export function preservedTaskIds(snapshot: SnapshotLike, oldReceiptId: string) {
   const affected = affectedTaskIds(snapshot, oldReceiptId);
-  return new Set(snapshot.tasks.filter((t) => !affected.has(t.id)).map((t) => t.id));
+  return new Set(
+    snapshot.tasks.filter((t) => !affected.has(t.id)).map((t) => t.id),
+  );
 }
 
 /** Receipts that were superseded, with the receipt that replaced them. */
 export function supersessions(snapshot: SnapshotLike) {
   return snapshot.receipts
     .filter((r) => r.supersededBy)
-    .map((r) => ({ old: r, next: snapshot.receipts.find((n) => n.id === r.supersededBy) ?? null }));
+    .map((r) => ({
+      old: r,
+      next: snapshot.receipts.find((n) => n.id === r.supersededBy) ?? null,
+    }));
 }
 
 export function childrenOf(snapshot: SnapshotLike, taskId: string) {
@@ -83,7 +91,10 @@ export function childrenOf(snapshot: SnapshotLike, taskId: string) {
 /** Maximum depth and breadth recorded in the task tree. */
 export function treeShape(snapshot: SnapshotLike) {
   const maxDepth = Math.max(0, ...snapshot.tasks.map((t) => t.depth));
-  const maxBreadth = Math.max(0, ...snapshot.tasks.map((t) => childrenOf(snapshot, t.id).length));
+  const maxBreadth = Math.max(
+    0,
+    ...snapshot.tasks.map((t) => childrenOf(snapshot, t.id).length),
+  );
   return { total: snapshot.tasks.length, maxDepth, maxBreadth };
 }
 
@@ -95,7 +106,8 @@ export function hasCycle(snapshot: SnapshotLike) {
     if (state === 1) return true;
     if (state === 2) return false;
     color.set(id, 1);
-    for (const p of byId.get(id)?.prerequisites ?? []) if (byId.has(p) && visit(p)) return true;
+    for (const p of byId.get(id)?.prerequisites ?? [])
+      if (byId.has(p) && visit(p)) return true;
     color.set(id, 2);
     return false;
   };
@@ -103,7 +115,10 @@ export function hasCycle(snapshot: SnapshotLike) {
 }
 
 type Payload = MissionEvent['payload'];
-export function ofKind<K extends Payload['kind']>(events: readonly MissionEvent[], kind: K) {
+export function ofKind<K extends Payload['kind']>(
+  events: readonly MissionEvent[],
+  kind: K,
+) {
   return events.filter((e) => e.payload.kind === kind) as (MissionEvent & {
     payload: Extract<Payload, { kind: K }>;
   })[];
@@ -112,12 +127,17 @@ export function ofKind<K extends Payload['kind']>(events: readonly MissionEvent[
 /** attemptId -> taskId from attempt.started events. */
 export function attemptTaskMap(events: readonly MissionEvent[]) {
   const map = new Map<string, string>();
-  for (const e of ofKind(events, 'attempt.started')) map.set(e.payload.attemptId, e.payload.taskId);
+  for (const e of ofKind(events, 'attempt.started'))
+    map.set(e.payload.attemptId, e.payload.taskId);
   return map;
 }
 
 /** Model calls recorded after `afterEventId` for any of `taskIds`. */
-export function modelCallsFor(events: readonly MissionEvent[], taskIds: ReadonlySet<string>, afterEventId = 0) {
+export function modelCallsFor(
+  events: readonly MissionEvent[],
+  taskIds: ReadonlySet<string>,
+  afterEventId = 0,
+) {
   return ofKind(events, 'model_call.recorded').filter(
     (e) => e.id > afterEventId && taskIds.has(e.payload.taskId),
   );
@@ -126,7 +146,8 @@ export function modelCallsFor(events: readonly MissionEvent[], taskIds: Readonly
 /** Mutating attempts per (task) after an event id: used for repair-storm bounds. */
 export function attemptsPerTask(snapshot: SnapshotLike) {
   const count = new Map<string, number>();
-  for (const a of snapshot.attempts) count.set(a.taskId, (count.get(a.taskId) ?? 0) + 1);
+  for (const a of snapshot.attempts)
+    count.set(a.taskId, (count.get(a.taskId) ?? 0) + 1);
   return count;
 }
 
@@ -144,11 +165,13 @@ export function repairsByInvalidation(snapshot: SnapshotLike) {
 /** Fencing tokens must strictly increase per task across attempts (no reuse). */
 export function fencingMonotonic(snapshot: SnapshotLike) {
   const byTask = new Map<string, AttemptLike[]>();
-  for (const a of snapshot.attempts) byTask.set(a.taskId, [...(byTask.get(a.taskId) ?? []), a]);
+  for (const a of snapshot.attempts)
+    byTask.set(a.taskId, [...(byTask.get(a.taskId) ?? []), a]);
   for (const list of byTask.values()) {
     const sorted = [...list].sort((a, b) => a.n - b.n);
     for (let i = 1; i < sorted.length; i += 1)
-      if (sorted[i].lease.fencingToken <= sorted[i - 1].lease.fencingToken) return false;
+      if (sorted[i].lease.fencingToken <= sorted[i - 1].lease.fencingToken)
+        return false;
   }
   return true;
 }
@@ -167,11 +190,16 @@ export const LEAK_PATTERNS: readonly RegExp[] = [
   /acceptance[- ]contract/i,
 ];
 
-export function findLeaks(texts: readonly string[], extra: readonly string[] = []) {
+export function findLeaks(
+  texts: readonly string[],
+  extra: readonly string[] = [],
+) {
   const hits = new Set<string>();
   for (const text of texts) {
-    for (const pattern of LEAK_PATTERNS) if (pattern.test(text)) hits.add(pattern.source);
-    for (const word of extra) if (text.includes(word)) hits.add(`literal:${word}`);
+    for (const pattern of LEAK_PATTERNS)
+      if (pattern.test(text)) hits.add(pattern.source);
+    for (const word of extra)
+      if (text.includes(word)) hits.add(`literal:${word}`);
   }
   return [...hits];
 }

@@ -16,7 +16,6 @@ import {
   type OpenInvalidationIntent,
   type ReceiptId,
   type RecoveryEvent,
-  type RecoveryEventId,
   type RecoveryKind,
   type RecoveryPort,
   type SourceKey,
@@ -25,7 +24,7 @@ import {
 import { finishAttempt, lockAttempts } from './attempts.js';
 import { EventBuffer } from './events.js';
 import { withTransaction } from '../db/tx.js';
-import type { SupportErrorShape } from './errors.js';
+import { MissionStateError, type SupportErrorShape } from './errors.js';
 import {
   iso,
   toRecovery,
@@ -74,6 +73,12 @@ type RecoveryDeps = Pick<
 export interface RecoveryOptions {
   /** A root task invalidation re-invokes the planner (default true; bounded by replanCap). */
   replanOnRootInvalidation?: boolean;
+  /**
+   * Pauses a mission whose closure exceeded the cap (finding C14): the coarse
+   * event affects every non-terminal attempt/intent, so the mission stops
+   * before anything restarts. Wired to pauseMission by createCoordinator.
+   */
+  pauseOnClosureCap?: (missionId: MissionId) => Promise<void>;
 }
 
 type StoredEvent = InvalidationEvent;
@@ -205,7 +210,9 @@ export async function upsertInvalidation(
   const next: StoredEvent = {
     ...stored,
     affected: merged,
-    perMission: [{ ...entry, affected: merged, preserved: { taskIds: preserved } }],
+    perMission: [
+      { ...entry, affected: merged, preserved: { taskIds: preserved } },
+    ],
   };
   const { rows } = await tx.client.query<InvalidationRow>(
     `UPDATE coordinator.invalidations
@@ -265,11 +272,10 @@ export async function evaluateOpen(
   }));
   const attemptTask = new Map(attemptRows.map((row) => [row.id, row.task_id]));
   const taskRows = (
-    await client.query<
-      Pick<TaskRow, 'id' | 'status' | 'output_id'>
-    >(`SELECT id, status, output_id FROM coordinator.tasks WHERE mission_id = $1`, [
-      missionId,
-    ])
+    await client.query<Pick<TaskRow, 'id' | 'status' | 'output_id'>>(
+      `SELECT id, status, output_id FROM coordinator.tasks WHERE mission_id = $1`,
+      [missionId],
+    )
   ).rows;
   const tasks = new Map(taskRows.map((row) => [row.id, row]));
   const outputRows = (
@@ -417,7 +423,6 @@ export async function scheduleReplan(
   return true;
 }
 
-
 /**
  * The open (non-terminal) postcondition task of the mission, or a new one.
  * System-created after a verified self-write; at most one is open per mission.
@@ -517,7 +522,13 @@ export async function releaseGate(
   return held.length;
 }
 
-const ACTIVE_FOR_REPAIR = new Set(['leased', 'running', 'waiting', 'succeeded', 'invalidated']);
+const ACTIVE_FOR_REPAIR = new Set([
+  'leased',
+  'running',
+  'waiting',
+  'succeeded',
+  'invalidated',
+]);
 
 /** The recovery transaction body for one mission's copy of an event. */
 export async function processInvalidation(
@@ -543,10 +554,21 @@ export async function processInvalidation(
     return;
   }
 
+  if (event.closure.capped || event.reason === 'closure_cap_exceeded')
+    await recordRecovery(tx, {
+      invalidationEventId: eventId,
+      missionId,
+      kind: 'mission_paused_closure_cap',
+      detail: `closure cap exceeded at ${event.closure.nodes} nodes: mission paused, coarse invalidation`,
+    });
+
   // 1. Status first: abort affected attempts that are still running.
   const listed = await lockAttempts(tx.client, affected.attemptIds, missionId);
   const taskIds = [
-    ...new Set([...affected.taskIds, ...listed.map((attempt) => attempt.task_id)]),
+    ...new Set([
+      ...affected.taskIds,
+      ...listed.map((attempt) => attempt.task_id),
+    ]),
   ];
   const extra = taskIds.length
     ? (
@@ -770,7 +792,9 @@ export async function recordPublicationRejection(
   const entry =
     vector.find((item) => item.receiptId === error.receiptId) ?? vector[0];
   if (!entry)
-    throw new Error('a publication without receipts cannot be support-rejected');
+    throw new Error(
+      'a publication without receipts cannot be support-rejected',
+    );
   const missionId = fenced.mission.id as MissionId;
   await finishAttempt(tx, fenced.attempt, 'invalidated', {
     abortReason: 'publication_rejected',
@@ -893,7 +917,18 @@ export function createRecovery(
       if (known) missions.push(entry.missionId);
     }
     // Phase 2: act on it. A crash between the phases is repaired by sweep().
-    for (const missionId of missions) await processOne(missionId, event.id);
+    const capped =
+      event.closure.capped || event.reason === 'closure_cap_exceeded';
+    for (const missionId of missions) {
+      if (capped && options.pauseOnClosureCap)
+        await options
+          .pauseOnClosureCap(missionId as MissionId)
+          .catch((error) => {
+            // already paused or finished: nothing left to pause
+            if (!(error instanceof MissionStateError)) throw error;
+          });
+      await processOne(missionId, event.id);
+    }
   }
 
   async function reevaluate(missionId: MissionId) {
@@ -925,7 +960,10 @@ export function createRecovery(
   }
 
   async function sweep() {
-    const pending = await deps.pool.query<{ event_id: string; mission_id: string }>(
+    const pending = await deps.pool.query<{
+      event_id: string;
+      mission_id: string;
+    }>(
       `SELECT event_id, mission_id FROM coordinator.invalidations
         WHERE processed_at IS NULL ORDER BY created_at LIMIT 50`,
     );

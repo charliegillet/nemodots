@@ -38,9 +38,15 @@ export async function finishAttempt(
             finished_at = now()
       WHERE id = $1 AND status = 'running'
       RETURNING *`,
-    [attempt.id, to, options.abortReason ?? null, options.failureReason ?? null],
+    [
+      attempt.id,
+      to,
+      options.abortReason ?? null,
+      options.failureReason ?? null,
+    ],
   );
-  if (rows.length === 0) throw new CasConflictError('attempt', attempt.id, 'running');
+  if (rows.length === 0)
+    throw new CasConflictError('attempt', attempt.id, 'running');
   const row = rows[0];
   if (to === 'aborted' && options.abortReason)
     tx.events.add(row.mission_id, {

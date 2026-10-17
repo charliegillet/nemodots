@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- OpenAI/AG-UI wire payloads are untyped JSON */
 // Verifier-owned OpenAI-compatible provider used in two modes:
 //  - scripted: deterministic replies that exercise server-side enforcement and
 //    failure handling. This establishes adapter/enforcement behaviour only,
@@ -22,7 +23,12 @@ export interface UsageSpec {
 }
 export type ProviderReply =
   | { type: 'content'; text: string; usage?: UsageSpec; delayMs?: number }
-  | { type: 'tool_calls'; calls: ToolCallSpec[]; usage?: UsageSpec; delayMs?: number }
+  | {
+      type: 'tool_calls';
+      calls: ToolCallSpec[];
+      usage?: UsageSpec;
+      delayMs?: number;
+    }
   | { type: 'refusal'; text: string }
   | { type: 'http'; status: number; body?: unknown; retryAfter?: number }
   | { type: 'hang'; ms?: number }
@@ -53,7 +59,9 @@ export interface RecordedCall {
   reply: ProviderReply['type'];
   status: number;
 }
-export type ProviderScript = (call: ProviderCall) => ProviderReply | Promise<ProviderReply>;
+export type ProviderScript = (
+  call: ProviderCall,
+) => ProviderReply | Promise<ProviderReply>;
 
 export interface ProviderOptions {
   port: number;
@@ -67,7 +75,9 @@ function messageText(message: any): string {
   const content = message?.content;
   if (typeof content === 'string') return content;
   if (Array.isArray(content))
-    return content.map((part) => (typeof part?.text === 'string' ? part.text : '')).join('\n');
+    return content
+      .map((part) => (typeof part?.text === 'string' ? part.text : ''))
+      .join('\n');
   return '';
 }
 function parseMaybe(text: string): unknown {
@@ -84,14 +94,23 @@ export interface Provider {
   readonly calls: RecordedCall[];
   setScript(script: ProviderScript): void;
   /** Hold the next matching reply until released (deterministic mid-attempt interleaving). */
-  gate(match: (call: ProviderCall) => boolean): { arrived: Promise<ProviderCall>; release(): void };
+  gate(match: (call: ProviderCall) => boolean): {
+    arrived: Promise<ProviderCall>;
+    release(): void;
+  };
   close(): Promise<void>;
 }
 
-export async function startProvider(options: ProviderOptions): Promise<Provider> {
+export async function startProvider(
+  options: ProviderOptions,
+): Promise<Provider> {
   const calls: RecordedCall[] = [];
   let script: ProviderScript =
-    options.script ?? (() => (options.upstream ? { type: 'passthrough' } : { type: 'http', status: 503 }));
+    options.script ??
+    (() =>
+      options.upstream
+        ? { type: 'passthrough' }
+        : { type: 'http', status: 503 });
   const gates: {
     match: (call: ProviderCall) => boolean;
     arrived: (call: ProviderCall) => void;
@@ -108,26 +127,41 @@ export async function startProvider(options: ProviderOptions): Promise<Provider>
     const path = (req.url ?? '').split('?')[0];
     try {
       if (req.method === 'GET' && path.endsWith('/models')) {
-        if (options.upstream && !options.script) return await forward(req, res, raw, path);
+        if (options.upstream && !options.script)
+          return await forward(req, res, raw, path);
         res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ object: 'list', data: [{ id: options.model, object: 'model', owned_by: 'verifier' }] }));
+        res.end(
+          JSON.stringify({
+            object: 'list',
+            data: [
+              { id: options.model, object: 'model', owned_by: 'verifier' },
+            ],
+          }),
+        );
         return;
       }
       if (req.method === 'POST' && path.endsWith('/chat/completions')) {
         const body = JSON.parse(raw) as Record<string, any>;
         sequence += 1;
-        const messages: any[] = Array.isArray(body.messages) ? body.messages : [];
+        const messages: any[] = Array.isArray(body.messages)
+          ? body.messages
+          : [];
         const toolMessages = messages
           .filter((message) => message?.role === 'tool')
           .map((message) => parseMaybe(messageText(message)));
         const call: ProviderCall = {
           n: sequence,
-          kind: Array.isArray(body.tools) && body.tools.length ? 'worker' : 'structured',
+          kind:
+            Array.isArray(body.tools) && body.tools.length
+              ? 'worker'
+              : 'structured',
           body,
           text: messages.map(messageText).join('\n'),
           toolResults: toolMessages.length,
           toolMessages,
-          toolNames: (body.tools ?? []).map((tool: any) => tool?.function?.name ?? tool?.name).filter(Boolean),
+          toolNames: (body.tools ?? [])
+            .map((tool: any) => tool?.function?.name ?? tool?.name)
+            .filter(Boolean),
           stream: body.stream === true,
         };
         const gate = gates.find((entry) => !entry.used && entry.match(call));
@@ -154,7 +188,11 @@ export async function startProvider(options: ProviderOptions): Promise<Provider>
       res.end(JSON.stringify({ error: 'not found' }));
     } catch (error) {
       res.writeHead(500, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ error: `provider stub failure: ${(error as Error).message}` }));
+      res.end(
+        JSON.stringify({
+          error: `provider stub failure: ${(error as Error).message}`,
+        }),
+      );
     }
   });
   server.on('connection', (socket) => {
@@ -162,7 +200,13 @@ export async function startProvider(options: ProviderOptions): Promise<Provider>
     socket.on('close', () => sockets.delete(socket));
   });
 
-  async function forward(req: http.IncomingMessage, res: http.ServerResponse, raw: string, path: string, record?: RecordedCall) {
+  async function forward(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    raw: string,
+    path: string,
+    record?: RecordedCall,
+  ) {
     if (!options.upstream) throw new Error('no upstream configured');
     const base = options.upstream.baseUrl.replace(/\/$/, '');
     const suffix = path.replace(/^\/v1/, '');
@@ -176,7 +220,8 @@ export async function startProvider(options: ProviderOptions): Promise<Provider>
     });
     if (record) record.status = upstream.status;
     res.writeHead(upstream.status, {
-      'content-type': upstream.headers.get('content-type') ?? 'application/json',
+      'content-type':
+        upstream.headers.get('content-type') ?? 'application/json',
     });
     if (!upstream.body) return void res.end();
     const reader = upstream.body.getReader();
@@ -188,7 +233,14 @@ export async function startProvider(options: ProviderOptions): Promise<Provider>
     res.end();
   }
 
-  async function respond(call: ProviderCall, reply: ProviderReply, req: http.IncomingMessage, res: http.ServerResponse, raw: string, record: RecordedCall) {
+  async function respond(
+    call: ProviderCall,
+    reply: ProviderReply,
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    raw: string,
+    record: RecordedCall,
+  ) {
     switch (reply.type) {
       case 'passthrough':
         return forward(req, res, raw, (req.url ?? '').split('?')[0], record);
@@ -197,24 +249,42 @@ export async function startProvider(options: ProviderOptions): Promise<Provider>
         return void req.socket.destroy();
       case 'hang': {
         record.status = 0;
-        await new Promise((resolve) => setTimeout(resolve, reply.ms ?? 600_000));
+        await new Promise((resolve) =>
+          setTimeout(resolve, reply.ms ?? 600_000),
+        );
         return void req.socket.destroy();
       }
       case 'http': {
         record.status = reply.status;
         res.writeHead(reply.status, {
           'content-type': 'application/json',
-          ...(reply.retryAfter ? { 'retry-after': String(reply.retryAfter) } : {}),
+          ...(reply.retryAfter
+            ? { 'retry-after': String(reply.retryAfter) }
+            : {}),
         });
-        return void res.end(JSON.stringify(reply.body ?? { error: { message: `scripted ${reply.status}`, type: 'scripted' } }));
+        return void res.end(
+          JSON.stringify(
+            reply.body ?? {
+              error: { message: `scripted ${reply.status}`, type: 'scripted' },
+            },
+          ),
+        );
       }
       case 'refusal':
-        return send(call, res, { content: null, refusal: reply.text }, 'content_filter', undefined);
+        return send(
+          call,
+          res,
+          { content: null, refusal: reply.text },
+          'content_filter',
+          undefined,
+        );
       case 'content':
-        if (reply.delayMs) await new Promise((resolve) => setTimeout(resolve, reply.delayMs));
+        if (reply.delayMs)
+          await new Promise((resolve) => setTimeout(resolve, reply.delayMs));
         return send(call, res, { content: reply.text }, 'stop', reply.usage);
       case 'tool_calls':
-        if (reply.delayMs) await new Promise((resolve) => setTimeout(resolve, reply.delayMs));
+        if (reply.delayMs)
+          await new Promise((resolve) => setTimeout(resolve, reply.delayMs));
         return send(
           call,
           res,
@@ -224,7 +294,10 @@ export async function startProvider(options: ProviderOptions): Promise<Provider>
               index: i,
               id: `call_${call.n}_${i}`,
               type: 'function',
-              function: { name: spec.name, arguments: spec.rawArguments ?? JSON.stringify(spec.args) },
+              function: {
+                name: spec.name,
+                arguments: spec.rawArguments ?? JSON.stringify(spec.args),
+              },
             })),
           },
           'tool_calls',
@@ -233,20 +306,54 @@ export async function startProvider(options: ProviderOptions): Promise<Provider>
     }
   }
 
-  function send(call: ProviderCall, res: http.ServerResponse, message: Record<string, unknown>, finish: string, usage: UsageSpec | undefined) {
-    const usageBody = usage ? { ...usage, total_tokens: usage.total_tokens ?? usage.prompt_tokens + usage.completion_tokens } : { prompt_tokens: 400, completion_tokens: 60, total_tokens: 460 };
-    const base = { id: `chatcmpl-stub-${call.n}`, object: 'chat.completion', created: Math.floor(Date.now() / 1000), model: options.model };
+  function send(
+    call: ProviderCall,
+    res: http.ServerResponse,
+    message: Record<string, unknown>,
+    finish: string,
+    usage: UsageSpec | undefined,
+  ) {
+    const usageBody = usage
+      ? {
+          ...usage,
+          total_tokens:
+            usage.total_tokens ?? usage.prompt_tokens + usage.completion_tokens,
+        }
+      : { prompt_tokens: 400, completion_tokens: 60, total_tokens: 460 };
+    const base = {
+      id: `chatcmpl-stub-${call.n}`,
+      object: 'chat.completion',
+      created: Math.floor(Date.now() / 1000),
+      model: options.model,
+    };
     if (!call.stream) {
       res.writeHead(200, { 'content-type': 'application/json' });
-      return void res.end(JSON.stringify({ ...base, choices: [{ index: 0, message: { role: 'assistant', ...message }, finish_reason: finish }], usage: usageBody }));
+      return void res.end(
+        JSON.stringify({
+          ...base,
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', ...message },
+              finish_reason: finish,
+            },
+          ],
+          usage: usageBody,
+        }),
+      );
     }
-    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+    res.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+    });
     const delta = (d: unknown, finishReason: string | null) =>
       `data: ${JSON.stringify({ ...base, object: 'chat.completion.chunk', choices: [{ index: 0, delta: d, finish_reason: finishReason }] })}\n\n`;
     res.write(delta({ role: 'assistant' }, null));
     res.write(delta(message, null));
     res.write(delta({}, finish));
-    res.write(`data: ${JSON.stringify({ ...base, object: 'chat.completion.chunk', choices: [], usage: usageBody })}\n\n`);
+    res.write(
+      `data: ${JSON.stringify({ ...base, object: 'chat.completion.chunk', choices: [], usage: usageBody })}\n\n`,
+    );
     res.write('data: [DONE]\n\n');
     res.end();
   }
@@ -266,7 +373,9 @@ export async function startProvider(options: ProviderOptions): Promise<Provider>
     gate(match) {
       let arrive!: (call: ProviderCall) => void;
       let release!: () => void;
-      const arrived = new Promise<ProviderCall>((resolve) => (arrive = resolve));
+      const arrived = new Promise<ProviderCall>(
+        (resolve) => (arrive = resolve),
+      );
       const released = new Promise<void>((resolve) => (release = resolve));
       gates.push({ match, arrived: arrive, released, used: false });
       return { arrived, release };

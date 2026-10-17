@@ -17,7 +17,10 @@ import {
 
 const read = (path: string) => readFileSync(path, 'utf8');
 
-function textFiles(dir: string, pattern = /\.(ts|tsx|js|mjs|md|json|css|html)$/) {
+function textFiles(
+  dir: string,
+  pattern = /\.(ts|tsx|js|mjs|md|json|css|html)$/,
+) {
   return walkFiles(dir).filter((file) => pattern.test(file));
 }
 
@@ -54,7 +57,8 @@ describe('[TP3.7] secrets stay server-side', () => {
 
   it('[TP3.7] built client assets carry no credential-shaped string and no server-only configuration name', () => {
     const dist = join(APP_ROOT, 'dist', 'client');
-    if (!existsSync(dist)) throw new Error('NOT BUILT: dist/client does not exist.');
+    if (!existsSync(dist))
+      throw new Error('NOT BUILT: dist/client does not exist.');
     const findings: string[] = [];
     for (const file of walkFiles(dist)) {
       if (!/\.(js|mjs|css|html|map|json)$/.test(file)) continue;
@@ -63,11 +67,20 @@ describe('[TP3.7] secrets stay server-side', () => {
         ['nvidia/crusoe style key', /nvapi-[A-Za-z0-9_-]{16,}/],
         ['OpenAI style key', /\bsk-(proj-)?[A-Za-z0-9_]{32,}\b/],
         ['PEM private key', /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
-        ['connection string with password', /(postgres(ql)?|redis):\/\/[^\s"'`/:@]+:[^\s"'`@]{3,}@/],
-        ['role URL env name', /NEMODOTS_PG_URL_(ADMIN|APP|CHECKOUT|INJECTOR|VERIFIER)/],
+        [
+          'connection string with password',
+          /(postgres(ql)?|redis):\/\/[^\s"'`/:@]+:[^\s"'`@]{3,}@/,
+        ],
+        [
+          'role URL env name',
+          /NEMODOTS_PG_URL_(ADMIN|APP|CHECKOUT|INJECTOR|VERIFIER)/,
+        ],
         ['probe secret env name', /NEMODOTS_PROBE_SECRET/],
         ['roles.env reference', /roles\.env/],
-        ['Crusoe key assignment', /CRUSOE_API_KEY\s*[=:]\s*["']?[A-Za-z0-9_-]{8,}/],
+        [
+          'Crusoe key assignment',
+          /CRUSOE_API_KEY\s*[=:]\s*["']?[A-Za-z0-9_-]{8,}/,
+        ],
       ];
       for (const [label, pattern] of checks)
         if (pattern.test(text)) findings.push(`${label} in ${rel(file)}`);
@@ -80,11 +93,14 @@ describe('[TP3.7] secrets stay server-side', () => {
     const problems: string[] = [];
     for (const file of textFiles(client, /\.(ts|tsx)$/)) {
       const text = read(file);
-      const imports = [...text.matchAll(/from\s+['"]([^'"]*server\/nemodots[^'"]*)['"]/g)];
+      const imports = [
+        ...text.matchAll(/from\s+['"]([^'"]*server\/nemodots[^'"]*)['"]/g),
+      ];
       for (const match of imports)
         if (!/server\/nemodots\/contracts(\/|\.|')/.test(match[1] + "'"))
           problems.push(`${rel(file)} imports ${match[1]}`);
-      if (/process\.env/.test(text)) problems.push(`${rel(file)} reads process.env`);
+      if (/process\.env/.test(text))
+        problems.push(`${rel(file)} reads process.env`);
     }
     expect(problems).toEqual([]);
   });
@@ -94,12 +110,19 @@ describe('[TP3.7] secrets stay server-side', () => {
     expect(config).not.toMatch(/define\s*:\s*\{[^}]*process\.env/);
     expect(config).not.toMatch(/envPrefix\s*:\s*['"`]{2}/);
     expect(config).not.toMatch(/envPrefix\s*:\s*\[[^\]]*['"`]{2}/);
-    expect(config).not.toMatch(/envPrefix\s*:\s*\[[^\]]*['"`](NEMODOTS|CRUSOE|OPENAI|CPK|INTELLIGENCE)/);
+    expect(config).not.toMatch(
+      /envPrefix\s*:\s*\[[^\]]*['"`](NEMODOTS|CRUSOE|OPENAI|CPK|INTELLIGENCE)/,
+    );
   });
 
   it('[TP3.7] no env file or role file is under public/ or dist/', () => {
-    const served = [...walkFiles(join(APP_ROOT, 'public')), ...walkFiles(join(APP_ROOT, 'dist'))];
-    const bad = served.filter((f) => /(^|\/)(\.env[^/]*|roles\.env|.*\.pem|id_rsa[^/]*)$/.test(f));
+    const served = [
+      ...walkFiles(join(APP_ROOT, 'public')),
+      ...walkFiles(join(APP_ROOT, 'dist')),
+    ];
+    const bad = served.filter((f) =>
+      /(^|\/)(\.env[^/]*|roles\.env|.*\.pem|id_rsa[^/]*)$/.test(f),
+    );
     expect(bad.map(rel)).toEqual([]);
   });
 });
@@ -123,15 +146,27 @@ describe('[TP3.4] the model-facing code has no shell, Docker socket, raw databas
     (dir) => {
       const folder = join(root, dir);
       if (!existsSync(folder))
-        throw new EntryPointMissingError(`src/server/nemodots/${dir}/`, 'directory does not exist');
+        throw new EntryPointMissingError(
+          `src/server/nemodots/${dir}/`,
+          'directory does not exist',
+        );
       const banned: [string, RegExp][] = [
         ['child_process', /\bchild_process\b/],
-        ['process spawn/exec call', /\b(execSync|execFileSync|execFile|spawnSync|spawn|fork)\s*\(/],
-        ['Docker socket / host', /docker\.sock|DOCKER_HOST|\/var\/run\/docker/i],
+        [
+          'process spawn/exec call',
+          /\b(execSync|execFileSync|execFile|spawnSync|spawn|fork)\s*\(/,
+        ],
+        [
+          'Docker socket / host',
+          /docker\.sock|DOCKER_HOST|\/var\/run\/docker/i,
+        ],
         ['eval / Function constructor', /\beval\s*\(|new\s+Function\s*\(/],
         ['vm module', /from\s+['"]node:vm['"]|require\(['"]vm['"]\)/],
         ['worker threads', /node:worker_threads/],
-        ['shell invocation string', /['"`](\/bin\/(ba)?sh|bash -c|sh -c|cmd\.exe)/],
+        [
+          'shell invocation string',
+          /['"`](\/bin\/(ba)?sh|bash -c|sh -c|cmd\.exe)/,
+        ],
       ];
       const findings: string[] = [];
       for (const file of textFiles(folder, /\.(ts|js|mjs)$/)) {
@@ -140,7 +175,8 @@ describe('[TP3.4] the model-facing code has no shell, Docker socket, raw databas
           .forEach((line, i) => {
             if (/^\s*(\/\/|\*|\/\*)/.test(line)) return;
             for (const [label, pattern] of banned)
-              if (pattern.test(line)) findings.push(`${label}: ${rel(file)}:${i + 1}`);
+              if (pattern.test(line))
+                findings.push(`${label}: ${rel(file)}:${i + 1}`);
           });
       }
       expect(findings).toEqual([]);
@@ -152,14 +188,35 @@ describe('[TP3.4] the model-facing code has no shell, Docker socket, raw databas
     (dir) => {
       const folder = join(root, dir);
       if (!existsSync(folder))
-        throw new EntryPointMissingError(`src/server/nemodots/${dir}/`, 'directory does not exist');
+        throw new EntryPointMissingError(
+          `src/server/nemodots/${dir}/`,
+          'directory does not exist',
+        );
       const banned: [string, RegExp][] = [
-        ['pg import', /^\s*import\s+(?!type\b)[^;]*from\s+['"]pg['"]|require\(['"]pg['"]\)/],
-        ['redis import', /^\s*import\s+(?!type\b)[^;]*from\s+['"](redis|ioredis)['"]/],
-        ['pool/client construction', /new\s+(Pool|Client)\s*\(|createClient\s*\(/],
-        ['role URL or probe secret', /NEMODOTS_PG_URL_[A-Z]+|NEMODOTS_PROBE_SECRET|NEMODOTS_REDIS_URL/],
-        ['provider key read', /process\.env\.(CRUSOE_API_KEY|OPENAI_API_KEY|CPK_INTELLIGENCE_API_KEY|INTELLIGENCE_API_KEY)/],
-        ['direct pool import', /from\s+['"][./]+\/?(\.\.\/)*db\/(pool|tx)\.js['"]/],
+        [
+          'pg import',
+          /^\s*import\s+(?!type\b)[^;]*from\s+['"]pg['"]|require\(['"]pg['"]\)/,
+        ],
+        [
+          'redis import',
+          /^\s*import\s+(?!type\b)[^;]*from\s+['"](redis|ioredis)['"]/,
+        ],
+        [
+          'pool/client construction',
+          /new\s+(Pool|Client)\s*\(|createClient\s*\(/,
+        ],
+        [
+          'role URL or probe secret',
+          /NEMODOTS_PG_URL_[A-Z]+|NEMODOTS_PROBE_SECRET|NEMODOTS_REDIS_URL/,
+        ],
+        [
+          'provider key read',
+          /process\.env\.(CRUSOE_API_KEY|OPENAI_API_KEY|CPK_INTELLIGENCE_API_KEY|INTELLIGENCE_API_KEY)/,
+        ],
+        [
+          'direct pool import',
+          /from\s+['"][./]+\/?(\.\.\/)*db\/(pool|tx)\.js['"]/,
+        ],
       ];
       const findings: string[] = [];
       for (const file of textFiles(folder, /\.(ts|js|mjs)$/)) {
@@ -168,7 +225,8 @@ describe('[TP3.4] the model-facing code has no shell, Docker socket, raw databas
           .forEach((line, i) => {
             if (/^\s*(\/\/|\*|\/\*)/.test(line)) return;
             for (const [label, pattern] of banned)
-              if (pattern.test(line)) findings.push(`${label}: ${rel(file)}:${i + 1}`);
+              if (pattern.test(line))
+                findings.push(`${label}: ${rel(file)}:${i + 1}`);
           });
       }
       expect(findings).toEqual([]);
@@ -192,18 +250,49 @@ describe('[TP3.4] the model-facing code has no shell, Docker socket, raw databas
   it('[TP3.4] runbooks the model can read contain no connection string, key, token or password', () => {
     const folder = join(root, 'team', 'runbooks');
     if (!existsSync(folder))
-      throw new EntryPointMissingError('src/server/nemodots/team/runbooks/', 'directory does not exist');
+      throw new EntryPointMissingError(
+        'src/server/nemodots/team/runbooks/',
+        'directory does not exist',
+      );
     const files = readdirSync(folder).filter((f) => f.endsWith('.md'));
     expect(files.length).toBeGreaterThan(0);
     const secrets = visibleSecrets();
     const findings: string[] = [];
     for (const file of files) {
       const text = read(join(folder, file));
-      if (/(postgres(ql)?|redis):\/\/[^\s)]*@/i.test(text)) findings.push(`connection string in ${file}`);
-      if (/nvapi-|\bsk-[A-Za-z0-9]{20,}|BEGIN [A-Z ]*PRIVATE KEY|password\s*[:=]\s*\S+/i.test(text))
+      if (/(postgres(ql)?|redis):\/\/[^\s)]*@/i.test(text))
+        findings.push(`connection string in ${file}`);
+      if (
+        /nvapi-|\bsk-[A-Za-z0-9]{20,}|BEGIN [A-Z ]*PRIVATE KEY|password\s*[:=]\s*\S+/i.test(
+          text,
+        )
+      )
         findings.push(`credential-shaped text in ${file}`);
-      for (const name of secretsPresentIn(text, secrets)) findings.push(`${name} value in ${file}`);
+      for (const name of secretsPresentIn(text, secrets))
+        findings.push(`${name} value in ${file}`);
     }
     expect(findings).toEqual([]);
+  });
+});
+
+describe('[TP3.1][M15] legacy research completion is unreachable in production', () => {
+  it('[TP3.1][M15] the production server constructs the background Runner with an explicit executor, so research.ts raw fetch is not the default path', () => {
+    const text = read(join(APP_ROOT, 'src', 'server', 'index.ts'));
+    const start = text.indexOf('new Runner(');
+    expect(start, 'index.ts must construct a Runner').toBeGreaterThan(-1);
+    let depth = 0;
+    let args = 1;
+    for (let i = start + 'new Runner'.length; i < text.length; i += 1) {
+      const ch = text[i];
+      if (ch === '(' || ch === '{' || ch === '[') depth += 1;
+      else if (ch === ')' || ch === '}' || ch === ']') {
+        depth -= 1;
+        if (depth === 0) break;
+      } else if (ch === ',' && depth === 1) args += 1;
+    }
+    expect(
+      args,
+      'Runner(store, config, execute, ...) must pass an executor',
+    ).toBeGreaterThanOrEqual(3);
   });
 });

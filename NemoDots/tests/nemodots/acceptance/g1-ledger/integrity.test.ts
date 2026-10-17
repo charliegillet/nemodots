@@ -361,6 +361,29 @@ describe('[G1.5] model claims never become trusted facts', () => {
   });
 });
 
+// ----------------------------------------------------------------- item 10
+
+describe('[G1.10] harmless updates do not invalidate (false invalidation quantified)', () => {
+  it('[G1.10] 25 identical re-observations and a change of another scope produce zero new revisions and zero invalidation events', async () => {
+    await inDb(async (w) => {
+      await w.register({ op: 'register', label: 'h', sourceKey: 'checkout.health', normalizedValue: HEALTH_OK });
+      const events = (await w.admin.query('SELECT count(*)::int AS n FROM ledger.invalidation_events')).rows[0].n;
+      for (let i = 0; i < 25; i += 1) {
+        const r = await w.register({ op: 'register', label: 'h', sourceKey: 'checkout.health', normalizedValue: HEALTH_OK });
+        expect(r.ok, r.error).toBe(true);
+      }
+      await w.register({ op: 'register', label: 'other', sourceKey: 'checkout.health', environment: 'eval', normalizedValue: HEALTH_BAD });
+      await w.register({ op: 'register', label: 'other2', sourceKey: 'checkout.health', environment: 'eval', normalizedValue: HEALTH_OK });
+      expect((await w.receiptsOf('test', 'checkout.health')).length, 'revisions minted by harmless re-observation').toBe(1);
+      expect(await w.confirmationCount(w.labels.get('h')!)).toBe(25);
+      const after = (await w.admin.query("SELECT count(*)::int AS n, count(*) FILTER (WHERE source_key = 'checkout.health')::int AS m FROM ledger.invalidation_events")).rows[0];
+      // The eval scope's first receipt has no predecessor; its second supersedes one (nothing depends on it): one event, in its own scope.
+      expect(after.n - events, 'events caused by the eval scope only').toBe(1);
+      expect((await w.receiptById(w.labels.get('h')!))?.status, 'test scope receipt must stay current').toBe('supported');
+    });
+  });
+});
+
 // ----------------------------------------------------------------- item 11
 
 describe('[G1.11] page edits and ledger values', () => {

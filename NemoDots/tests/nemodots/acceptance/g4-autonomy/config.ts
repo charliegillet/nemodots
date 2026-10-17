@@ -77,7 +77,10 @@ export function liveStatus(): LiveStatus {
 export function intelligenceStatus() {
   const env = mergedEnv();
   const key = env.CPK_INTELLIGENCE_API_KEY || env.INTELLIGENCE_API_KEY;
-  return { configured: Boolean(key), missing: key ? [] : ['CPK_INTELLIGENCE_API_KEY'] };
+  return {
+    configured: Boolean(key),
+    missing: key ? [] : ['CPK_INTELLIGENCE_API_KEY'],
+  };
 }
 
 /** Throws the BLOCKED marker (the suite fails, it never skips or passes). */
@@ -103,12 +106,17 @@ export function redactor(env: Record<string, string | undefined>) {
   const secrets = Object.entries(env)
     .filter(
       ([name, value]) =>
-        value && value.length >= 8 && /KEY|SECRET|TOKEN|PASSWORD|_URL_/i.test(name),
+        value &&
+        value.length >= 8 &&
+        /KEY|SECRET|TOKEN|PASSWORD|_URL_/i.test(name),
     )
     .map(([, value]) => value as string);
   return (text: string) => {
     let out = text;
     for (const secret of secrets) out = out.split(secret).join('<redacted>');
-    return out.replace(/postgres(?:ql)?:\/\/[^\s'"]+/g, 'postgres://<redacted>');
+    return out.replace(
+      /postgres(?:ql)?:\/\/[^\s'"]+/g,
+      'postgres://<redacted>',
+    );
   };
 }

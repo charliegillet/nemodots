@@ -1,0 +1,224 @@
+import type {
+  HealthStatus,
+  Mission,
+  MissionLifecycleAction,
+  MissionStatus,
+} from '../../../server/nemodots/contracts/index.js';
+import { IntelligenceBadge, ModeBadge } from '../components/ModeBadge';
+import { StatusPill } from '../components/StatusPill';
+import { formatCount } from '../format';
+import type { StreamStatus } from '../mission-stream';
+import {
+  deriveIntelligenceBadge,
+  deriveModeBadge,
+  type ModeBadgeView,
+} from '../status';
+
+const LIFECYCLE: {
+  action: MissionLifecycleAction;
+  label: string;
+  from: readonly MissionStatus[];
+  hint: string;
+}[] = [
+  {
+    action: 'start',
+    label: 'Start',
+    from: ['created', 'blocked_provider'],
+    hint: 'Start applies to a mission that has not started.',
+  },
+  {
+    action: 'pause',
+    label: 'Pause',
+    from: ['running'],
+    hint: 'Pause applies to a running mission.',
+  },
+  {
+    action: 'resume',
+    label: 'Resume',
+    from: ['paused'],
+    hint: 'Resume applies to a paused mission.',
+  },
+  {
+    action: 'cancel',
+    label: 'Cancel',
+    from: [
+      'created',
+      'blocked_provider',
+      'running',
+      'paused',
+      'awaiting_acceptance',
+    ],
+    hint: 'Cancel applies to a mission that has not finished.',
+  },
+];
+
+/** Why a lifecycle control is unavailable, or null when it can be used. */
+export function lifecycleDisabledReason(
+  action: MissionLifecycleAction,
+  mission: Mission | null,
+  health: HealthStatus | null,
+): string | null {
+  const entry = LIFECYCLE.find((item) => item.action === action);
+  if (!entry || !mission) return 'The mission has not loaded.';
+  if (!entry.from.includes(mission.status))
+    return `${entry.hint} This mission is ${mission.status.replace(/_/g, ' ')}.`;
+  if (
+    action === 'start' &&
+    mission.mode === 'live' &&
+    health !== null &&
+    health.mode !== 'live'
+  )
+    return health.mode === 'blocked'
+      ? `Live mode is blocked${
+          health.missingEnv.length
+            ? `: missing ${health.missingEnv.join(', ')}`
+            : ''
+        }.`
+      : 'The server is in fixture mode, so a live mission cannot start.';
+  return null;
+}
+
+/**
+ * The badge for one mission. A fixture mission always reads Fixture; a live
+ * mission only reads Live while the server health agrees.
+ */
+export function missionModeBadge(
+  mission: Mission | null,
+  health: HealthStatus | null,
+): ModeBadgeView {
+  if (mission?.mode === 'fixture') {
+    const base = deriveModeBadge(
+      health ? { ...health, mode: 'fixture' } : null,
+    );
+    return base.kind === 'fixture'
+      ? { ...base, missingEnv: [] }
+      : {
+          kind: 'fixture',
+          label: 'Fixture',
+          description:
+            'Fixture mode: model responses are scripted fixtures, not a live model.',
+          missingEnv: [],
+        };
+  }
+  return deriveModeBadge(health);
+}
+
+const STREAM_TEXT: Record<StreamStatus, string> = {
+  connecting: 'Connecting',
+  open: 'Open',
+  reconnecting: 'Reconnecting',
+  closed: 'Closed',
+};
+
+export function StreamStatusLine({
+  status,
+  detail,
+}: {
+  status: StreamStatus;
+  detail?: string | null;
+}) {
+  return (
+    <p
+      className={`nd-stream nd-stream-${status}`}
+      role="status"
+      data-stream={status}
+    >
+      Live updates: {STREAM_TEXT[status]}
+      {status !== 'open' && ' (refreshing from storage every 3 seconds)'}
+      {detail ? `. ${detail}` : ''}
+    </p>
+  );
+}
+
+export function MissionHeader({
+  mission,
+  health,
+  stream,
+  streamDetail,
+  busyAction,
+  actionError,
+  onAction,
+}: {
+  mission: Mission | null;
+  health: HealthStatus | null;
+  stream: StreamStatus;
+  streamDetail?: string | null;
+  busyAction: MissionLifecycleAction | null;
+  actionError: string | null;
+  onAction: (action: MissionLifecycleAction) => void;
+}) {
+  const badge = missionModeBadge(mission, health);
+  return (
+    <header className="nd-mission-head" aria-label="Mission summary">
+      <div className="page-heading nd-heading">
+        <div>
+          <span className="eyebrow">MISSION</span>
+          <h1>{mission ? mission.goal : 'Loading mission…'}</h1>
+          {mission && mission.constraints.length > 0 && (
+            <ul className="nd-constraints" aria-label="Constraints">
+              {mission.constraints.map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div
+          className="task-controls nd-lifecycle"
+          role="group"
+          aria-label="Mission controls"
+        >
+          {LIFECYCLE.map(({ action, label }) => {
+            const reason = lifecycleDisabledReason(action, mission, health);
+            return (
+              <button
+                key={action}
+                type="button"
+                className={action === 'start' ? 'primary' : undefined}
+                disabled={reason !== null || busyAction !== null}
+                title={reason ?? `${label} the mission`}
+                onClick={() => onAction(action)}
+              >
+                {busyAction === action ? `${label}…` : label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      <p className="nd-badges">
+        <ModeBadge badge={badge} />
+        <IntelligenceBadge badge={deriveIntelligenceBadge(health)} />
+        {mission && <StatusPill status={mission.status} />}
+      </p>
+      {mission?.mode === 'fixture' && (
+        <p className="nd-note nd-fixture-note">
+          FIXTURE mission: model responses are scripted fixtures, not a live
+          model.
+        </p>
+      )}
+      {mission && (
+        <dl className="nd-dl nd-mission-facts" aria-label="Mission facts">
+          <dt>Provider host</dt>
+          <dd>{mission.provider.host}</dd>
+          <dt>Planner model</dt>
+          <dd>{mission.provider.plannerModel}</dd>
+          <dt>Worker model</dt>
+          <dd>{mission.provider.workerModel}</dd>
+          <dt>admission.minAgeMs</dt>
+          <dd>{formatCount(mission.admission.minAgeMs)} ms</dd>
+          {mission.failureReason && (
+            <>
+              <dt>Failure reason</dt>
+              <dd>{mission.failureReason}</dd>
+            </>
+          )}
+        </dl>
+      )}
+      {actionError && (
+        <p className="nd-error" role="alert">
+          {actionError}
+        </p>
+      )}
+      <StreamStatusLine status={stream} detail={streamDetail} />
+    </header>
+  );
+}

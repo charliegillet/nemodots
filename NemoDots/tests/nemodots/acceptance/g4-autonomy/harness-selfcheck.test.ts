@@ -19,7 +19,13 @@ import { lastReceiptId, planReply, TWO_BRANCH_PLAN } from './scenarios.js';
 
 const R_OLD = randomUUID();
 const R_OTHER = randomUUID();
-const att = (taskId: string, n: number, token: number, read: string[], inh: string[] = []) => ({
+const att = (
+  taskId: string,
+  n: number,
+  token: number,
+  read: string[],
+  inh: string[] = [],
+) => ({
   id: randomUUID(),
   taskId,
   n,
@@ -31,7 +37,12 @@ const att = (taskId: string, n: number, token: number, read: string[], inh: stri
   abortReason: null,
   lease: { fencingToken: token },
 });
-const task = (id: string, parentId: string | null, depth: number, prereq: string[] = []) => ({
+const task = (
+  id: string,
+  parentId: string | null,
+  depth: number,
+  prereq: string[] = [],
+) => ({
   id,
   parentId,
   depth,
@@ -48,8 +59,16 @@ const task = (id: string, parentId: string | null, depth: number, prereq: string
 describe('g4 harness self-check', () => {
   it('closure: A reads the changed receipt, V inherits A, B is independent (hand enumerated)', () => {
     const snap: SnapshotLike = {
-      tasks: [task('A', null, 0), task('B', null, 0), task('V', null, 0, ['A'])],
-      attempts: [att('A', 1, 1, [R_OLD]), att('B', 1, 1, [R_OTHER]), att('V', 1, 1, [R_OTHER], [R_OLD])],
+      tasks: [
+        task('A', null, 0),
+        task('B', null, 0),
+        task('V', null, 0, ['A']),
+      ],
+      attempts: [
+        att('A', 1, 1, [R_OLD]),
+        att('B', 1, 1, [R_OTHER]),
+        att('V', 1, 1, [R_OTHER], [R_OLD]),
+      ],
       outputs: [],
       receipts: [],
     };
@@ -69,20 +88,37 @@ describe('g4 harness self-check', () => {
 
   it('shape, cycle and fencing helpers agree with hand-drawn trees', () => {
     const snap: SnapshotLike = {
-      tasks: [task('r', null, 0), task('c1', 'r', 1), task('c2', 'r', 1), task('g', 'c1', 2)],
-      attempts: [att('r', 1, 3, []), att('r', 2, 4, []), att('c1', 1, 1, []), att('c1', 2, 1, [])],
+      tasks: [
+        task('r', null, 0),
+        task('c1', 'r', 1),
+        task('c2', 'r', 1),
+        task('g', 'c1', 2),
+      ],
+      attempts: [
+        att('r', 1, 3, []),
+        att('r', 2, 4, []),
+        att('c1', 1, 1, []),
+        att('c1', 2, 1, []),
+      ],
       outputs: [],
       receipts: [],
     };
     expect(treeShape(snap)).toEqual({ total: 4, maxDepth: 2, maxBreadth: 2 });
     expect(hasCycle(snap)).toBe(false);
-    expect(hasCycle({ ...snap, tasks: [task('x', null, 0, ['y']), task('y', null, 0, ['x'])] })).toBe(true);
+    expect(
+      hasCycle({
+        ...snap,
+        tasks: [task('x', null, 0, ['y']), task('y', null, 0, ['x'])],
+      }),
+    ).toBe(true);
     expect(fencingMonotonic(snap)).toBe(false); // c1 reused token 1
   });
 
   it('leak scanner flags diagnosis machinery and ignores ordinary evidence', () => {
     expect(findLeaks(['cache_decode_error expected 7 found 6'])).toEqual([]);
-    expect(findLeaks(['the injector changed cache.schema_version']).length).toBeGreaterThan(0);
+    expect(
+      findLeaks(['the injector changed cache.schema_version']).length,
+    ).toBeGreaterThan(0);
     expect(findLeaks(['value is 7'], ['7-secret-seed'])).toEqual([]);
   });
 
@@ -108,7 +144,15 @@ describe('g4 harness self-check', () => {
       script: (call) =>
         call.kind === 'structured'
           ? planReply(TWO_BRANCH_PLAN)
-          : { type: 'tool_calls', calls: [{ name: 'observe_source', args: { sourceKey: 'checkout.health' } }] },
+          : {
+              type: 'tool_calls',
+              calls: [
+                {
+                  name: 'observe_source',
+                  args: { sourceKey: 'checkout.health' },
+                },
+              ],
+            },
     });
     try {
       const post = (body: object) =>
@@ -117,22 +161,43 @@ describe('g4 harness self-check', () => {
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(body),
         });
-      const plain = await (await post({ model: 'stub-model', messages: [{ role: 'user', content: 'x' }] })).json();
-      expect(JSON.parse(plain.choices[0].message.content).tasks).toHaveLength(3);
+      const plain = await (
+        await post({
+          model: 'stub-model',
+          messages: [{ role: 'user', content: 'x' }],
+        })
+      ).json();
+      expect(JSON.parse(plain.choices[0].message.content).tasks).toHaveLength(
+        3,
+      );
       const worker = await (
         await post({
           model: 'stub-model',
           messages: [{ role: 'user', content: 'x' }],
-          tools: [{ type: 'function', function: { name: 'observe_source', parameters: {} } }],
+          tools: [
+            {
+              type: 'function',
+              function: { name: 'observe_source', parameters: {} },
+            },
+          ],
         })
       ).json();
-      expect(worker.choices[0].message.tool_calls[0].function.name).toBe('observe_source');
+      expect(worker.choices[0].message.tool_calls[0].function.name).toBe(
+        'observe_source',
+      );
       const stream = await (
         await post({
           model: 'stub-model',
           stream: true,
-          messages: [{ role: 'tool', content: JSON.stringify({ receiptId: R_OLD }) }],
-          tools: [{ type: 'function', function: { name: 'observe_source', parameters: {} } }],
+          messages: [
+            { role: 'tool', content: JSON.stringify({ receiptId: R_OLD }) },
+          ],
+          tools: [
+            {
+              type: 'function',
+              function: { name: 'observe_source', parameters: {} },
+            },
+          ],
         })
       ).text();
       expect(stream).toContain('"tool_calls"');
@@ -140,7 +205,11 @@ describe('g4 harness self-check', () => {
       const models = await (await fetch(`${provider.url}/models`)).json();
       expect(models.data[0].id).toBe('stub-model');
       expect(provider.calls).toHaveLength(3);
-      expect(lastReceiptId({ toolMessages: [{ receiptId: R_OLD, revision: 4 }] } as never)).toBe(R_OLD);
+      expect(
+        lastReceiptId({
+          toolMessages: [{ receiptId: R_OLD, revision: 4 }],
+        } as never),
+      ).toBe(R_OLD);
       expect(lastReceiptId({ toolMessages: [] } as never)).toBeNull();
     } finally {
       await provider.close();

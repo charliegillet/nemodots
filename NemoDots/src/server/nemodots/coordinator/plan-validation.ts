@@ -17,8 +17,7 @@ import {
 // checks cannot move underneath it.
 
 export type PlanValidation =
-  | { ok: true; plan: Plan }
-  | { ok: false; issues: string[] };
+  { ok: true; plan: Plan } | { ok: false; issues: string[] };
 
 export interface PlanLimits {
   /** budgets.maxTasks */
@@ -34,7 +33,10 @@ export interface PlanLimits {
  * mission-wide task cap. Root tasks have no parent, so their allowed set is the
  * role default (nothing to intersect with).
  */
-export function validatePlan(input: unknown, limits: PlanLimits): PlanValidation {
+export function validatePlan(
+  input: unknown,
+  limits: PlanLimits,
+): PlanValidation {
   const parsed = PlanSchema.safeParse(input);
   if (!parsed.success)
     return {
@@ -57,7 +59,9 @@ export function validatePlan(input: unknown, limits: PlanLimits): PlanValidation
           `tasks[${i}] capability ${capability} escalates beyond role ${task.role}`,
         );
   });
-  return issues.length ? { ok: false, issues } : { ok: true, plan: parsed.data };
+  return issues.length
+    ? { ok: false, issues }
+    : { ok: true, plan: parsed.data };
 }
 
 export interface DelegationParent {
@@ -166,10 +170,13 @@ export function validateDelegation(
       `breadth ${facts.parentChildren + 1} exceeds the limit of ${breadth} children per task`,
     );
   if (facts.totalTasks + 1 > limits.maxTasks)
-    issues.push(`mission already has ${facts.totalTasks} of ${limits.maxTasks} tasks`);
+    issues.push(
+      `mission already has ${facts.totalTasks} of ${limits.maxTasks} tasks`,
+    );
   const known = new Map(facts.tasks.map((task) => [task.id, task]));
   for (const id of request.dependsOn)
-    if (!known.has(id)) issues.push(`dependsOn ${id} is not a task of this mission`);
+    if (!known.has(id))
+      issues.push(`dependsOn ${id} is not a task of this mission`);
   if (new Set(request.dependsOn).size !== request.dependsOn.length)
     issues.push('dependsOn must be unique');
   if (

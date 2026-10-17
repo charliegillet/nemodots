@@ -81,7 +81,6 @@ CREATE TABLE coordinator.missions (
   acceptance_receipt_id uuid,
   failure_reason text,
   cancellation jsonb,
-  replan_count integer NOT NULL DEFAULT 0 CHECK (replan_count >= 0),
   created_at timestamptz NOT NULL DEFAULT now(),
   started_at timestamptz,
   finished_at timestamptz,

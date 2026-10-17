@@ -39,7 +39,11 @@ import {
   type SupportErrorShape,
 } from './errors.js';
 import { EventBuffer } from './events.js';
-import { lockFencedAttempt, type FenceOptions, type FencedAttempt } from './fence.js';
+import {
+  lockFencedAttempt,
+  type FenceOptions,
+  type FencedAttempt,
+} from './fence.js';
 import { carryRepair } from './leases.js';
 import {
   childCapabilities,
@@ -64,11 +68,7 @@ import {
   transitionTask,
   type TxCtx,
 } from './tasks.js';
-import type {
-  CoordinatorDeps,
-  OutputInput,
-  PublishedOutput,
-} from './types.js';
+import type { CoordinatorDeps, OutputInput, PublishedOutput } from './types.js';
 
 // ARCHITECTURE.md G2 / section 6. Every publication is ONE transaction:
 //
@@ -126,11 +126,9 @@ export async function runPublication<T>(
       attemptedVector = vector;
       const ids = [...new Set(vector.map((entry) => entry.receiptId))];
       if (ids.length > 0)
-        await deps.supportValidator.assertCurrent(
-          client,
-          ids as ReceiptId[],
-          { lockMode: 'share' },
-        );
+        await deps.supportValidator.assertCurrent(client, ids as ReceiptId[], {
+          lockMode: 'share',
+        });
       const result = await spec.write(fenced, tx);
       await tx.events.flush(client);
       return result;
@@ -345,7 +343,8 @@ export async function publishPlan(
         const rows = await lockTasks(tx.client, input.cancelTaskIds);
         for (const row of rows) {
           if (row.mission_id !== fenced.mission.id) continue;
-          if (['succeeded', 'failed', 'cancelled'].includes(row.status)) continue;
+          if (['succeeded', 'failed', 'cancelled'].includes(row.status))
+            continue;
           await transitionTask(tx, row, 'cancelled', {
             reason: 'superseded_by_replan',
           });
@@ -376,7 +375,11 @@ export async function publishPlan(
         dependencyVectorSize: 0,
       });
       await completeTask({ tx, deps, fenced }, outputId);
-      return { outputId: outputId as TaskOutputId, digest: outputDigest, taskIds: ids };
+      return {
+        outputId: outputId as TaskOutputId,
+        digest: outputDigest,
+        taskIds: ids,
+      };
     },
   });
 }
@@ -411,7 +414,9 @@ export async function delegate(
       const parent = fenced.task;
       if (!parent.capabilities.includes('delegate'))
         throw new CapabilityDeniedError('delegate', parent.role);
-      const dedupeKey = input.toolCallId ? `delegate:${input.toolCallId}` : null;
+      const dedupeKey = input.toolCallId
+        ? `delegate:${input.toolCallId}`
+        : null;
       if (dedupeKey) {
         const repeat = await tx.client.query<TaskRow>(
           `SELECT * FROM coordinator.tasks WHERE mission_id = $1 AND dedupe_key = $2`,
@@ -468,7 +473,10 @@ export async function delegate(
         parent.capabilities as never,
       );
       const defaults = deps.config.taskDefaults;
-      const vector = union(requested, fenced.attempt.inherited_dependency_vector);
+      const vector = union(
+        requested,
+        fenced.attempt.inherited_dependency_vector,
+      );
       const child = await insertTask(tx, {
         id: candidateId,
         missionId: parent.mission_id as MissionId,
@@ -544,7 +552,9 @@ export async function publishFinding(
     if (outside.length > 0) throw new CitationOutOfScopeError(outside);
     const cited = input.supportingReceiptIds
       .map((id) => known.get(id))
-      .filter((entry): entry is DependencyVector[number] => entry !== undefined);
+      .filter(
+        (entry): entry is DependencyVector[number] => entry !== undefined,
+      );
     return union(requested, fenced.attempt.inherited_dependency_vector, cited);
   };
 
@@ -622,7 +632,8 @@ export async function recordModelCall(
   try {
     await runPublication(deps, {
       context,
-      vector: () => union(snapshot.dependencyVector, record.outputDependencyVector),
+      vector: () =>
+        union(snapshot.dependencyVector, record.outputDependencyVector),
       async write(fenced, tx) {
         await deps.ledger.recordModelCall(tx.client, {
           record,
@@ -751,7 +762,10 @@ export async function failAttempt(
 ): Promise<'requeued' | 'failed'> {
   return runPublication(deps, {
     context,
-    fence: { ignoreLease: true, taskStatuses: ['leased', 'running', 'waiting'] },
+    fence: {
+      ignoreLease: true,
+      taskStatuses: ['leased', 'running', 'waiting'],
+    },
     async write(fenced, tx) {
       await finishAttempt(tx, fenced.attempt, 'failed', {
         failureReason: failure.reason.slice(0, 500),
@@ -765,9 +779,7 @@ export async function failAttempt(
 }
 
 export type HostAbortReason =
-  | 'budget_exhausted'
-  | 'provider_unreachable'
-  | 'lease_lost';
+  'budget_exhausted' | 'provider_unreachable' | 'lease_lost';
 
 /**
  * The host stops an attempt it still owns: budget exhaustion fails the task
@@ -781,9 +793,14 @@ export async function abortAttempt(
 ): Promise<'requeued' | 'failed'> {
   return runPublication(deps, {
     context,
-    fence: { ignoreLease: true, taskStatuses: ['leased', 'running', 'waiting'] },
+    fence: {
+      ignoreLease: true,
+      taskStatuses: ['leased', 'running', 'waiting'],
+    },
     async write(fenced, tx) {
-      await finishAttempt(tx, fenced.attempt, 'aborted', { abortReason: reason });
+      await finishAttempt(tx, fenced.attempt, 'aborted', {
+        abortReason: reason,
+      });
       return settleUnpublished(tx, deps, fenced, {
         reason: `attempt_aborted:${reason}`,
         exhaust: reason === 'budget_exhausted',
@@ -812,7 +829,12 @@ export async function markWaiting(
 }
 
 export interface ChildrenStatus {
-  children: { id: TaskId; status: string; outputId: string | null; role: string }[];
+  children: {
+    id: TaskId;
+    status: string;
+    outputId: string | null;
+    role: string;
+  }[];
   allTerminal: boolean;
 }
 
@@ -880,4 +902,3 @@ export async function requestReplan(
     },
   });
 }
-

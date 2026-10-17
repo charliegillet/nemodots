@@ -164,11 +164,9 @@ describe('G6.0 case map', () => {
       .map((f) => readFileSync(resolve(dir, f), 'utf8'))
       .join('\n');
     for (let n = 1; n <= 10; n += 1)
-      expect(
-        new RegExp(`G6\\.(\\d+/)*${n}\\b`).test(titles) ||
-          titles.includes(`G6.${n}`),
-        `case G6.${n}`,
-      ).toBe(true);
+      expect(new RegExp(`G6\\.${n}(?!\\d)`).test(titles), `case G6.${n}`).toBe(
+        true,
+      );
   });
 });
 

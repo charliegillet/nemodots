@@ -12,7 +12,7 @@ import {
   lockConfigRows,
 } from '../../../../src/server/nemodots/sandbox/version-authority.js';
 import { withTransaction } from '../../../../src/server/nemodots/db/tx.js';
-import { latch, withTimeout } from '../../helpers/barrier.js';
+import { withTimeout } from '../../helpers/barrier.js';
 import { withSandbox, type Pools } from './harness.js';
 
 const versionOf = async (pool: pg.Pool, key: string) =>
@@ -45,6 +45,15 @@ async function waitForLockWaiter(pool: pg.Pool) {
 }
 
 const caused = { actor: 'owner' } as const;
+
+/** The ConfigVersionError a call rejects with (fails the test if it resolves). */
+const failure = (promise: Promise<unknown>) =>
+  promise.then(
+    () => {
+      throw new Error('expected the call to be rejected');
+    },
+    (error: unknown) => error as ConfigVersionError,
+  );
 
 describe('compare-and-set', () => {
   it('a wrong expectedVersion fails with stale_version and leaves the version, value and history unchanged', async () => {
@@ -104,7 +113,6 @@ describe('compare-and-set', () => {
   it('two concurrent advances of one key serialize: exactly one wins, the other gets stale_version', async () => {
     await withSandbox(async ({ pools }) => {
       const first = await pools.app.connect();
-      const proceed = latch();
       try {
         await first.query('BEGIN');
         await advanceConfig(first, {
@@ -124,7 +132,6 @@ describe('compare-and-set', () => {
           (error: unknown) => ({ ok: false as const, error }),
         );
         await waitForLockWaiter(pools.verifier);
-        proceed.open();
         await first.query('COMMIT');
         const outcome = await second;
         expect(outcome.ok).toBe(false);
@@ -145,9 +152,7 @@ describe('compare-and-set', () => {
   it('rejects malformed input before touching the database', async () => {
     await withSandbox(async ({ pools }) => {
       const run = (input: Parameters<typeof advanceConfigTx>[1]) =>
-        advanceConfigTx(pools.app, input).catch(
-          (e: unknown) => e as ConfigVersionError,
-        );
+        failure(advanceConfigTx(pools.app, input));
       expect(
         (
           await run({
@@ -271,13 +276,15 @@ describe('collection version is membership-only (C1)', () => {
       expect(again.versionAfter).toBe(3);
 
       // a stale insert (key exists) does not bump the collection
-      const duplicate = await advanceConfigTx(pools.injector, {
-        key: 'experiment.flag',
-        value: true,
-        expectedVersion: 0,
-        insertIfMissing: true,
-        causedBy: { actor: 'injector' },
-      }).catch((e: unknown) => e as ConfigVersionError);
+      const duplicate = await failure(
+        advanceConfigTx(pools.injector, {
+          key: 'experiment.flag',
+          value: true,
+          expectedVersion: 0,
+          insertIfMissing: true,
+          causedBy: { actor: 'injector' },
+        }),
+      );
       expect(duplicate.code).toBe('stale_version');
       expect(await collectionVersion(pools.app)).toBe(base + 3);
     });
@@ -405,8 +412,6 @@ describe('caused_by_action_id is server-authored (I14)', () => {
       await write(pools.admin, 'db.statement_timeout_ms', 1);
       expect(await head('db.statement_timeout_ms')).toBeNull();
       expect(await history('db.statement_timeout_ms', 2)).toBeNull();
-      await write(pools.app, 'ui.banner_text', 1).catch(() => {});
-      // (banner is a string: use a numeric key for the app role)
       await advanceConfigTx(pools.app, {
         key: 'cache.schema_version',
         value: 2,

@@ -340,8 +340,7 @@ export function visibleSecrets(): SecretValue[] {
   for (const source of sources)
     for (const [name, value] of Object.entries(source)) {
       if (SECRET_ENV_NAMES.includes(name)) add(name, value);
-      else if (/_(API_KEY|SECRET|TOKEN|PASSWORD)$/.test(name))
-        add(name, value);
+      else if (/_(API_KEY|SECRET|TOKEN|PASSWORD)$/.test(name)) add(name, value);
       else if (/^NEMODOTS_PG_URL_/.test(name) && value) {
         try {
           const password = decodeURIComponent(new URL(value).password);
@@ -404,7 +403,8 @@ export interface ScriptedStep {
   toolCalls?: ScriptedToolCall[];
   text?: string;
 }
-export type StepSource = ScriptedStep | ((request: ModelRequest) => ScriptedStep);
+export type StepSource =
+  ScriptedStep | ((request: ModelRequest) => ScriptedStep);
 
 export interface ModelRequest {
   url: string;
@@ -472,13 +472,19 @@ export class ScriptedModel {
   readonly outbound: Outbound[] = [];
   steps: StepSource[] = [];
   /** Optional hook for supervisor requests (computer service). Default: HTTP 599. */
-  supervisor?: (url: string, init?: RequestInit) => Response | Promise<Response>;
+  supervisor?: (
+    url: string,
+    init?: RequestInit,
+  ) => Response | Promise<Response>;
   private realFetch?: typeof fetch;
   private cursor = 0;
 
   install() {
     this.realFetch = globalThis.fetch;
-    const self = this;
+    const answer = (url: string, init?: RequestInit) => this.answer(url, init);
+    const realFetch = this.realFetch;
+    const outbound = this.outbound;
+    const supervisorOf = () => this.supervisor;
     globalThis.fetch = (async (
       input: RequestInfo | URL,
       init?: RequestInit,
@@ -489,15 +495,17 @@ export class ScriptedModel {
           : input instanceof URL
             ? input.href
             : input.url;
-      if (url.startsWith(MODEL_BASE)) return self.answer(url, init);
+      if (url.startsWith(MODEL_BASE)) return answer(url, init);
       if (/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])[:/]/.test(url))
-        return self.realFetch!(input, init);
-      self.outbound.push({
+        return realFetch(input, init);
+      outbound.push({
         url,
-        method: init?.method ?? (input instanceof Request ? input.method : 'GET'),
+        method:
+          init?.method ?? (input instanceof Request ? input.method : 'GET'),
       });
-      if (url.startsWith(SUPERVISOR_BASE) && self.supervisor)
-        return self.supervisor(url, init);
+      const supervisor = supervisorOf();
+      if (url.startsWith(SUPERVISOR_BASE) && supervisor)
+        return supervisor(url, init);
       return new Response('blocked by the acc3 harness', { status: 599 });
     }) as typeof fetch;
   }
@@ -520,8 +528,11 @@ export class ScriptedModel {
 
   private answer(url: string, init?: RequestInit): Response {
     const body = JSON.parse(String(init?.body ?? '{}'));
-    const messages: { role: string; content?: unknown; tool_call_id?: string }[] =
-      body.messages ?? [];
+    const messages: {
+      role: string;
+      content?: unknown;
+      tool_call_id?: string;
+    }[] = body.messages ?? [];
     const request: ModelRequest = {
       url,
       body,
@@ -533,11 +544,16 @@ export class ScriptedModel {
         .filter((m) => m.role === 'tool')
         .map((m) => ({
           id: String(m.tool_call_id ?? ''),
-          content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+          content:
+            typeof m.content === 'string'
+              ? m.content
+              : JSON.stringify(m.content),
         })),
       instructionText: messages
         .filter((m) => m.role === 'system' || m.role === 'developer')
-        .map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content)))
+        .map((m) =>
+          typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+        )
         .join('\n'),
     };
     this.requests.push(request);
@@ -562,12 +578,9 @@ export interface McpCalls {
 }
 
 export async function mcpTransportFactory() {
-  const { McpServer } = await import(
-    '@modelcontextprotocol/sdk/server/mcp.js'
-  );
-  const { InMemoryTransport } = await import(
-    '@modelcontextprotocol/sdk/inMemory.js'
-  );
+  const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+  const { InMemoryTransport } =
+    await import('@modelcontextprotocol/sdk/inMemory.js');
   const { z } = await import('zod');
   const calls: McpCalls = { searchMail: [], sendMail: [], readyDelete: [] };
   const transport = () => {
@@ -581,7 +594,9 @@ export async function mcpTransportFactory() {
       },
       async (args: { query: string }) => {
         calls.searchMail.push(args);
-        return { content: [{ type: 'text', text: `3 results for ${args.query}` }] };
+        return {
+          content: [{ type: 'text', text: `3 results for ${args.query}` }],
+        };
       },
     );
     server.registerTool(
@@ -641,7 +656,10 @@ export interface World {
   store: AnyModule;
   workspace: AnyModule;
   platform: AnyModule;
-  app: { request: (path: string, init?: RequestInit) => Response | Promise<Response>; fetch: (r: Request) => Response | Promise<Response> };
+  app: {
+    request: (path: string, init?: RequestInit) => Response | Promise<Response>;
+    fetch: (r: Request) => Response | Promise<Response>;
+  };
   nd: AnyModule | null;
   db: Acc3Database | null;
   model: ScriptedModel;
@@ -732,7 +750,10 @@ export async function openWorld(options: WorldOptions = {}): Promise<World> {
     if (wantNd) {
       created = await createAcc3Database();
       const bootstrap = await loadExport<
-        (env: Record<string, string | undefined>, deps: unknown) => Promise<AnyModule> | AnyModule
+        (
+          env: Record<string, string | undefined>,
+          deps: unknown,
+        ) => Promise<AnyModule> | AnyModule
       >('src/server/nemodots/bootstrap.ts', 'createNemoDots');
       const db = created.db;
       const env: Record<string, string | undefined> = {
@@ -819,7 +840,8 @@ export async function openWorld(options: WorldOptions = {}): Promise<World> {
       authed,
       close: async () => {
         model.uninstall();
-        if (server) await new Promise<void>((done) => server!.close(() => done()));
+        if (server)
+          await new Promise<void>((done) => server!.close(() => done()));
         try {
           if (nd && typeof nd.stop === 'function') await nd.stop();
         } finally {
@@ -888,8 +910,13 @@ export async function runDotTurn(
   } = {},
 ): Promise<TurnResult & { threadId: string }> {
   const { lastValueFrom, toArray } = await import('rxjs');
-  const threadId = options.threadId ?? `acc3-thread-${Date.now()}-${++threadSeq}`;
-  if (!world.workspace.conversations().some((t: { id: string }) => t.id === threadId))
+  const threadId =
+    options.threadId ?? `acc3-thread-${Date.now()}-${++threadSeq}`;
+  if (
+    !world.workspace
+      .conversations()
+      .some((t: { id: string }) => t.id === threadId)
+  )
     world.workspace.bindThread(threadId, dotId, 'acc3 turn');
   world.model.reset();
   world.model.script(...steps);
@@ -979,3 +1006,7 @@ export function lazyWorld(
     },
   };
 }
+
+/** Wording of a visible policy refusal. Deliberately broad on phrasing, strict on the fact that a refusal is shown. */
+export const REFUSAL =
+  /denied|refus|not (allowed|permitted|available|enabled|authori[sz]ed)|polic|disabled|blocked|forbidden|incident|unavailable|unknown/i;

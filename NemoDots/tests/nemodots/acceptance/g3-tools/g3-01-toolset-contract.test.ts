@@ -158,9 +158,10 @@ describe('[TP3.4][TP3.3] the incident toolset is closed and contains no shell, b
       '',
     ];
     for (const name of candidates) {
-      expect(Object.hasOwn(C.TEAM_TOOL_INPUTS, name), JSON.stringify(name)).toBe(
-        false,
-      );
+      expect(
+        Object.hasOwn(C.TEAM_TOOL_INPUTS, name),
+        JSON.stringify(name),
+      ).toBe(false);
       expect(
         (C.TEAM_TOOL_ORDER as readonly string[]).includes(name),
         JSON.stringify(name),

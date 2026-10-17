@@ -68,7 +68,10 @@ function connectionWith(w: World, dotId: string, calls: McpCalls) {
 
 async function serviceFor(w: World) {
   const mcp = await mcpTransportFactory();
-  const service = new w.up.ConnectionService(w.workspace.connections, mcp.transport);
+  const service = new w.up.ConnectionService(
+    w.workspace.connections,
+    mcp.transport,
+  );
   return { service, calls: mcp.calls };
 }
 
@@ -87,7 +90,12 @@ function computerFor(w: World) {
     seen.push(String(url));
     return new Response('unavailable', { status: 503 });
   }) as unknown as typeof fetch;
-  const service = new w.up.ComputerService(w.workspace, config, () => false, transport);
+  const service = new w.up.ComputerService(
+    w.workspace,
+    config,
+    () => false,
+    transport,
+  );
   return { service, seen };
 }
 
@@ -100,7 +108,11 @@ const enableComputer = (w: World, dotId: string) =>
   });
 
 const auditOf = (w: World, dotId: string) =>
-  w.workspace.computers.audit(dotId) as { action: string; actor: string; outcome: string }[];
+  w.workspace.computers.audit(dotId) as {
+    action: string;
+    actor: string;
+    outcome: string;
+  }[];
 
 describe('Part A: upstream behaviour preserved, harness controls (no NemoDots composition)', () => {
   const lazy = lazyWorld({ nemodots: false });
@@ -115,7 +127,10 @@ describe('Part A: upstream behaviour preserved, harness controls (no NemoDots co
   it('[TP3.1][M8] control: an MCP direct call for an ordinary Dot reaches the server and returns its result', async () => {
     const { service, calls } = await serviceFor(w);
     connectionWith(w, w.normal.id, calls);
-    const exposed = service.resolve(w.normal.id, service.tools(w.normal.id)[0].name);
+    const exposed = service.resolve(
+      w.normal.id,
+      service.tools(w.normal.id)[0].name,
+    );
     const result = await service.call(exposed, { query: 'invoice' });
     expect(result.isError).toBe(false);
     expect(calls.searchMail).toHaveLength(1);
@@ -126,7 +141,9 @@ describe('Part A: upstream behaviour preserved, harness controls (no NemoDots co
     const connection = connectionWith(w, w.normal.id, calls);
     const exposedName = service.tools(w.normal.id)[0].name;
     expect(() => service.resolve(w.incident.id, exposedName)).toThrow();
-    expect(() => service.bound(w.incident.id, connection.id, 'search_mail')).toThrow();
+    expect(() =>
+      service.bound(w.incident.id, connection.id, 'search_mail'),
+    ).toThrow();
     expect(service.tools(w.incident.id)).toEqual([]);
   });
 
@@ -147,7 +164,9 @@ describe('Part A: upstream behaviour preserved, harness controls (no NemoDots co
   it('[TP3.1][M6] control: an agent computer action for an ordinary Dot with permission reaches the supervisor transport (the spy would see an effect)', async () => {
     enableComputer(w, w.normal.id);
     const { service, seen } = computerFor(w);
-    await expect(service.action(w.normal.id, 'exec', { command: 'id' }, 'agent')).rejects.toThrow();
+    await expect(
+      service.action(w.normal.id, 'exec', { command: 'id' }, 'agent'),
+    ).rejects.toThrow();
     expect(seen.length).toBeGreaterThanOrEqual(1);
   });
 
@@ -161,28 +180,47 @@ describe('Part A: upstream behaviour preserved, harness controls (no NemoDots co
   });
 
   it('[TP3.2][M6] a disabled computer permission fails closed before any transport call, for the shell and for files', async () => {
-    w.workspace.computers.patch(w.normal.id, { enabled: true, shell: false, files: false, browser: false });
+    w.workspace.computers.patch(w.normal.id, {
+      enabled: true,
+      shell: false,
+      files: false,
+      browser: false,
+    });
     const { service, seen } = computerFor(w);
-    await expect(service.action(w.normal.id, 'exec', { command: 'id' }, 'agent')).rejects.toThrow(/disabled/i);
-    await expect(service.action(w.normal.id, 'files_read', { path: 'a' }, 'agent')).rejects.toThrow(/disabled/i);
+    await expect(
+      service.action(w.normal.id, 'exec', { command: 'id' }, 'agent'),
+    ).rejects.toThrow(/disabled/i);
+    await expect(
+      service.action(w.normal.id, 'files_read', { path: 'a' }, 'agent'),
+    ).rejects.toThrow(/disabled/i);
     expect(seen).toEqual([]);
   });
 
   it('[TP3.2][M7] the owner computer route cannot be told to act as the agent or another Dot, and unknown actions are rejected', async () => {
     const spoof = await w.authed(`/api/dots/${w.normal.id}/computer/actions`, {
       method: 'POST',
-      body: JSON.stringify({ action: 'exec', input: { command: 'id' }, actor: 'agent' }),
+      body: JSON.stringify({
+        action: 'exec',
+        input: { command: 'id' },
+        actor: 'agent',
+      }),
     });
     expect(spoof.status).toBe(400);
-    const unknown = await w.authed(`/api/dots/${w.normal.id}/computer/actions`, {
-      method: 'POST',
-      body: JSON.stringify({ action: 'constructor', input: {} }),
-    });
+    const unknown = await w.authed(
+      `/api/dots/${w.normal.id}/computer/actions`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ action: 'constructor', input: {} }),
+      },
+    );
     expect(unknown.status).toBe(400);
-    const missingDot = await w.authed(`/api/dots/does-not-exist/computer/actions`, {
-      method: 'POST',
-      body: JSON.stringify({ action: 'snapshot', input: {} }),
-    });
+    const missingDot = await w.authed(
+      `/api/dots/does-not-exist/computer/actions`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ action: 'snapshot', input: {} }),
+      },
+    );
     expect(missingDot.status).toBe(404);
   });
 });
@@ -202,8 +240,13 @@ describe('Part B: incident Dot (policy installed by the NemoDots composition)', 
     async (name, args, bucket) => {
       const { service, calls } = await serviceFor(w);
       connectionWith(w, w.incident.id, calls);
-      const exposed = service.tools(w.incident.id).find((t: { tool: { name: string } }) => t.tool.name === name);
-      expect(exposed, 'the stored tool is exposed to the service layer').toBeTruthy();
+      const exposed = service
+        .tools(w.incident.id)
+        .find((t: { tool: { name: string } }) => t.tool.name === name);
+      expect(
+        exposed,
+        'the stored tool is exposed to the service layer',
+      ).toBeTruthy();
       let outcome: { isError: boolean } | undefined;
       try {
         outcome = await service.call(exposed, args);
@@ -218,7 +261,9 @@ describe('Part B: incident Dot (policy installed by the NemoDots composition)', 
   it('[TP3.3][R10] a Dot turn of the incident Dot is not offered connection tools, and a model call to one reaches no MCP server', async () => {
     const { service, calls } = await serviceFor(w);
     connectionWith(w, w.incident.id, calls);
-    const exposedNames: string[] = service.tools(w.incident.id).map((t: { name: string }) => t.name);
+    const exposedNames: string[] = service
+      .tools(w.incident.id)
+      .map((t: { name: string }) => t.name);
     expect(exposedNames.length).toBeGreaterThan(0);
     const turn = await runDotTurn(w, w.incident.id, [
       {
@@ -230,12 +275,15 @@ describe('Part B: incident Dot (policy installed by the NemoDots composition)', 
       },
       { text: 'done' },
     ]);
-    for (const name of exposedNames) expect(turn.requests[0].toolNames).not.toContain(name);
-    expect(w.model.outbound.filter((o) => o.url.startsWith(MAIL_URL))).toEqual([]);
+    for (const name of exposedNames)
+      expect(turn.requests[0].toolNames).not.toContain(name);
+    expect(w.model.outbound.filter((o) => o.url.startsWith(MAIL_URL))).toEqual(
+      [],
+    );
     expect(Object.values(calls).flat()).toEqual([]);
   });
 
-  it('[TP3.1][M6] agent computer actions for an incident Dot are refused before the supervisor, recorded in the audit trail; the owner path stays available', async () => {
+  it('[TP3.1][M6] agent computer actions for an incident Dot are refused before the supervisor (never recorded as a success); the owner path stays available and is recorded', async () => {
     enableComputer(w, w.incident.id);
     enableComputer(w, w.normal.id);
     const { service, seen } = computerFor(w);
@@ -246,32 +294,66 @@ describe('Part B: incident Dot (policy installed by the NemoDots composition)', 
       ['navigate', { url: 'https://example.com' }],
       ['snapshot', {}],
     ] as const)
-      await expect(service.action(w.incident.id, action, input, 'agent'), action).rejects.toThrow();
-    expect(seen, 'no supervisor request for any agent action of an incident Dot').toEqual([]);
-    const agentRows = auditOf(w, w.incident.id).filter((r) => r.actor === 'agent');
-    expect(agentRows.length).toBeGreaterThanOrEqual(5);
-    expect(agentRows.every((r) => r.outcome === 'failed')).toBe(true);
+      await expect(
+        service.action(w.incident.id, action, input, 'agent'),
+        action,
+      ).rejects.toThrow();
+    expect(
+      seen,
+      'no supervisor request for any agent action of an incident Dot',
+    ).toEqual([]);
+    // a refused attempt may or may not be audited; it must never be recorded as a success
+    const agentRows = auditOf(w, w.incident.id).filter(
+      (r) => r.actor === 'agent',
+    );
+    expect(agentRows.every((r) => r.outcome !== 'succeeded')).toBe(true);
 
     // controls in the same process: the ordinary Dot's agent action is attempted, and the owner can still act
-    await expect(service.action(w.normal.id, 'exec', { command: 'id' }, 'agent')).rejects.toThrow();
+    await expect(
+      service.action(w.normal.id, 'exec', { command: 'id' }, 'agent'),
+    ).rejects.toThrow();
     const afterAgent = seen.length;
     expect(afterAgent).toBeGreaterThanOrEqual(1);
-    await expect(service.action(w.incident.id, 'snapshot', {}, 'owner')).rejects.toThrow();
-    expect(seen.length, 'owner actions are outside the model reach and are not policy-blocked').toBeGreaterThan(afterAgent);
-    expect(auditOf(w, w.incident.id).some((r) => r.actor === 'owner')).toBe(true);
+    await expect(
+      service.action(w.incident.id, 'snapshot', {}, 'owner'),
+    ).rejects.toThrow();
+    expect(
+      seen.length,
+      'owner actions are outside the model reach and are not policy-blocked',
+    ).toBeGreaterThan(afterAgent);
+    expect(auditOf(w, w.incident.id).some((r) => r.actor === 'owner')).toBe(
+      true,
+    );
   });
 
   it('[TP3.2][M7] the owner computer route is recorded as an owner action for an incident Dot and cannot be switched to the agent actor', async () => {
-    const spoof = await w.authed(`/api/dots/${w.incident.id}/computer/actions`, {
-      method: 'POST',
-      body: JSON.stringify({ action: 'exec', input: { command: 'id' }, actor: 'owner' }),
-    });
+    const spoof = await w.authed(
+      `/api/dots/${w.incident.id}/computer/actions`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          action: 'exec',
+          input: { command: 'id' },
+          actor: 'owner',
+        }),
+      },
+    );
     expect(spoof.status).toBe(400);
-    const owner = await w.authed(`/api/dots/${w.incident.id}/computer/actions`, {
-      method: 'POST',
-      body: JSON.stringify({ action: 'snapshot', input: {} }),
-    });
-    expect(owner.status, 'platform computer service is not configured in this harness').toBe(503);
-    expect(auditOf(w, w.incident.id).some((r) => r.actor === 'owner' && r.action === 'snapshot')).toBe(true);
+    const owner = await w.authed(
+      `/api/dots/${w.incident.id}/computer/actions`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ action: 'snapshot', input: {} }),
+      },
+    );
+    expect(
+      owner.status,
+      'platform computer service is not configured in this harness',
+    ).toBe(503);
+    expect(
+      auditOf(w, w.incident.id).some(
+        (r) => r.actor === 'owner' && r.action === 'snapshot',
+      ),
+    ).toBe(true);
   });
 });

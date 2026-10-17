@@ -3,7 +3,7 @@
 // the (public) mission option admission.minAgeMs. Scenario steps go in through
 // the private injector (nemodots_injector role, advanceConfig) or the public
 // owner edit route; nothing about class, fault, key or value reaches the team.
-import { randomBytes } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import pg from 'pg';
 import { MissionSnapshotSchema } from '../../../../../src/server/nemodots/contracts/index.js';
@@ -15,7 +15,6 @@ import {
   ROLE_ENV,
   newOwnerToken,
   probeSecret,
-  redisTrialUrl,
   roleUrl,
   upstreamBaseUrl,
   withDatabase,
@@ -40,7 +39,11 @@ import type {
   TrialRecord,
 } from './record.js';
 import { Sut, importEntry } from './sut.js';
-import { VerifierDb, staleCacheBlobs } from './verifier-db.js';
+import {
+  VerifierDb,
+  seedStaleCacheBlobs,
+  staleCacheBlobs,
+} from './verifier-db.js';
 
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled']);
 const PROGRESS_KINDS = new Set([
@@ -94,22 +97,11 @@ export async function surface(sku: string): Promise<CheckoutProbeSurface> {
   };
 }
 
-interface InjectorModule {
-  seedStaleBlobs?: (o: {
-    redisUrl: string;
-    prefix: string;
-    namespace: string;
-  }) => Promise<unknown>;
-}
 interface VersionAuthority {
-  advanceConfig?: (
+  /** the injector's documented writer: advances from whatever version is current */
+  advanceConfigUnconditionally?: (
     client: pg.ClientBase,
-    input: {
-      key: string;
-      value: unknown;
-      expectedVersion: number;
-      causedBy: { actor: 'injector' };
-    },
+    input: { key: string; value: unknown; causedBy: { actor: 'injector' } },
   ) => Promise<unknown>;
 }
 
@@ -156,45 +148,31 @@ export class StepApplier {
           `config key ${step.key} does not exist in the seeded database`,
         );
       if (step.requiresStaleBlobs) {
-        const injectorModule = await import(
-          /* @vite-ignore */ new URL(
-            '../../../../../src/server/nemodots/sandbox/injector.ts',
-            import.meta.url,
-          ).href
-        ).catch((error: Error) => {
-          throw new EntryPointMissingError(
-            'src/server/nemodots/sandbox/injector.ts',
-            `module failed to load: ${error.message}`,
-          );
-        });
-        const seed = (injectorModule as InjectorModule).seedStaleBlobs;
-        if (typeof seed !== 'function')
-          throw new EntryPointMissingError(
-            'src/server/nemodots/sandbox/injector.ts#seedStaleBlobs',
-            'module has no such export (needed for requiresStaleBlobs steps)',
-          );
-        await seed({
-          redisUrl: redisTrialUrl(),
-          prefix: this.sut.redisPrefix,
-          namespace: String(step.value),
-        });
+        const schema = (await this.db.configEntries())['cache.schema_version']
+          ?.value;
+        if (typeof schema !== 'number')
+          throw new Error('cache.schema_version is not a number');
+        await seedStaleCacheBlobs(
+          this.sut.redisPrefix,
+          String(step.value),
+          schema,
+        );
       }
       if (step.actor === 'injector') {
         const authority = (await importEntry(
           'versionAuthority',
         )) as VersionAuthority;
-        if (typeof authority.advanceConfig !== 'function')
+        if (typeof authority.advanceConfigUnconditionally !== 'function')
           throw new EntryPointMissingError(
-            'src/server/nemodots/sandbox/version-authority.ts#advanceConfig',
+            'src/server/nemodots/sandbox/version-authority.ts#advanceConfigUnconditionally',
             'module has no such export',
           );
         const client = this.injector!;
         await client.query('BEGIN');
         try {
-          await authority.advanceConfig(client, {
+          await authority.advanceConfigUnconditionally(client, {
             key: step.key,
             value: step.value,
-            expectedVersion: before.version,
             causedBy: { actor: 'injector' },
           });
           await client.query('COMMIT');
@@ -708,6 +686,18 @@ async function readSnapshot(
   return parsed.data;
 }
 
+/**
+ * Probe tag header per ARCHITECTURE 9.5 as implemented by the checkout API:
+ * `<runId>.<hex HMAC-SHA256(NEMODOTS_PROBE_SECRET, "probe-run:" + runId)>`.
+ * Computed here from the shared secret, not imported from production.
+ */
+export function probeHeader(runId: string): string {
+  const mac = createHmac('sha256', probeSecret())
+    .update(`probe-run:${runId}`)
+    .digest('hex');
+  return `${runId}.${mac}`;
+}
+
 export async function verifierProbe(
   db: VerifierDb,
   quantity: number,
@@ -716,10 +706,9 @@ export async function verifierProbe(
   const inventoryBefore = await db.inventoryQuantity(PROBE.sku);
   const rowCountsBefore = await db.rowCounts();
   const create = await checkoutRequest('POST', '/orders', {
-    body: { sku: PROBE.sku, quantity },
+    body: { items: [{ sku: PROBE.sku, quantity }] },
     headers: {
-      [PROBE.header]: runId,
-      'x-nemodots-probe-secret': probeSecret(),
+      [PROBE.header]: probeHeader(runId),
     },
   }).catch((error: Error) => ({
     status: 0,

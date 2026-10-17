@@ -223,12 +223,13 @@ export async function sampleHealthWindow(
       const body = (result.body ?? {}) as {
         status?: string;
         errorClasses?: string[];
+        errors?: string[];
       };
       samples.push({
         at: started,
         status: result.status,
         health: typeof body.status === 'string' ? body.status : null,
-        errorClasses: body.errorClasses ?? [],
+        errorClasses: body.errors ?? body.errorClasses ?? [],
       });
     } catch {
       samples.push({ at: started, status: 0, health: null, errorClasses: [] });

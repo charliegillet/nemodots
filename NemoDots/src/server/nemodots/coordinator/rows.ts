@@ -57,7 +57,6 @@ export interface MissionRow {
   acceptance_receipt_id: string | null;
   failure_reason: string | null;
   cancellation: Mission['cancellation'];
-  replan_count: number;
   created_at: Date;
   started_at: Date | null;
   finished_at: Date | null;

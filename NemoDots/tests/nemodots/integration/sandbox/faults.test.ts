@@ -190,16 +190,7 @@ describe('F4 stale replica', () => {
         checkoutUrl: 'http://checkout.invalid',
         probeSecret: s.probeSecret,
         windowMs: 0,
-        fetch: async (url, init) => {
-          const path = new URL(String(url)).pathname;
-          const headers = new Headers(init?.headers);
-          const response = await s.runtime.app.request(path, {
-            method: init?.method,
-            headers: Object.fromEntries(headers.entries()),
-            body: init?.body as string | undefined,
-          });
-          return response;
-        },
+        fetch: s.fetch,
       });
       // a few healthy orders first: the replica snapshot is now behind the primary
       expect((await order(s, 'SKU-0024', 2)).status).toBe(201);
@@ -260,12 +251,7 @@ describe('F4 stale replica', () => {
         checkoutUrl: 'http://checkout.invalid',
         probeSecret: s.probeSecret,
         windowMs: 0,
-        fetch: async (url, init) =>
-          s.runtime.app.request(new URL(String(url)).pathname, {
-            method: init?.method,
-            headers: Object.fromEntries(new Headers(init?.headers).entries()),
-            body: init?.body as string | undefined,
-          }),
+        fetch: s.fetch,
       });
       expect((await order(s, 'SKU-0001', 1)).status).toBe(201);
       await (

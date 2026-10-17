@@ -2,8 +2,17 @@
 import { afterAll } from 'vitest';
 import { type EventTail, type NemoApi } from './api.js';
 import { NEUTRAL_CONSTRAINTS, NEUTRAL_GOAL } from './config.js';
-import { type Provider, type ProviderScript, startProvider } from './provider.js';
-import { readConfig, startSystem, type System, type SystemOptions } from './system.js';
+import {
+  type Provider,
+  type ProviderScript,
+  startProvider,
+} from './provider.js';
+import {
+  readConfig,
+  startSystem,
+  type System,
+  type SystemOptions,
+} from './system.js';
 import type { MissionSnapshot } from '../../../../src/server/nemodots/contracts/index.js';
 
 /**
@@ -18,7 +27,9 @@ export interface LazySystemOptions {
   system?: Omit<SystemOptions, 'providerUrl' | 'providerModel'>;
   providerPort: number;
 }
-export function lazySystem(input: LazySystemOptions | (() => LazySystemOptions)) {
+export function lazySystem(
+  input: LazySystemOptions | (() => LazySystemOptions),
+) {
   let starting: Promise<{ system: System; provider: Provider }> | null = null;
   const get = () => {
     starting ??= (async () => {
@@ -78,7 +89,10 @@ export async function finish(api: NemoApi, missionId: string, tail: EventTail) {
 }
 
 /** A value different from `current` inside the key's documented domain (oracle spec-enums). */
-export function alternateValue(key: string, current: unknown): string | number | boolean {
+export function alternateValue(
+  key: string,
+  current: unknown,
+): string | number | boolean {
   switch (key) {
     case 'cache.schema_version': {
       const n = Number(current);
@@ -106,7 +120,11 @@ export function alternateValue(key: string, current: unknown): string | number |
 }
 
 /** Owner-style manual edit through the documented route, using the live version from the verifier role. */
-export async function changeSource(system: System, key: string, value?: string | number | boolean) {
+export async function changeSource(
+  system: System,
+  key: string,
+  value?: string | number | boolean,
+) {
   const before = await readConfig(system, key);
   const next = value ?? alternateValue(key, before.value);
   const result = await system.api.editSource(key, next, before.version);

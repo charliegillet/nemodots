@@ -10,6 +10,7 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   INJECTION,
+  REFUSAL,
   SUPERVISOR_BASE,
   controlledStateFingerprint,
   lazyWorld,
@@ -48,7 +49,12 @@ const page = (spaceId: string, title: string, content = `# ${title}\nbody`) =>
   w.workspace.pages.create(spaceId, { title, content });
 const pagesIn = (spaceId: string) =>
   JSON.stringify(
-    w.workspace.pages.list(spaceId).map((p: { id: string; revision: number; content?: string }) => [p.id, p.revision]),
+    w.workspace.pages
+      .list(spaceId)
+      .map((p: { id: string; revision: number; content?: string }) => [
+        p.id,
+        p.revision,
+      ]),
   );
 
 // What an incident Dot may be offered (TOOL_COVERAGE section 2/3: page tools are instrumented or policy-checked,
@@ -75,7 +81,11 @@ describe('[TP3.1] model-visible reads record scoped provenance (TOOL_COVERAGE R3
   it('[TP3.1][R8] read_space_page by an incident Dot registers a page snapshot receipt in the ledger and a model call', async () => {
     const p = page(w.spaceA, 'Runbook page');
     const turn = await runDotTurn(w, w.incident.id, [
-      { toolCalls: [{ id: 'c1', name: 'read_space_page', arguments: { id: p.id } }] },
+      {
+        toolCalls: [
+          { id: 'c1', name: 'read_space_page', arguments: { id: p.id } },
+        ],
+      },
       { text: 'read it' },
     ]);
     expect(turn.runError).toBeUndefined();
@@ -87,16 +97,26 @@ describe('[TP3.1] model-visible reads record scoped provenance (TOOL_COVERAGE R3
     ).not.toEqual([]);
     const telemetry = await w.authed('/api/nemodots/telemetry/summary');
     expect(telemetry.status).toBe(200);
-    expect(((await telemetry.json()) as { calls: number }).calls).toBeGreaterThanOrEqual(1);
+    expect(
+      ((await telemetry.json()) as { calls: number }).calls,
+    ).toBeGreaterThanOrEqual(1);
   });
 
   it('[TP3.1][R6] list_authorized_spaces returns only the Spaces the Dot is granted', async () => {
     const incident = await runDotTurn(w, w.incident.id, [
-      { toolCalls: [{ id: 'c1', name: 'list_authorized_spaces', arguments: {} }] },
+      {
+        toolCalls: [
+          { id: 'c1', name: 'list_authorized_spaces', arguments: {} },
+        ],
+      },
       { text: 'ok' },
     ]);
     const normal = await runDotTurn(w, w.normal.id, [
-      { toolCalls: [{ id: 'c1', name: 'list_authorized_spaces', arguments: {} }] },
+      {
+        toolCalls: [
+          { id: 'c1', name: 'list_authorized_spaces', arguments: {} },
+        ],
+      },
       { text: 'ok' },
     ]);
     const incidentSpaces = incident.resultOf('c1') ?? '';
@@ -108,10 +128,83 @@ describe('[TP3.1] model-visible reads record scoped provenance (TOOL_COVERAGE R3
   });
 });
 
+describe('[TP3.1] memories and the current page (TOOL_COVERAGE R2, R3)', () => {
+  it('[TP3.1][R2] with memory disabled for the incident Dot its stored preferences never reach the model; an ordinary Dot still receives them (control)', async () => {
+    w.store.saveMemory('ACC3-MEMORY-PREFERENCE-0042');
+    const dot = w.workspace.dot(w.incident.id);
+    w.workspace.updateDot(w.incident.id, {
+      name: dot.name,
+      instructions: dot.instructions,
+      researchAllowed: dot.researchAllowed,
+      memoryAllowed: false,
+      appsAllowed: dot.appsAllowed,
+      composioToolkits: dot.composioToolkits,
+      spaceId: w.spaceA,
+      spaceIds: [w.spaceA],
+    });
+    try {
+      const incident = await runDotTurn(w, w.incident.id, [{ text: 'hello' }]);
+      expect(incident.requests[0].instructionText).not.toContain(
+        'ACC3-MEMORY-PREFERENCE-0042',
+      );
+      const control = await runDotTurn(w, w.normal.id, [{ text: 'hello' }]);
+      expect(control.requests[0].instructionText).toContain(
+        'ACC3-MEMORY-PREFERENCE-0042',
+      );
+    } finally {
+      w.workspace.updateDot(w.incident.id, {
+        name: dot.name,
+        instructions: dot.instructions,
+        researchAllowed: dot.researchAllowed,
+        memoryAllowed: dot.memoryAllowed,
+        appsAllowed: dot.appsAllowed,
+        composioToolkits: dot.composioToolkits,
+        spaceId: w.spaceA,
+        spaceIds: [w.spaceA],
+      });
+    }
+  });
+
+  it('[TP3.1][R2] with memory enabled, a memory that reaches an incident Dot is recorded in the ledger (enabled reads are instrumented), otherwise it is withheld', async () => {
+    const memory = w.store.saveMemory('ACC3-MEMORY-ENABLED-0043');
+    const turn = await runDotTurn(w, w.incident.id, [{ text: 'hello' }]);
+    const reached = turn.requests[0].instructionText.includes(
+      'ACC3-MEMORY-ENABLED-0043',
+    );
+    if (reached)
+      expect(
+        await tablesContaining(w.db!.admin, memory.id),
+        'a memory shown to an incident Dot must carry its id into the model-call record',
+      ).not.toEqual([]);
+  });
+
+  it('[TP3.1][R3] the current page of a conversation is shown to the Dot as untrusted data and its revision is recorded in the ledger', async () => {
+    const threadId = `acc3-page-thread-${Date.now()}`;
+    w.workspace.bindThread(threadId, w.incident.id, 'page conversation');
+    const p = w.workspace.pages.create(
+      w.spaceA,
+      { title: 'Current page', content: 'CURRENT-PAGE-BODY' },
+      threadId,
+    );
+    const turn = await runDotTurn(w, w.incident.id, [{ text: 'ok' }], {
+      threadId,
+    });
+    expect(turn.requests[0].instructionText).toContain('CURRENT-PAGE-BODY');
+    expect(turn.requests[0].instructionText).toMatch(/untrusted/i);
+    expect(
+      await tablesContaining(w.db!.admin, `opendots.page/${p.id}`),
+    ).not.toEqual([]);
+  });
+});
+
 describe('[TP3.1] mutations are policy-checked at their execution boundary (TOOL_COVERAGE M1, M2, M14)', () => {
   it('[TP3.1][M2] edit_space_page by an incident Dot is refused with a visible tool error and the page is unchanged; an unlisted Dot may still edit', async () => {
     const p = page(w.spaceA, 'Edit target');
-    const edit = { id: p.id, content: 'changed by the model', expectedRevision: 1 };
+    const edit = {
+      id: p.id,
+      content: 'changed by the model',
+      expectedRevision: 1,
+    };
     const refused = await runDotTurn(w, w.incident.id, [
       { toolCalls: [{ id: 'e1', name: 'edit_space_page', arguments: edit }] },
       { text: 'done' },
@@ -120,8 +213,11 @@ describe('[TP3.1] mutations are policy-checked at their execution boundary (TOOL
     expect(after.revision).toBe(1);
     expect(after.content).toBe(p.content);
     const message = refused.resultOf('e1');
-    expect(message, 'the model must see a tool result for the refused call').toBeTruthy();
-    expect(message).toMatch(/denied|refus|not allowed|policy|disabled|blocked|forbidden|incident/i);
+    expect(
+      message,
+      'the model must see a tool result for the refused call',
+    ).toBeTruthy();
+    expect(message).toMatch(REFUSAL);
 
     const control = page(w.spaceA, 'Edit control');
     const allowed = await runDotTurn(w, w.normal.id, [
@@ -130,7 +226,11 @@ describe('[TP3.1] mutations are policy-checked at their execution boundary (TOOL
           {
             id: 'e2',
             name: 'edit_space_page',
-            arguments: { id: control.id, content: 'edited', expectedRevision: 1 },
+            arguments: {
+              id: control.id,
+              content: 'edited',
+              expectedRevision: 1,
+            },
           },
         ],
       },
@@ -155,9 +255,7 @@ describe('[TP3.1] mutations are policy-checked at their execution boundary (TOOL
       { text: 'done' },
     ]);
     expect(pagesIn(w.spaceA)).toBe(before);
-    expect(refused.resultOf('n1') ?? '').toMatch(
-      /denied|refus|not allowed|policy|disabled|blocked|forbidden|projection|incident/i,
-    );
+    expect(refused.resultOf('n1') ?? '').toMatch(REFUSAL);
     const created = await runDotTurn(w, w.normal.id, [
       {
         toolCalls: [
@@ -185,7 +283,11 @@ describe('[TP3.1] mutations are policy-checked at their execution boundary (TOOL
             {
               id: 'h1',
               name: 'edit_space_page',
-              arguments: { id: p.id, content: 'channel edit', expectedRevision: 1 },
+              arguments: {
+                id: p.id,
+                content: 'channel edit',
+                expectedRevision: 1,
+              },
             },
           ],
         },
@@ -204,8 +306,16 @@ describe('[TP3.2] model-supplied ids and revoked grants grant nothing', () => {
     const turn = await runDotTurn(w, w.incident.id, [
       {
         toolCalls: [
-          { id: 's1', name: 'list_space_pages', arguments: { spaceId: w.spaceB } },
-          { id: 's2', name: 'read_space_page', arguments: { id: pb.id, spaceId: w.spaceB } },
+          {
+            id: 's1',
+            name: 'list_space_pages',
+            arguments: { spaceId: w.spaceB },
+          },
+          {
+            id: 's2',
+            name: 'read_space_page',
+            arguments: { id: pb.id, spaceId: w.spaceB },
+          },
           {
             id: 's3',
             name: 'create_space_page',
@@ -214,7 +324,12 @@ describe('[TP3.2] model-supplied ids and revoked grants grant nothing', () => {
           {
             id: 's4',
             name: 'edit_space_page',
-            arguments: { id: pb.id, content: 'tampered', expectedRevision: 1, spaceId: w.spaceB },
+            arguments: {
+              id: pb.id,
+              content: 'tampered',
+              expectedRevision: 1,
+              spaceId: w.spaceB,
+            },
           },
         ],
       },
@@ -224,10 +339,20 @@ describe('[TP3.2] model-supplied ids and revoked grants grant nothing', () => {
       expect(turn.resultOf(id) ?? '', id).not.toContain('B-ONLY-CONTENT');
     expect(turn.resultOf('s1') ?? '').not.toContain(pb.id);
     expect(pagesIn(w.spaceB)).toBe(beforeB);
-    expect(w.workspace.pages.get(w.spaceB, pb.id).content).toBe('B-ONLY-CONTENT');
+    expect(w.workspace.pages.get(w.spaceB, pb.id).content).toBe(
+      'B-ONLY-CONTENT',
+    );
     // control: the unlisted Dot has the Space B grant, so the same read works
     const control = await runDotTurn(w, w.normal.id, [
-      { toolCalls: [{ id: 'k1', name: 'read_space_page', arguments: { id: pb.id, spaceId: w.spaceB } }] },
+      {
+        toolCalls: [
+          {
+            id: 'k1',
+            name: 'read_space_page',
+            arguments: { id: pb.id, spaceId: w.spaceB },
+          },
+        ],
+      },
       { text: 'done' },
     ]);
     expect(control.resultOf('k1') ?? '').toContain('B-ONLY-CONTENT');
@@ -260,11 +385,25 @@ describe('[TP3.2] model-supplied ids and revoked grants grant nothing', () => {
       });
     try {
       const turn = await runDotTurn(w, w.normal.id, [
-        { toolCalls: [{ id: 'r1', name: 'read_space_page', arguments: { id: pb.id, spaceId: w.spaceB } }] },
+        {
+          toolCalls: [
+            {
+              id: 'r1',
+              name: 'read_space_page',
+              arguments: { id: pb.id, spaceId: w.spaceB },
+            },
+          ],
+        },
         () => {
           revoke();
           return {
-            toolCalls: [{ id: 'r2', name: 'read_space_page', arguments: { id: pb.id, spaceId: w.spaceB } }],
+            toolCalls: [
+              {
+                id: 'r2',
+                name: 'read_space_page',
+                arguments: { id: pb.id, spaceId: w.spaceB },
+              },
+            ],
           };
         },
         { text: 'done' },
@@ -281,7 +420,10 @@ describe('[TP3.3][TP3.4] disabled and unknown capabilities fail closed; no shell
   // A tool outside the page-tool allow-list may be omitted from the offer or offered-but-refused;
   // what is never allowed is an effect. Plausible arguments make a refusal come from policy, not from schema validation.
   const PLAUSIBLE_ARGS: Record<string, Record<string, unknown>> = {
-    search_web: { objective: 'status of the checkout vendor', search_queries: ['checkout vendor status'] },
+    search_web: {
+      objective: 'status of the checkout vendor',
+      search_queries: ['checkout vendor status'],
+    },
     read_public_page: { url: 'https://example.com/status' },
     computer_exec: { command: 'id' },
     computer_files_read: { path: 'notes.txt' },
@@ -293,7 +435,7 @@ describe('[TP3.3][TP3.4] disabled and unknown capabilities fail closed; no shell
     computer_screenshot: {},
   };
 
-  it('[TP3.3][TP3.4][R9][R9b][R12] with research, web search and a computer enabled, every tool the incident Dot is offered beyond the page tools is refused with zero outbound effect; the same call from an unlisted Dot is attempted (control)', async () => {
+  it('[TP3.3][TP3.4][R9][R9b][R12][M12] with research, web search and a computer enabled, every tool the incident Dot is offered beyond the page tools is refused with zero outbound effect; the same call from an unlisted Dot is attempted (control)', async () => {
     const dot = w.workspace.dot(w.incident.id);
     w.workspace.updateDot(w.incident.id, {
       name: dot.name,
@@ -340,12 +482,12 @@ describe('[TP3.3][TP3.4] disabled and unknown capabilities fail closed; no shell
         `incident Dot reached ${JSON.stringify(beyond)}`,
       ).toEqual([]);
       for (const call of calls)
-        expect(turn.resultOf(call.id) ?? '', call.name).toMatch(
-          /denied|refus|not allowed|policy|disabled|blocked|forbidden|unknown|incident/i,
-        );
+        expect(turn.resultOf(call.id) ?? '', call.name).toMatch(REFUSAL);
 
       // control: the unlisted Dot is offered the same tools and the call IS attempted (the spy sees it)
-      const controlOffer = await runDotTurn(w, w.normal.id, [{ text: 'hello' }]);
+      const controlOffer = await runDotTurn(w, w.normal.id, [
+        { text: 'hello' },
+      ]);
       const controlBeyond = controlOffer.requests[0].toolNames.filter(
         (name) => name in PLAUSIBLE_ARGS,
       );
@@ -382,8 +524,12 @@ describe('[TP3.3][TP3.4] disabled and unknown capabilities fail closed; no shell
     try {
       const turn = await runDotTurn(w, w.incident.id, [{ text: 'hello' }]);
       expect(turn.runError).toBeUndefined();
-      expect(turn.requests[0].toolNames.filter((n) => !INCIDENT_MAY_SEE.has(n))).toEqual([]);
-      expect(w.model.outbound.filter((o) => /composio/i.test(o.url))).toEqual([]);
+      expect(
+        turn.requests[0].toolNames.filter((n) => !INCIDENT_MAY_SEE.has(n)),
+      ).toEqual([]);
+      expect(w.model.outbound.filter((o) => /composio/i.test(o.url))).toEqual(
+        [],
+      );
     } finally {
       w.agentConfig = BASE_CONFIG();
     }
@@ -391,7 +537,8 @@ describe('[TP3.3][TP3.4] disabled and unknown capabilities fail closed; no shell
 
   it('[TP3.3] tool names the model invents (including ones containing read/list/get) execute nothing and change nothing', async () => {
     const p = page(w.spaceA, 'Unknown tool target');
-    const before = pagesIn(w.spaceA) + (await controlledStateFingerprint(w.db!.admin));
+    const before =
+      pagesIn(w.spaceA) + (await controlledStateFingerprint(w.db!.admin));
     const names = [
       'run_shell',
       'read_everything',
@@ -406,34 +553,60 @@ describe('[TP3.3][TP3.4] disabled and unknown capabilities fail closed; no shell
         toolCalls: names.map((name, i) => ({
           id: `u${i}`,
           name,
-          arguments: { command: 'cat /etc/passwd', path: '/etc/passwd', id: p.id },
+          arguments: {
+            command: 'cat /etc/passwd',
+            path: '/etc/passwd',
+            id: p.id,
+          },
         })),
       },
       { text: 'done' },
     ]);
     expect(
-      w.model.outbound.filter((o) => /supervisor\.acc3|composio|parallel/i.test(o.url)),
+      w.model.outbound.filter((o) =>
+        /supervisor\.acc3|composio|parallel/i.test(o.url),
+      ),
     ).toEqual([]);
-    expect(pagesIn(w.spaceA) + (await controlledStateFingerprint(w.db!.admin))).toBe(before);
+    expect(
+      pagesIn(w.spaceA) + (await controlledStateFingerprint(w.db!.admin)),
+    ).toBe(before);
     for (let i = 0; i < names.length; i += 1)
-      expect(turn.resultOf(`u${i}`) ?? '', names[i]).not.toMatch(/root:|BEGIN [A-Z ]*PRIVATE KEY/);
+      expect(turn.resultOf(`u${i}`) ?? '', names[i]).not.toMatch(
+        /root:|BEGIN [A-Z ]*PRIVATE KEY/,
+      );
   });
 });
 
 describe('[TP3.5] instruction-like page text stays data', () => {
   it('[TP3.5][R8] a page whose prose is an injection payload reaches the next model request only as a tool-role message, never as instructions, and triggers no action', async () => {
     const p = page(w.spaceA, 'Hostile page', INJECTION);
-    const before = pagesIn(w.spaceA) + (await controlledStateFingerprint(w.db!.admin));
+    const before =
+      pagesIn(w.spaceA) + (await controlledStateFingerprint(w.db!.admin));
     const turn = await runDotTurn(w, w.incident.id, [
-      { toolCalls: [{ id: 'p1', name: 'read_space_page', arguments: { id: p.id } }] },
+      {
+        toolCalls: [
+          { id: 'p1', name: 'read_space_page', arguments: { id: p.id } },
+        ],
+      },
       { text: 'summarised' },
     ]);
     expect(turn.runError).toBeUndefined();
     const second = turn.requests[1];
-    expect(second, 'the model must be called again with the tool result').toBeTruthy();
-    expect(second.instructionText).not.toContain('IGNORE ALL PREVIOUS INSTRUCTIONS');
-    expect(second.toolResults.some((r) => r.content.includes('IGNORE ALL PREVIOUS INSTRUCTIONS'))).toBe(true);
-    expect(pagesIn(w.spaceA) + (await controlledStateFingerprint(w.db!.admin))).toBe(before);
+    expect(
+      second,
+      'the model must be called again with the tool result',
+    ).toBeTruthy();
+    expect(second.instructionText).not.toContain(
+      'IGNORE ALL PREVIOUS INSTRUCTIONS',
+    );
+    expect(
+      second.toolResults.some((r) =>
+        r.content.includes('IGNORE ALL PREVIOUS INSTRUCTIONS'),
+      ),
+    ).toBe(true);
+    expect(
+      pagesIn(w.spaceA) + (await controlledStateFingerprint(w.db!.admin)),
+    ).toBe(before);
   });
 
   it('[TP3.5][M4] an owner page edit that mimics a ledger fact cannot change controlled configuration values', async () => {
@@ -450,6 +623,9 @@ describe('[TP3.5] instruction-like page text stays data', () => {
     expect(response.status).toBe(200);
     expect(await controlledStateFingerprint(w.db!.admin)).toBe(before);
     const hits = await tablesContaining(w.db!.admin, `opendots.page/${p.id}`);
-    expect(hits, 'the page revision is a traceable ledger dependency, not a config value').not.toEqual([]);
+    expect(
+      hits,
+      'the page revision is a traceable ledger dependency, not a config value',
+    ).not.toEqual([]);
   });
 });

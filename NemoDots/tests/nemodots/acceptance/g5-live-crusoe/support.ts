@@ -459,3 +459,28 @@ export function toolMessages(
 ): ChatMessage[] {
   return messages as unknown as ChatMessage[];
 }
+
+/**
+ * The Crusoe quota is shared with other agents in this checkout (observed 429
+ * max_requests_limit bursts). A call that exhausted its retries purely on
+ * rate_limited is provider saturation, not an adapter defect: repeat the whole
+ * call (still real inference) up to `tries` times. Any other failure returns
+ * immediately so it is reported.
+ */
+export async function completeThroughSaturation(
+  adapter: Adapter,
+  req: ChatRequest,
+  role: ModelRole = 'worker',
+  tries = 3,
+): Promise<StampedResult> {
+  let last!: StampedResult;
+  for (let i = 0; i < tries; i++) {
+    last = await adapter.complete(req, ctx(role));
+    const saturated =
+      last.outcome === 'failed' &&
+      last.attempts.every((a) => a.error?.class === 'rate_limited');
+    if (!saturated) return last;
+    await new Promise((r) => setTimeout(r, 5000 * (i + 1)));
+  }
+  return last;
+}

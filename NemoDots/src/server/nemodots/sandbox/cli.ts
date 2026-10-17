@@ -130,8 +130,9 @@ async function notify(argv: string[]) {
     throw new UsageError('notify-proposed needs --key <config key>');
   const appPool = pool(roleUrl(loadConfig(), 'app'), 'nemodots-notify-cli', 1);
   try {
+    const sentAt = Date.now();
     await notifyProposed(appPool, flags.key);
-    console.log(`notify-proposed: sent for ${flags.key}`);
+    console.log(`notify-proposed: sent for ${flags.key} at=${sentAt}`);
     return 0;
   } finally {
     await appPool.end();

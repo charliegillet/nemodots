@@ -155,3 +155,41 @@ export async function unlinkTrialKeys(prefix: string): Promise<number> {
     await client.quit();
   }
 }
+
+/**
+ * Writes cache blobs of the other schema under `namespace` so that switching
+ * cache.namespace to it reproduces class F1 (a namespace whose blobs this
+ * build cannot decode). Verifier-owned fixture data; key and blob layout follow
+ * ARCHITECTURE 9.1 (`<prefix>:cache:<namespace>:v<schema>:<name>`).
+ */
+export async function seedStaleCacheBlobs(
+  prefix: string,
+  namespace: string,
+  currentSchema: number,
+): Promise<string[]> {
+  if (!/^[a-z0-9-]{1,32}$/.test(namespace))
+    throw new Error('stale blob namespace must match ^[a-z0-9-]{1,32}$');
+  const staleSchema = currentSchema > 1 ? currentSchema - 1 : currentSchema + 1;
+  const client = createClient({ url: redisTrialUrl() });
+  await client.connect();
+  try {
+    const written: string[] = [];
+    for (const name of ['products', 'inventory:PROBE-SKU']) {
+      const key = `${prefix}:cache:${namespace}:v${staleSchema}:${name}`;
+      await client.set(
+        key,
+        JSON.stringify({
+          schema: staleSchema,
+          name,
+          storedAt: Date.now(),
+          data: [],
+        }),
+        { EX: 3600 },
+      );
+      written.push(key);
+    }
+    return written;
+  } finally {
+    await client.quit();
+  }
+}

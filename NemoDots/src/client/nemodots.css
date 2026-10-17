@@ -447,3 +447,149 @@ li.nd-edge-evidence {
   color: #ffd9a3;
 }
 /* theme: end */
+
+/* Mission page layout and forms. */
+.nd-mission-main {
+  overflow-y: auto;
+}
+.nd-mission {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 1280px;
+  width: 100%;
+}
+.nd-heading {
+  margin-bottom: 8px;
+  align-items: flex-start;
+}
+.nd-heading h1 {
+  font-size: 26px;
+  overflow-wrap: anywhere;
+}
+.nd-constraints {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: #565967;
+}
+.nd-lifecycle {
+  flex-wrap: wrap;
+}
+.nd-mission-head {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.nd-mission-facts {
+  margin: 0;
+}
+.nd-mission-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+.nd-col {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+.nd-block-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.nd-back {
+  align-self: flex-start;
+}
+.nd-stream {
+  margin: 0;
+  font-size: 12px;
+  color: #565967;
+}
+.nd-stream-reconnecting,
+.nd-stream-closed {
+  color: #8a5a00;
+  font-weight: 600;
+}
+.nd-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0;
+  font-size: 12px;
+  color: #4d505d;
+}
+.nd-field input,
+.nd-field select,
+.nd-field textarea {
+  font: inherit;
+  padding: 7px 9px;
+  border: 1px solid #dfe2e8;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #333641;
+}
+.nd-inline-field {
+  flex-direction: row;
+  align-items: center;
+  margin: 0;
+}
+.nd-create {
+  background: #ffffff;
+  border: 1px solid #dfe2e8;
+  border-radius: 10px;
+  padding: 14px 16px;
+  min-width: 0;
+}
+.nd-create-title {
+  margin: 0 0 6px;
+  font-size: 16px;
+}
+.nd-create-blocked {
+  color: #8f2a20;
+  background: #fbe3e0;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 6px 0;
+}
+.nd-save {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.nd-acceptance {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+.nd-console-form {
+  border-top: 1px solid #dfe2e8;
+  padding-top: 8px;
+  margin-top: 8px;
+}
+.nd-mission-list li + li {
+  margin-top: 6px;
+}
+.nd-mission-list a.nd-task-row {
+  text-decoration: none;
+  color: inherit;
+}
+@media (max-width: 860px) {
+  .nd-mission-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.nd-mode {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+a.nd-task-row:focus-visible,
+.nd-field :is(input, select, textarea):focus-visible {
+  outline: 2px solid #3b4a8a;
+  outline-offset: 2px;
+}

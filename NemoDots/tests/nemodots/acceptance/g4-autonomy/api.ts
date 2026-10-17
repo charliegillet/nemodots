@@ -39,7 +39,7 @@ export class NemoApi {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const text = await response.text();
-    let json: unknown = null;
+    let json: unknown;
     try {
       json = text ? JSON.parse(text) : null;
     } catch {
@@ -205,7 +205,9 @@ export class EventTail {
     return this.lastEventId;
   }
   of<K extends Kind>(kind: K) {
-    return this.events.filter((e) => e.payload.kind === kind) as (MissionEvent & {
+    return this.events.filter(
+      (e) => e.payload.kind === kind,
+    ) as (MissionEvent & {
       payload: Extract<MissionEvent['payload'], { kind: K }>;
     })[];
   }

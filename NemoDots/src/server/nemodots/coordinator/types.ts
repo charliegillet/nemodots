@@ -96,7 +96,9 @@ export interface OrphanedAttemptInfo {
   record: ModelCallRecord;
   fenceReason: FenceReason;
 }
-export type RecordOrphanedAttempt = (info: OrphanedAttemptInfo) => Promise<void>;
+export type RecordOrphanedAttempt = (
+  info: OrphanedAttemptInfo,
+) => Promise<void>;
 
 export interface IntentRecord {
   id: ActionId;

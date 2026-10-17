@@ -49,7 +49,8 @@ export async function lockFencedAttempt(
   )
     throw new FenceError(context.attemptId, 'attempt_missing');
 
-  const lockClause = options.missionLock === 'update' ? 'FOR UPDATE' : 'FOR SHARE';
+  const lockClause =
+    options.missionLock === 'update' ? 'FOR UPDATE' : 'FOR SHARE';
   const missionResult = await client.query<MissionRow>(
     `SELECT * FROM coordinator.missions WHERE id = $1 ${lockClause}`,
     [context.missionId],
@@ -57,9 +58,7 @@ export async function lockFencedAttempt(
   const mission = missionResult.rows[0];
   if (!mission) throw new FenceError(context.attemptId, 'attempt_missing');
 
-  const attemptResult = await client.query<
-    AttemptRow & { lease_ok: boolean }
-  >(
+  const attemptResult = await client.query<AttemptRow & { lease_ok: boolean }>(
     `SELECT a.*, a.lease_expires_at > clock_timestamp() AS lease_ok
        FROM coordinator.task_attempts a WHERE a.id = $1 FOR UPDATE`,
     [context.attemptId],

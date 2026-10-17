@@ -521,28 +521,41 @@ export class CrusoeInferenceClient implements InferenceAdapter {
       deadlineHit = true;
       controller.abort();
     }, this.deadlineMs);
+    // Rejects the moment the controller aborts, so a read that the runtime
+    // fails to reject on abort can never hold a semaphore slot.
+    const aborted = new Promise<never>((_, reject) =>
+      controller.signal.addEventListener(
+        'abort',
+        () => reject(new DOMException('aborted', 'AbortError')),
+        { once: true },
+      ),
+    );
+    aborted.catch(() => undefined);
     const onAbort = () => controller.abort();
     ctx.signal.addEventListener('abort', onAbort, { once: true });
     const accumulator = new Accumulator(() => this.iso(), ctx.onDelta);
     try {
       if (ctx.signal.aborted) return cancelled();
       arm();
-      const response = await fetch(`${this.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${this.apiKey}`,
-          'content-type': 'application/json',
-          accept: req.stream ? 'text/event-stream' : 'application/json',
-          'x-request-id': ctx.modelCallId,
-        },
-        body,
-        signal: controller.signal,
-        redirect: 'error',
-      });
+      const response = await Promise.race([
+        aborted,
+        fetch(`${this.baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${this.apiKey}`,
+            'content-type': 'application/json',
+            accept: req.stream ? 'text/event-stream' : 'application/json',
+            'x-request-id': ctx.modelCallId,
+          },
+          body,
+          signal: controller.signal,
+          redirect: 'error',
+        }),
+      ]);
       attempt.headersAt = this.iso();
       attempt.httpStatus = response.status;
       if (!response.ok) {
-        const text = await response.text();
+        const text = await Promise.race([aborted, response.text()]);
         const failure = classifyHttpError(
           response.status,
           text.slice(0, 16_384),
@@ -558,7 +571,7 @@ export class CrusoeInferenceClient implements InferenceAdapter {
         const reader = response.body.getReader();
         for (;;) {
           arm();
-          const { done, value } = await reader.read();
+          const { done, value } = await Promise.race([aborted, reader.read()]);
           if (done) break;
           for (const payload of parser.push(value)) accumulator.chunk(payload);
           attempt.firstContentAt ??= accumulator.firstContentAt;
@@ -567,7 +580,9 @@ export class CrusoeInferenceClient implements InferenceAdapter {
         attempt.firstContentAt ??= accumulator.firstContentAt;
         parsed = accumulator.finalize();
       } else {
-        parsed = parseCompletionJson(await response.text());
+        parsed = parseCompletionJson(
+          await Promise.race([aborted, response.text()]),
+        );
       }
       attempt.finishedAt = this.iso();
       attempt.usage = parsed.usage;

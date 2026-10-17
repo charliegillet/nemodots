@@ -106,6 +106,8 @@ export interface SutOptions {
   separateWorker: boolean;
   /** default live; deterministic adapter scenarios use blocked so no inference is spent */
   inferenceMode?: 'live' | 'blocked';
+  /** false = checkout sandbox only (no OpenDots app, no worker); default true */
+  withApp?: boolean;
 }
 
 export class Sut {
@@ -153,8 +155,9 @@ export class Sut {
       'seed',
       'checkoutMain',
       'versionAuthority',
-      'appServer',
-      'bootstrap',
+      ...(options.withApp === false
+        ? []
+        : (['appServer', 'bootstrap'] as const)),
       ...(options.separateWorker ? (['workerMain'] as const) : []),
     ]);
     for (const port of [G6.checkoutPort, G6.appPort])
@@ -177,9 +180,11 @@ export class Sut {
         NEMODOTS_PROBE_SECRET: probeSecret(),
       });
       await sut.waitFor(`${checkoutBase}/health`, 60_000, 'checkout API');
-      sut.spawnApp();
-      await sut.waitForApp();
-      if (options.separateWorker) sut.startWorker();
+      if (options.withApp !== false) {
+        sut.spawnApp();
+        await sut.waitForApp();
+        if (options.separateWorker) sut.startWorker();
+      }
     } catch (error) {
       await sut.stop();
       throw error;

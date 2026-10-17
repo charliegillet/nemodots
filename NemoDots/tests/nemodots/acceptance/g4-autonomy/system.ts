@@ -7,27 +7,23 @@
 // fails with ENTRY POINT MISSING instead of an opaque spawn error.
 import { type ChildProcess, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import pg from 'pg';
 import { createClient } from 'redis';
 import {
+  ENTRY,
   type EntryName,
   requireEntries,
 } from '../driver/entry-points.js';
-import {
-  stackRoleUrls,
-  withDatabase,
-} from '../../helpers/test-db.js';
+import { stackRoleUrls, withDatabase } from '../../helpers/test-db.js';
 import { unlinkByPrefix } from '../../helpers/test-redis.js';
 import { APP_ROOT, G4, mergedEnv, readDotEnv, redactor } from './config.js';
 import { NemoApi } from './api.js';
 
+/** Importable library entry points (resolved with import). */
 export const SYSTEM_ENTRIES: EntryName[] = [
   'bootstrap',
-  'workerMain',
-  'checkoutMain',
-  'seed',
   'checkoutMigration',
   'coordinatorMissions',
   'coordinatorTasks',
@@ -37,6 +33,27 @@ export const SYSTEM_ENTRIES: EntryName[] = [
   'watcher',
   'advanceConfig',
 ];
+
+/**
+ * Process entry points run as `node --import tsx <file>`. Importing them would
+ * execute their main(), so only the file's existence is checked here.
+ */
+const PROCESS_ENTRIES: EntryName[] = ['workerMain', 'checkoutMain', 'seed'];
+
+function requireProcessEntries() {
+  const missing = PROCESS_ENTRIES.map((name) => ENTRY[name]).filter(
+    (file) => !existsSync(resolve(APP_ROOT, file)),
+  );
+  if (missing.length)
+    throw new Error(
+      missing
+        .map(
+          (file) =>
+            `ENTRY POINT MISSING: ${file} (module file does not exist). Required by the frozen acceptance contract (docs/nemodots/ACCEPTANCE_CONTRACT.md section 6).`,
+        )
+        .join('\n'),
+    );
+}
 
 export interface SystemOptions {
   /** Base URL of the provider (scripted stub or passthrough proxy). */
@@ -77,7 +94,12 @@ export interface WorkerHandle {
 
 const NODE = process.execPath;
 
-async function waitFor<T>(label: string, fn: () => Promise<T | null | undefined | false>, timeoutMs: number, intervalMs = 250): Promise<T> {
+async function waitFor<T>(
+  label: string,
+  fn: () => Promise<T | null | undefined | false>,
+  timeoutMs: number,
+  intervalMs = 250,
+): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   let last: unknown = null;
   for (;;) {
@@ -88,47 +110,82 @@ async function waitFor<T>(label: string, fn: () => Promise<T | null | undefined 
       last = error;
     }
     if (Date.now() > deadline)
-      throw new Error(`Timed out after ${timeoutMs} ms waiting for ${label}${last ? ` (last error: ${(last as Error).message})` : ''}`);
+      throw new Error(
+        `Timed out after ${timeoutMs} ms waiting for ${label}${last ? ` (last error: ${(last as Error).message})` : ''}`,
+      );
     await new Promise((r) => setTimeout(r, intervalMs));
   }
 }
 export { waitFor };
 
-function run(command: string[], env: Record<string, string>, label: string, redact: (s: string) => string): Promise<void> {
+function run(
+  command: string[],
+  env: Record<string, string>,
+  label: string,
+  redact: (s: string) => string,
+): Promise<void> {
   return new Promise((resolveRun, reject) => {
-    const child = spawn(NODE, command, { cwd: APP_ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(NODE, command, {
+      cwd: APP_ROOT,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
     let out = '';
     child.stdout.on('data', (d) => (out = (out + d).slice(-4000)));
     child.stderr.on('data', (d) => (out = (out + d).slice(-4000)));
     child.once('exit', (code) =>
-      code === 0 ? resolveRun() : reject(new Error(`${label} exited with ${code}: ${redact(out).slice(-1500)}`)),
+      code === 0
+        ? resolveRun()
+        : reject(
+            new Error(
+              `${label} exited with ${code}: ${redact(out).slice(-1500)}`,
+            ),
+          ),
     );
     child.once('error', reject);
   });
 }
 
 export async function startSystem(options: SystemOptions): Promise<System> {
-  await requireEntries(SYSTEM_ENTRIES);
+  const problems: string[] = [];
+  try {
+    requireProcessEntries();
+  } catch (error) {
+    problems.push((error as Error).message);
+  }
+  try {
+    await requireEntries(SYSTEM_ENTRIES);
+  } catch (error) {
+    problems.push((error as Error).message);
+  }
+  if (problems.length) throw new Error(problems.join('\n'));
 
   const roleUrls = stackRoleUrls();
   const hex = randomBytes(5).toString('hex');
   const dbName = `${G4.dbPrefix}${hex}`;
   if (!/^acc4_[0-9a-f]+$/.test(dbName)) throw new Error('bad database name');
-  const redisUrl = options.redisUrl ?? `redis://127.0.0.1:${process.env.NEMODOTS_REDIS_PORT ?? 56379}/${G4.redisDb}`;
-  if (/:6379\b/.test(redisUrl)) throw new Error('Refusing the user Redis on 6379.');
+  const redisUrl =
+    options.redisUrl ??
+    `redis://127.0.0.1:${process.env.NEMODOTS_REDIS_PORT ?? 56379}/${G4.redisDb}`;
+  if (/:6379\b/.test(redisUrl))
+    throw new Error('Refusing the user Redis on 6379.');
   const redisPrefix = `${G4.redisPrefixRoot}:${hex}`;
   const probeSecret = randomBytes(24).toString('hex');
   const scratch = resolve(G4.scratch, hex);
   mkdirSync(scratch, { recursive: true });
 
-  const admin = new pg.Client({ connectionString: roleUrls.admin, application_name: 'nemodots-acc4-admin' });
+  const admin = new pg.Client({
+    connectionString: roleUrls.admin,
+    application_name: 'nemodots-acc4-admin',
+  });
   await admin.connect();
   const children: ChildProcess[] = [];
   let logBuffer = '';
   let verifier: pg.Client | null = null;
   let redisClient: ReturnType<typeof createClient> | null = null;
 
-  const dbUrl = (role: keyof typeof roleUrls) => withDatabase(roleUrls[role], dbName);
+  const dbUrl = (role: keyof typeof roleUrls) =>
+    withDatabase(roleUrls[role], dbName);
   const roleEnv: Record<string, string> = {
     NEMODOTS_PG_URL_ADMIN: dbUrl('admin'),
     NEMODOTS_PG_URL_APP: dbUrl('app'),
@@ -168,7 +225,13 @@ export async function startSystem(options: SystemOptions): Promise<System> {
     WEB_SEARCH_PROVIDER: 'disabled',
     ...(options.intelligence
       ? Object.fromEntries(
-          ['CPK_INTELLIGENCE_API_KEY', 'INTELLIGENCE_API_KEY', 'INTELLIGENCE_API_URL', 'INTELLIGENCE_GATEWAY_WS_URL', 'INTELLIGENCE_WS_URL']
+          [
+            'CPK_INTELLIGENCE_API_KEY',
+            'INTELLIGENCE_API_KEY',
+            'INTELLIGENCE_API_URL',
+            'INTELLIGENCE_GATEWAY_WS_URL',
+            'INTELLIGENCE_WS_URL',
+          ]
             .map((name) => [name, mergedEnv()[name]] as const)
             .filter((pair): pair is [string, string] => Boolean(pair[1])),
         )
@@ -179,15 +242,28 @@ export async function startSystem(options: SystemOptions): Promise<System> {
 
   const track = (child: ChildProcess, label: string) => {
     children.push(child);
-    const sink = (d: Buffer) => (logBuffer = (logBuffer + `[${label}] ${redact(String(d))}`).slice(-20000));
+    const sink = (d: Buffer) =>
+      (logBuffer = (logBuffer + `[${label}] ${redact(String(d))}`).slice(
+        -20000,
+      ));
     child.stdout?.on('data', sink);
     child.stderr?.on('data', sink);
     return child;
   };
   const spawnTs = (file: string, env: Record<string, string>, label: string) =>
-    track(spawn(NODE, ['--import', 'tsx', file], { cwd: APP_ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] }), label);
+    track(
+      spawn(NODE, ['--import', 'tsx', file], {
+        cwd: APP_ROOT,
+        env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }),
+      label,
+    );
 
-  const killChild = async (child: ChildProcess, signal: NodeJS.Signals = 'SIGTERM') => {
+  const killChild = async (
+    child: ChildProcess,
+    signal: NodeJS.Signals = 'SIGTERM',
+  ) => {
     if (child.exitCode !== null || child.signalCode !== null) return;
     const done = new Promise<void>((r) => child.once('exit', () => r()));
     child.kill(signal);
@@ -202,11 +278,20 @@ export async function startSystem(options: SystemOptions): Promise<System> {
   let workerHandle: WorkerHandle | null = null;
   const startApp = async () => {
     app = spawnTs('src/server/index.ts', appEnv, 'app');
-    await waitFor('app /api/nemodots/health', async () => {
-      if (app!.exitCode !== null) throw new Error(`app exited with ${app!.exitCode}: ${logBuffer.slice(-1500)}`);
-      const res = await fetch(`http://127.0.0.1:${G4.appPort}/api/nemodots/health`).catch(() => null);
-      return res && res.status === 200 ? true : null;
-    }, 90_000);
+    await waitFor(
+      'app /api/nemodots/health',
+      async () => {
+        if (app!.exitCode !== null)
+          throw new Error(
+            `app exited with ${app!.exitCode}: ${logBuffer.slice(-1500)}`,
+          );
+        const res = await fetch(
+          `http://127.0.0.1:${G4.appPort}/api/nemodots/health`,
+        ).catch(() => null);
+        return res && res.status === 200 ? true : null;
+      },
+      90_000,
+    );
   };
 
   const system: System = {
@@ -228,8 +313,14 @@ export async function startSystem(options: SystemOptions): Promise<System> {
       return workerHandle;
     },
     async startWorker() {
-      const child = spawnTs('src/server/nemodots/worker-main.ts', { ...appEnv, NEMODOTS_WORKERS: '2' }, 'worker');
-      const exited = new Promise<number | null>((r) => child.once('exit', (code) => r(code)));
+      const child = spawnTs(
+        'src/server/nemodots/worker-main.ts',
+        { ...appEnv, NEMODOTS_WORKERS: '2' },
+        'worker',
+      );
+      const exited = new Promise<number | null>((r) =>
+        child.once('exit', (code) => r(code)),
+      );
       workerHandle = {
         pid: child.pid!,
         exited,
@@ -242,14 +333,16 @@ export async function startSystem(options: SystemOptions): Promise<System> {
       await startApp();
     },
     async stop() {
-      for (const child of [...children].reverse()) await killChild(child).catch(() => undefined);
+      for (const child of [...children].reverse())
+        await killChild(child).catch(() => undefined);
       try {
         await verifier?.end();
       } catch {
         /* ignore */
       }
       try {
-        if (redisClient) await unlinkByPrefix(redisClient, redisPrefix).catch(() => undefined);
+        if (redisClient)
+          await unlinkByPrefix(redisClient, redisPrefix).catch(() => undefined);
         redisClient?.destroy();
       } catch {
         /* ignore */
@@ -270,9 +363,17 @@ export async function startSystem(options: SystemOptions): Promise<System> {
       /* @vite-ignore */ resolve(APP_ROOT, 'src/server/nemodots/db/migrate.ts')
     );
     await migrate({ connectionString: dbUrl('admin') });
-    await run(['--import', 'tsx', 'src/server/nemodots/sandbox/seed.ts'], { ...common, ...roleEnv }, 'seed', redact);
+    await run(
+      ['--import', 'tsx', 'src/server/nemodots/sandbox/seed.ts'],
+      { ...common, ...roleEnv },
+      'seed',
+      redact,
+    );
 
-    verifier = new pg.Client({ connectionString: dbUrl('verifier'), application_name: 'nemodots-acc4-verifier' });
+    verifier = new pg.Client({
+      connectionString: dbUrl('verifier'),
+      application_name: 'nemodots-acc4-verifier',
+    });
     await verifier.connect();
     redisClient = createClient({ url: redisUrl });
     redisClient.on('error', () => undefined);
@@ -291,10 +392,16 @@ export async function startSystem(options: SystemOptions): Promise<System> {
       },
       'checkout',
     );
-    await waitFor('checkout /health', async () => {
-      const res = await fetch(`${system.checkoutUrl}/health`).catch(() => null);
-      return res ? true : null;
-    }, 60_000);
+    await waitFor(
+      'checkout /health',
+      async () => {
+        const res = await fetch(`${system.checkoutUrl}/health`).catch(
+          () => null,
+        );
+        return res ? true : null;
+      },
+      60_000,
+    );
 
     await startApp();
     if (options.separateWorker) await system.startWorker();
@@ -302,7 +409,10 @@ export async function startSystem(options: SystemOptions): Promise<System> {
   } catch (error) {
     const message = redact((error as Error).message);
     await system.stop().catch(() => undefined);
-    throw new Error(`${message}\n--- child log tail ---\n${redact(logBuffer).slice(-2500)}`);
+    throw new Error(
+      `${message}\n--- child log tail ---\n${redact(logBuffer).slice(-2500)}`,
+      { cause: error },
+    );
   }
 }
 
@@ -321,5 +431,9 @@ export async function committedActionRows(system: System) {
   const { rows } = await system.verifier.query(
     'SELECT key, version, caused_by_action_id FROM checkout.config_versions WHERE caused_by_action_id IS NOT NULL ORDER BY version',
   );
-  return rows as { key: string; version: string | number; caused_by_action_id: string }[];
+  return rows as {
+    key: string;
+    version: string | number;
+    caused_by_action_id: string;
+  }[];
 }

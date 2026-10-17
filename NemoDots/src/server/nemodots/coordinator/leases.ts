@@ -40,12 +40,17 @@ import type { ClaimedAttempt, CoordinatorDeps } from './types.js';
 //   reapExpired   expired running attempt -> `expired`, fence bump, task requeued
 // Lock order everywhere: mission (share) -> attempt -> task.
 
-type LeaseDeps = Pick<CoordinatorDeps, 'pool' | 'config' | 'events' | 'intents'>;
+type LeaseDeps = Pick<
+  CoordinatorDeps,
+  'pool' | 'config' | 'events' | 'intents'
+>;
 
 export interface ClaimOptions {
   workerId: string;
   /** Restrict to one mission (tests, targeted workers). */
   missionId?: MissionId;
+  /** Restrict to one task (targeted workers, tests). */
+  taskId?: TaskId;
   /** Restrict to roles the worker can handle. */
   roles?: readonly TaskRole[];
   leaseMs?: number;
@@ -90,10 +95,11 @@ export async function claimAttempt(
             AND EXISTS (
               SELECT 1 FROM coordinator.tasks t
                WHERE t.mission_id = m.id AND t.status = 'runnable'
-                 AND ($2::text[] IS NULL OR t.role = ANY ($2::text[])))
+                 AND ($2::text[] IS NULL OR t.role = ANY ($2::text[]))
+                 AND ($3::uuid IS NULL OR t.id = $3))
           ORDER BY m.created_at, m.id
             FOR SHARE OF m`,
-        [options.missionId ?? null, roles],
+        [options.missionId ?? null, roles, options.taskId ?? null],
       )
     ).rows;
     if (missions.length === 0) return null;
@@ -102,10 +108,11 @@ export async function claimAttempt(
         `SELECT * FROM coordinator.tasks
           WHERE mission_id = ANY ($1::uuid[]) AND status = 'runnable'
             AND ($2::text[] IS NULL OR role = ANY ($2::text[]))
+            AND ($3::uuid IS NULL OR id = $3)
           ORDER BY created_at, ordinal
           LIMIT 1
             FOR UPDATE SKIP LOCKED`,
-        [missions.map((mission) => mission.id), roles],
+        [missions.map((mission) => mission.id), roles, options.taskId ?? null],
       )
     ).rows[0];
     if (!task) return null;
@@ -164,8 +171,7 @@ export async function claimAttempt(
       repairOf: spec?.repairOf
         ? {
             attemptId: spec.repairOf.attemptId as AttemptId,
-            invalidationEventId: spec.repairOf
-              .invalidationEventId as never,
+            invalidationEventId: spec.repairOf.invalidationEventId as never,
           }
         : null,
       inheritedVectorSize: inherited.length,
@@ -238,11 +244,16 @@ export async function heartbeat(
       RETURNING a.lease_expires_at`,
     [context.attemptId, context.fencingToken, leaseMs],
   );
-  if (rows.length === 1) return { leaseExpiresAt: iso(rows[0].lease_expires_at) };
+  if (rows.length === 1)
+    return { leaseExpiresAt: iso(rows[0].lease_expires_at) };
   const state = await readAttemptState(deps.pool, context.attemptId);
   if (!state) throw new FenceError(context.attemptId, 'attempt_missing');
   if (state.attemptStatus !== 'running')
-    throw new FenceError(context.attemptId, 'attempt_not_running', state.attemptStatus);
+    throw new FenceError(
+      context.attemptId,
+      'attempt_not_running',
+      state.attemptStatus,
+    );
   if (
     state.attemptToken !== context.fencingToken ||
     state.taskFence !== context.fencingToken

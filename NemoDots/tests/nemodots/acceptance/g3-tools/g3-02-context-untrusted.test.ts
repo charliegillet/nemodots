@@ -117,7 +117,13 @@ describe('[TP3.5] instruction-like text stays data', () => {
         if (text.includes(fragment))
           expect(instructionPart, fragment).not.toContain(fragment);
       // control characters never reach the model unescaped
-      expect(out.system).not.toMatch(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/);
+      const controls = [...out.system].filter((ch) => {
+        const code = ch.codePointAt(0)!;
+        return (
+          (code < 0x20 && ![0x09, 0x0a, 0x0d].includes(code)) || code === 0x7f
+        );
+      });
+      expect(controls).toEqual([]);
     },
   );
 

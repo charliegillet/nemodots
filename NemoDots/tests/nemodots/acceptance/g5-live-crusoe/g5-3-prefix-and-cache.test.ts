@@ -21,6 +21,7 @@ import {
 } from '../../../../src/server/nemodots/contracts/index.js';
 import {
   chat,
+  completeThroughSaturation,
   createAdapter,
   ctx,
   loadModule,
@@ -342,7 +343,7 @@ describe('G5.6c cached-token honesty: null = unavailable, 0 only if the provider
       const observed: (number | null)[] = [];
       for (let i = 0; i < 2; i++) {
         raw = undefined;
-        const r = await viaProxy.complete(toRequest(c), ctx('worker'));
+        const r = await completeThroughSaturation(viaProxy, toRequest(c));
         expect(['completed', 'tool_calls']).toContain(r.outcome);
         const details = (
           raw as
@@ -354,7 +355,9 @@ describe('G5.6c cached-token honesty: null = unavailable, 0 only if the provider
             ? details.cached_tokens
             : null;
         expect(r.usage.cachedTokens).toBe(expected);
-        expect(r.attempts[0].usage.cachedTokens).toBe(expected);
+        expect(r.attempts[r.attempts.length - 1].usage.cachedTokens).toBe(
+          expected,
+        );
         if (r.usage.cachedTokens !== null) {
           expect(Number.isInteger(r.usage.cachedTokens)).toBe(true);
           expect(r.usage.cachedTokens).toBeGreaterThanOrEqual(0);
@@ -435,9 +438,10 @@ describe('G5.6c cached-token honesty: null = unavailable, 0 only if the provider
             ctx('worker'),
           );
           expect(r.outcome).toBe('completed');
-          if (r.usage.cachedTokens !== expected) console.log('DBG', JSON.stringify({a: r.attempts.map(x=>({s:x.httpStatus,u:x.usage})), u:r.usage}));
           expect(r.usage.cachedTokens).toBe(expected);
-          expect(r.attempts[0].usage.cachedTokens).toBe(expected);
+          expect(r.attempts[r.attempts.length - 1].usage.cachedTokens).toBe(
+            expected,
+          );
           // the other counters are unaffected and still numeric
           expect(Number.isInteger(r.usage.promptTokens)).toBe(true);
         } finally {

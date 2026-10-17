@@ -20,6 +20,7 @@ import {
   Plus,
   Search,
   Settings2,
+  Target,
   Trash2,
   X,
 } from 'lucide-react';
@@ -47,6 +48,7 @@ import { ResultPane } from './ResultPane';
 import { TaskRow } from './TaskPresentation';
 import { TaskActions } from './TaskActions';
 import { WorkspaceDialog, type Dialog } from './WorkspaceDialog';
+import { MissionPage } from './nemodots/MissionPage';
 import { submitComposerOnEnter } from './chat-composer';
 
 function describeFailure(error: unknown, fallback: string) {
@@ -62,12 +64,13 @@ export function App() {
   const [workspace, setWorkspace] = useState<WorkspaceState>();
   const [selectedDot, setSelectedDot] = useState('');
   const [selectedThread, setSelectedThread] = useState<string>();
-  const [view, rawSetView] = useState<'chat' | 'tasks' | 'memories' | 'space'>(
-    'chat',
-  );
+  const [view, rawSetView] = useState<
+    'chat' | 'tasks' | 'memories' | 'space' | 'mission'
+  >('chat');
   const dirtyPage = useRef(false);
   const [spaceId, setSpaceId] = useState('');
   const [pageId, setPageId] = useState<string>();
+  const [missionId, setMissionId] = useState('');
   const setDirtyPage = useCallback((value: boolean) => {
     dirtyPage.current = value;
   }, []);
@@ -75,7 +78,7 @@ export function App() {
     if (dirtyPage.current && !window.confirm('Leave your unsaved page draft?'))
       return;
     dirtyPage.current = false;
-    if (next !== 'space')
+    if (next !== 'space' && next !== 'mission')
       history.replaceState(null, '', location.pathname + location.search);
     rawSetView(next);
   };
@@ -85,7 +88,8 @@ export function App() {
       const match = location.hash.match(
         /^#\/spaces\/([^/]+)(?:\/pages\/([^/]+))?$/,
       );
-      if (!match) return;
+      const missionMatch = location.hash.match(/^#\/missions(?:\/([^/]+))?$/);
+      if (!match && !missionMatch) return;
       if (dirtyPage.current && location.hash === acceptedHash) return;
       if (
         dirtyPage.current &&
@@ -96,9 +100,20 @@ export function App() {
       }
       acceptedHash = location.hash;
       dirtyPage.current = false;
-      setSpaceId(match[1]);
-      setPageId(match[2]);
-      rawSetView('space');
+      if (match) {
+        setSpaceId(match[1]);
+        setPageId(match[2]);
+        rawSetView('space');
+      } else if (missionMatch) {
+        let id = missionMatch[1] ?? '';
+        try {
+          id = decodeURIComponent(id);
+        } catch {
+          // keep the raw segment; the server answers 404 for an unknown id
+        }
+        setMissionId(id);
+        rawSetView('mission');
+      }
       setMobile(false);
     };
     navigate();
@@ -107,6 +122,9 @@ export function App() {
   }, []);
   const openPage = (space: string, page?: string) => {
     openPageLink(`#/spaces/${space}${page ? `/pages/${page}` : ''}`);
+  };
+  const openMission = (id?: string) => {
+    openPageLink(`#/missions${id ? `/${encodeURIComponent(id)}` : ''}`);
   };
 
   const [notices, setNotices] = useState<Notices>({
@@ -341,6 +359,13 @@ export function App() {
           <Clock3 size={18} />
         </button>
         <button
+          aria-label="Open missions"
+          aria-current={view === 'mission' ? 'page' : undefined}
+          onClick={() => openMission()}
+        >
+          <Target size={18} />
+        </button>
+        <button
           className="rail-settings"
           aria-label="Open settings"
           onClick={() => setDialog({ type: 'settings' })}
@@ -473,6 +498,17 @@ export function App() {
         )}
         <div className="sidebar-bottom">
           <button
+            className={`nav-item ${view === 'mission' ? 'active' : ''}`}
+            aria-current={view === 'mission' ? 'page' : undefined}
+            onClick={() => {
+              openMission();
+              setMobile(false);
+            }}
+          >
+            <Target size={17} />
+            <span>Missions</span>
+          </button>
+          <button
             className={`nav-item ${view === 'tasks' ? 'active' : ''}`}
             onClick={() => {
               setView('tasks');
@@ -531,7 +567,9 @@ export function App() {
             <span>
               {view === 'space'
                 ? workspace.spaces.find((space) => space.id === spaceId)?.name
-                : 'Dots'}
+                : view === 'mission'
+                  ? 'NemoDots'
+                  : 'Dots'}
             </span>
             <span>/</span>
             <strong>
@@ -541,7 +579,9 @@ export function App() {
                   ? 'Activity'
                   : view === 'space'
                     ? 'Pages'
-                    : 'Memories'}
+                    : view === 'mission'
+                      ? 'Missions'
+                      : 'Memories'}
             </strong>
           </div>
           <div className="top-actions">
@@ -614,6 +654,15 @@ export function App() {
               }
             }}
           />
+        ) : view === 'mission' ? (
+          <main className="main-content nd-mission-main">
+            <MissionPage
+              missionId={missionId || undefined}
+              spaces={workspace.spaces}
+              onOpenMission={openMission}
+              onBack={() => openMission()}
+            />
+          </main>
         ) : view === 'chat' ? (
           <div className={`chat-workspace ${pane ? 'split' : ''}`}>
             <div className="chat-column">

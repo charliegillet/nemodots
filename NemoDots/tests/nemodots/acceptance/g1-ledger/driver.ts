@@ -520,32 +520,66 @@ export class World {
     await this.inTx((client) => transitionReceipt(client, { receiptId: id, to: op.to, reason }));
   }
 
-  /** Mission, task and running attempt rows for publication calls (seeded by introspection). */
+  /**
+   * A mission, an investigator task and a running attempt with an unexpired
+   * lease, written the way claimAttempt writes them (so lockFencedAttempt accepts
+   * the context). Setup only; the publication under test goes through the
+   * production publishFinding.
+   */
   async attemptContext() {
-    const mission = await insertRow(this.admin, this.schema, 'coordinator.missions', { id: this.missionId, status: 'running' });
-    const task = await insertRow(this.admin, this.schema, 'coordinator.tasks', { mission_id: this.missionId, status: 'running' });
-    const attempt = await insertRow(this.admin, this.schema, 'coordinator.task_attempts', { task_id: task.id, mission_id: this.missionId, status: 'running' });
-    const tokenCol = Object.keys(attempt).find((k) => /fenc/.test(k));
+    await insertRow(this.admin, this.schema, 'coordinator.missions', { id: this.missionId, status: 'running' });
+    const taskId = randomUUID();
+    await this.admin.query(
+      `INSERT INTO coordinator.tasks (id, mission_id, depth, ordinal, title, question, role, capabilities, status, generation, fence_seq, attempt_count, budget)
+       VALUES ($1, $2, 0, 0, 'acc', 'acc', 'investigator', ARRAY['observe','publish_finding']::text[], 'running', 0, 1, 1, '{"maxIterations":3,"maxTokens":1000,"maxChildren":1}'::jsonb)`,
+      [taskId, this.missionId],
+    );
+    const attemptId = randomUUID();
+    await this.admin.query(
+      `INSERT INTO coordinator.task_attempts (id, task_id, mission_id, n, kind, status, generation, lease_owner, fencing_token, lease_expires_at, lease_renewed_at)
+       VALUES ($1, $2, $3, 1, 'initial', 'running', 0, 'acc1-worker', 1, now() + interval '1 hour', now())`,
+      [attemptId, taskId, this.missionId],
+    );
     return {
-      missionId: this.missionId,
-      taskId: task.id as string,
-      attemptId: attempt.id as string,
-      fencingToken: tokenCol ? Number(attempt[tokenCol]) : 1,
-      generation: Number((mission as Record<string, unknown>).generation ?? 0),
+      missionId: this.missionId, taskId, attemptId, fencingToken: 1, generation: 0,
+      capabilities: ['observe', 'publish_finding'], role: 'investigator',
     };
   }
 
   async publishFinding(op: Extract<LedgerOp, { op: 'publish_finding' }>): Promise<OpResult> {
-    const publishFinding = await entry<(db: pg.Pool, input: Record<string, unknown>) => Promise<unknown>>('coordinator/publish.ts', ['publishFinding']);
+    // BIND: coordinator/publish.ts#publishFinding(deps, context, { claim, supportingReceiptIds, confidence, dependencyVector }).
+    const publishFinding = await entry<(deps: unknown, ctx: unknown, input: unknown) => Promise<unknown>>('coordinator/publish.ts', ['publishFinding']);
+    const { createEventSink } = await import('../../../../src/server/nemodots/coordinator/events.js');
+    const { addEdges } = await import('../../../../src/server/nemodots/ledger/edges.js');
+    const support = await entry<Record<string, unknown>>('ledger/support.ts', ['supportValidator']);
+    void addEdges;
     const ctx = await this.attemptContext();
-    const citing = op.citing.map((l) => {
+    const vector = [] as { sourceKey: string; sourceRevision: number; receiptId: string }[];
+    for (const l of op.citing) {
       const id = this.labels.get(l);
-      if (!id) throw new Error(`label ${l} unknown`);
-      return id;
-    });
+      const where = this.labelEnv.get(l);
+      if (!id || !where) throw new Error(`label ${l} unknown`);
+      const rec = await this.receiptById(id);
+      vector.push({ sourceKey: where.key, sourceRevision: rec!.revision, receiptId: id });
+    }
+    const deps = {
+      pool: this.app,
+      config: {},
+      events: createEventSink(),
+      supportValidator: support,
+      // The graph has no finding node kind; the composition root records nothing for findings.
+      ledger: { recordModelCall: async () => {}, recordArtifact: async () => {} },
+      recordOrphanedAttempt: async () => {},
+      intents: {},
+      clock: () => new Date(),
+    };
     try {
-      // BIND: publishFinding signature (see header): ctx + { claim, confidence, supportingReceiptIds }.
-      await publishFinding(this.app, { ...ctx, claim: 'db.pool_max is 3, which may starve the pool', confidence: 'medium', supportingReceiptIds: citing });
+      await publishFinding(deps, ctx, {
+        claim: 'db.pool_max is 3, which may starve the pool',
+        confidence: 'medium',
+        supportingReceiptIds: vector.map((v) => v.receiptId),
+        dependencyVector: vector,
+      });
       return { ok: true };
     } catch (error) {
       return { ok: false, error: errorCode(error) };
