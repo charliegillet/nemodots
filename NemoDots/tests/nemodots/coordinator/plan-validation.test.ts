@@ -196,6 +196,47 @@ describe('validateDelegation', () => {
     expect(validateDelegation(request(), facts(), id())).toEqual([]);
   });
 
+  it.each(['failed', 'cancelled'])(
+    'rejects a dependency on a %s task, which can never succeed',
+    (status) => {
+      const dead = id();
+      const base = facts();
+      const issues = validateDelegation(
+        request({ dependsOn: [dead] }),
+        {
+          ...base,
+          tasks: [
+            ...base.tasks,
+            { id: dead, parentId: base.parent.id, prerequisites: [], status },
+          ],
+        },
+        id(),
+      );
+      expect(issues.join()).toMatch(new RegExp(`${status}`));
+    },
+  );
+
+  it.each(['pending', 'runnable', 'running', 'succeeded', 'invalidated'])(
+    'accepts a dependency on a %s task',
+    (status) => {
+      const live = id();
+      const base = facts();
+      expect(
+        validateDelegation(
+          request({ dependsOn: [live] }),
+          {
+            ...base,
+            tasks: [
+              ...base.tasks,
+              { id: live, parentId: base.parent.id, prerequisites: [], status },
+            ],
+          },
+          id(),
+        ),
+      ).toEqual([]);
+    },
+  );
+
   it('requires a justification (D5)', () => {
     expect(
       validateDelegation(request({ justification: '' }), facts(), id()).join(),

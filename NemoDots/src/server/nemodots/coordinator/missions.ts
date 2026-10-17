@@ -551,7 +551,11 @@ export async function evaluateMission(
           });
           result = 'running';
         } else if (deps.probe) {
-          await ensureAcceptMessage(client, mission);
+          if ((await ensureAcceptMessage(client, mission)) === 'exhausted') {
+            failedReason =
+              'the acceptance probe could not be completed after repeated attempts';
+            result = 'failed';
+          }
         }
       } else {
         const failedRoot = tasks.find(
@@ -594,22 +598,42 @@ export async function evaluateMission(
   return outcome;
 }
 
-/** Enqueues a mission.accept message unless one is still live (unprocessed and not parked). */
-async function ensureAcceptMessage(client: pg.PoolClient, mission: MissionRow) {
-  await client.query(
+/** mission.accept messages a mission may have used up (parked) before it is failed. */
+const MAX_ACCEPT_MESSAGES = 4;
+
+/**
+ * Makes sure a mission.accept message is live (unprocessed and not parked). A
+ * message that was parked after exhausting its attempts is replaced by a fresh
+ * one, at most MAX_ACCEPT_MESSAGES times: the acceptance probe places an order,
+ * so it must not be retried forever.
+ */
+async function ensureAcceptMessage(
+  client: pg.PoolClient,
+  mission: MissionRow,
+): Promise<'live' | 'queued' | 'exhausted'> {
+  const state = (
+    await client.query<{ live: boolean; total: string }>(
+      `SELECT bool_or(processed_at IS NULL AND failed_at IS NULL) AS live,
+              count(*) AS total
+         FROM coordinator.outbox
+        WHERE mission_id = $1 AND topic = 'mission.accept'`,
+      [mission.id],
+    )
+  ).rows[0];
+  if (state.live) return 'live';
+  const total = Number(state.total);
+  if (total >= MAX_ACCEPT_MESSAGES) return 'exhausted';
+  const { rowCount } = await client.query(
     `INSERT INTO coordinator.outbox (mission_id, topic, payload, dedupe_key, available_at)
-     SELECT $1, 'mission.accept', $2::jsonb,
-            'accept:' || $1::text || ':' || $3::text || ':retry' ||
-              (SELECT count(*) FROM coordinator.outbox
-                WHERE mission_id = $1 AND topic = 'mission.accept'),
-            now() + interval '5 seconds'
-      WHERE NOT EXISTS (
-        SELECT 1 FROM coordinator.outbox
-         WHERE mission_id = $1 AND topic = 'mission.accept'
-           AND processed_at IS NULL AND failed_at IS NULL)
+     VALUES ($1, 'mission.accept', $2::jsonb, $3, now() + interval '5 seconds')
      ON CONFLICT (dedupe_key) DO NOTHING`,
-    [mission.id, JSON.stringify({ missionId: mission.id }), mission.transition_version],
+    [
+      mission.id,
+      JSON.stringify({ missionId: mission.id }),
+      `accept:${mission.id}:${mission.transition_version}:retry${total}`,
+    ],
   );
+  return rowCount ? 'queued' : 'live';
 }
 
 /**
@@ -686,12 +710,15 @@ async function loadAcceptanceReceipt(
   mission: MissionRow,
   receiptId: string,
 ): Promise<{ id: string; verdict: 'pass' | 'fail' | null }> {
-  const reject = (why: string) =>
-    new AcceptanceRejectedError(mission.id, why);
+  const reject = (why: string) => new AcceptanceRejectedError(mission.id, why);
   try {
-    await deps.supportValidator.assertCurrent(client, [receiptId as ReceiptId], {
-      lockMode: 'share',
-    });
+    await deps.supportValidator.assertCurrent(
+      client,
+      [receiptId as ReceiptId],
+      {
+        lockMode: 'share',
+      },
+    );
   } catch (error) {
     if (isSupportError(error))
       throw reject(`the probe receipt is not current: ${error.reason}`);

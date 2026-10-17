@@ -752,7 +752,12 @@ export async function processInvalidation(
       WHERE mission_id = $1 AND usable
         AND (attempt_id = ANY ($2::uuid[])
              OR (task_id = ANY ($3::uuid[]) AND created_at <= $4))`,
-    [missionId, touchedAttempts.map((attempt) => attempt.id), taskIds, row.created_at],
+    [
+      missionId,
+      touchedAttempts.map((attempt) => attempt.id),
+      taskIds,
+      row.created_at,
+    ],
   );
 
   // 3. Repairs.

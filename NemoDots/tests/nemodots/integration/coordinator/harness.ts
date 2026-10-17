@@ -580,7 +580,8 @@ export async function insertLedgerReceipt(
      VALUES ($1, $2,
        (SELECT COALESCE(max(source_revision) + 1, 0)
           FROM ledger.observation_receipts WHERE source_id = $2),
-       $3, $4, $5::jsonb, $6, $7, 'probe')`,
+       $3, $4, $5::jsonb, $6, $7, 'probe')
+     ON CONFLICT (id) DO NOTHING`,
     [
       receipt.id,
       source.rows[0].id,

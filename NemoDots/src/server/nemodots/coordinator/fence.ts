@@ -15,7 +15,21 @@ import type { AttemptRow, MissionRow, TaskRow } from './rows.js';
 //      mission running at the same generation;
 //   4. SELECT the task FOR UPDATE.
 //
-// Lock order everywhere in the coordinator: mission -> attempt -> task.
+// Lock order everywhere in the coordinator (one global order, so overlapping
+// publication, recovery, reaper and acceptance transactions cannot deadlock):
+//
+//   1. the mission row (FOR SHARE, or FOR UPDATE for cancel/pause/plan/delegate)
+//   2. attempt rows (id order)
+//   3. task rows (id order)
+//   4. invalidation rows (processInvalidation and the rejection path lock the
+//      attempts and tasks they act on BEFORE the invalidation row)
+//   5. the per-mission task-graph advisory lock (insertTask, promoteRunnable,
+//      ensurePostconditionTask)
+//   6. the events advisory lock, taken last by EventBuffer.flush
+//
+// reevaluate() locks invalidation rows without holding attempts or tasks, which
+// cannot form a cycle. A remaining lock wait that does form a cycle is a 40P01
+// that withTransaction retries.
 // Any mismatch throws FenceError and nothing has been written.
 
 export interface FencedAttempt {

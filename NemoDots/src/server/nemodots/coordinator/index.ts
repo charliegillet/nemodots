@@ -217,7 +217,8 @@ export function createCoordinator(
   // Unique per process by default: outbox claims name their owner, and two
   // coordinator processes must not mistake each other's claims for their own.
   const workerId =
-    options.workerId ?? `coordinator-${process.pid}-${randomUUID().slice(0, 8)}`;
+    options.workerId ??
+    `coordinator-${process.pid}-${randomUUID().slice(0, 8)}`;
   const recovery = createRecovery(deps, {
     ...options.recovery,
     pauseOnClosureCap:

@@ -27,7 +27,11 @@
 // Version continuity: a key's version only ever grows. A delete writes a
 // config_versions row (value NULL) at version+1 and a later re-insert
 // continues from the highest recorded version, so a receipt for an old
-// revision can never collide with a new one.
+// revision can never collide with a new one. The database enforces the counter
+// (migration 0004: no rewind, a value change advances by exactly one, a
+// re-insert starts above the recorded history), but NOT that the matching
+// config_versions row exists: only this module guarantees a gap-free history
+// (see the known limit in 0004_checkout.ts).
 import type pg from 'pg';
 import { digest } from '../contracts/digest.js';
 import { CONFIG_MEMBER_KEY_PATTERN } from '../contracts/ids.js';

@@ -104,7 +104,9 @@ it('two prerequisites completing concurrently still promote their dependent (los
     // The mission can finish.
     await finishAll(h, [c]);
     await h.coordinator.outbox.drain();
-    expect(await missionStatus(h, planned.missionId)).toBe('awaiting_acceptance');
+    expect(await missionStatus(h, planned.missionId)).toBe(
+      'awaiting_acceptance',
+    );
   });
 });
 
@@ -177,7 +179,11 @@ it('a dependent of a failed or cancelled task is cancelled, and delegation refus
         DelegationRejectedError,
       );
     },
-    { config: { taskDefaults: { maxAttempts: 1, maxIterations: 12, maxTokens: 20_000 } } },
+    {
+      config: {
+        taskDefaults: { maxAttempts: 1, maxIterations: 12, maxTokens: 20_000 },
+      },
+    },
   );
 });
 
@@ -197,7 +203,9 @@ it('a worker that dies between claim and start exhausts maxAttempts instead of l
     }
     expect(outcomes).toEqual(['requeued', 'requeued', 'failed']);
     expect((await taskRow(h, t1)).status).toBe('failed');
-    expect(await h.coordinator.claimAttempt({ workerId: 'w9', taskId: t1 })).toBeNull();
+    expect(
+      await h.coordinator.claimAttempt({ workerId: 'w9', taskId: t1 }),
+    ).toBeNull();
   });
 });
 
@@ -231,8 +239,12 @@ it('two attempts rejected for the same stale receipt at the same time both follo
       'SupportError',
       'SupportError',
     ]);
-    expect((await attemptRow(h, ca.context.attemptId)).status).toBe('invalidated');
-    expect((await attemptRow(h, cb.context.attemptId)).status).toBe('invalidated');
+    expect((await attemptRow(h, ca.context.attemptId)).status).toBe(
+      'invalidated',
+    );
+    expect((await attemptRow(h, cb.context.attemptId)).status).toBe(
+      'invalidated',
+    );
     // One shared event, both attempts and tasks in it, a repair per task.
     const rows = await h.admin.query(
       `SELECT event FROM coordinator.invalidations WHERE mission_id = $1`,
@@ -262,11 +274,20 @@ it('the watcher delivering one event concurrently from two places records it onc
       attemptIds: [attempt.context.attemptId],
       taskIds: [a],
     });
-    const results = await Promise.allSettled([
+    // A table lock parks every delivery between its existence check and its
+    // INSERT, so all three are in flight together.
+    const blocker = await h.admin.connect();
+    await blocker.query('BEGIN');
+    await blocker.query('LOCK TABLE coordinator.invalidations IN SHARE MODE');
+    const deliveries = Promise.allSettled([
       h.coordinator.onInvalidation(event),
       h.coordinator.onInvalidation(event),
       h.coordinator.onInvalidation(event),
     ]);
+    await sleep(400);
+    await blocker.query('COMMIT');
+    blocker.release();
+    const results = await deliveries;
     expect(results.map(describeSettled)).toEqual([
       'fulfilled',
       'fulfilled',
@@ -281,7 +302,7 @@ it('the watcher delivering one event concurrently from two places records it onc
   });
 });
 
-it('a second rejection for the same receipt leaves the first task\'s fresh repair alone', async () => {
+it("a second rejection for the same receipt leaves the first task's fresh repair alone", async () => {
   await withHarness(
     async (h) => {
       const planned = await plannedMission(h, two);
@@ -291,7 +312,11 @@ it('a second rejection for the same receipt leaves the first task\'s fresh repai
       ]);
       const c1 = await claimStart(h, { taskId: t1 });
       const c2 = await claimStart(h, { taskId: t2 });
-      h.validator.failWith = new SupportError('stale_version', 'r3 vs 4', stale[0].receiptId);
+      h.validator.failWith = new SupportError(
+        'stale_version',
+        'r3 vs 4',
+        stale[0].receiptId,
+      );
       await expect(
         h.coordinator.publishOutput(c1.context, {
           kind: 'handoff',
@@ -311,7 +336,11 @@ it('a second rejection for the same receipt leaves the first task\'s fresh repai
         ]),
       });
       // T2 is now rejected for the SAME stale receipt (same event id).
-      h.validator.failWith = new SupportError('stale_version', 'r3 vs 4', stale[0].receiptId);
+      h.validator.failWith = new SupportError(
+        'stale_version',
+        'r3 vs 4',
+        stale[0].receiptId,
+      );
       await expect(
         h.coordinator.publishOutput(c2.context, {
           kind: 'handoff',
@@ -385,11 +414,13 @@ it('the database refuses a second open postcondition task for a mission', async 
 
 // ------------------------------------------------ the publication guard vector
 
-it('publishOutput asserts the attempt readset even when the caller\'s vector omits it', async () => {
+it("publishOutput asserts the attempt readset even when the caller's vector omits it", async () => {
   await withHarness(async (h) => {
     const planned = await plannedMission(h, two);
     const t = await claimStart(h, { taskId: planned.taskIds[0] });
-    const read = vectorOf([{ sourceKey: 'checkout.health', sourceRevision: 1 }]);
+    const read = vectorOf([
+      { sourceKey: 'checkout.health', sourceRevision: 1 },
+    ]);
     await h.coordinator.addReadSet(t.context, read);
     h.validator.calls = [];
     h.validator.failWith = staleVersion(read[0].receiptId);
@@ -398,7 +429,9 @@ it('publishOutput asserts the attempt readset even when the caller\'s vector omi
     ).rejects.toBeInstanceOf(SupportError);
     expect(h.validator.calls[0].ids).toContain(read[0].receiptId);
     expect(h.validator.calls[0].lockMode).toBe('share');
-    expect((await attemptRow(h, t.context.attemptId)).status).toBe('invalidated');
+    expect((await attemptRow(h, t.context.attemptId)).status).toBe(
+      'invalidated',
+    );
     expect(await h.ledger.rows('artifact:task_output')).toHaveLength(0);
   });
 });
@@ -407,7 +440,9 @@ it('a published output, finding and delegated task carry the readset as evidence
   await withHarness(async (h) => {
     const planned = await plannedMission(h, two);
     const t = await claimStart(h, { taskId: planned.taskIds[0] });
-    const read = vectorOf([{ sourceKey: 'checkout.health', sourceRevision: 1 }]);
+    const read = vectorOf([
+      { sourceKey: 'checkout.health', sourceRevision: 1 },
+    ]);
     await h.coordinator.addReadSet(t.context, read);
     await h.coordinator.publishFinding(t.context, {
       claim: 'health is degraded',
@@ -437,9 +472,9 @@ it('a published output, finding and delegated task carry the readset as evidence
       ]);
     }
     // The delegated child inherits the parent's context, readset included.
-    expect((await taskRow(h, child.taskId)).inherited_dependency_vector).toEqual(
-      read,
-    );
+    expect(
+      (await taskRow(h, child.taskId)).inherited_dependency_vector,
+    ).toEqual(read);
   });
 });
 
@@ -453,7 +488,9 @@ it('a stale readset rejects publishFinding and delegate as well', async () => {
       const t = await claimStart(h, {
         taskId: planned.taskIds[act === 'finding' ? 0 : 1],
       });
-      const read = vectorOf([{ sourceKey: 'checkout.metrics', sourceRevision: 2 }]);
+      const read = vectorOf([
+        { sourceKey: 'checkout.metrics', sourceRevision: 2 },
+      ]);
       await h.coordinator.addReadSet(t.context, read);
       h.validator.failWith = staleVersion(read[0].receiptId);
       const call =
@@ -474,7 +511,9 @@ it('a stale readset rejects publishFinding and delegate as well', async () => {
             });
       await expect(call).rejects.toBeInstanceOf(SupportError);
       h.validator.failWith = null;
-      expect((await attemptRow(h, t.context.attemptId)).status).toBe('invalidated');
+      expect((await attemptRow(h, t.context.attemptId)).status).toBe(
+        'invalidated',
+      );
     }
   });
 });
@@ -483,7 +522,9 @@ it('a model call rejected by a SupportError is still stored as unfenced telemetr
   await withHarness(async (h) => {
     const planned = await plannedMission(h, two);
     const t = await claimStart(h, { taskId: planned.taskIds[0] });
-    const vector = vectorOf([{ sourceKey: 'checkout.health', sourceRevision: 1 }]);
+    const vector = vectorOf([
+      { sourceKey: 'checkout.health', sourceRevision: 1 },
+    ]);
     h.validator.failWith = staleVersion(vector[0].receiptId);
     const modelCallId = randomUUID();
     const record = {
@@ -523,7 +564,9 @@ it('a model call rejected by a SupportError is still stored as unfenced telemetr
         modelCallId,
       ]),
     ).toBe(1);
-    expect((await attemptRow(h, t.context.attemptId)).status).toBe('invalidated');
+    expect((await attemptRow(h, t.context.attemptId)).status).toBe(
+      'invalidated',
+    );
   });
 });
 
@@ -546,7 +589,9 @@ it('completeAcceptance takes a receipt id and re-validates it against the ledger
     await expect(
       h.coordinator.control.completeAcceptance(planned.missionId, forged.id),
     ).rejects.toBeInstanceOf(AcceptanceRejectedError);
-    expect(await missionStatus(h, planned.missionId)).toBe('awaiting_acceptance');
+    expect(await missionStatus(h, planned.missionId)).toBe(
+      'awaiting_acceptance',
+    );
 
     // A real receipt that has been superseded since: the validator refuses it.
     const real = await ledgerProbeReceipt(h, planned.missionId, 'pass');
@@ -570,7 +615,9 @@ it('completeAcceptance takes a receipt id and re-validates it against the ledger
     await expect(
       h.coordinator.control.completeAcceptance(planned.missionId, old.id),
     ).rejects.toBeInstanceOf(AcceptanceRejectedError);
-    expect(await missionStatus(h, planned.missionId)).toBe('awaiting_acceptance');
+    expect(await missionStatus(h, planned.missionId)).toBe(
+      'awaiting_acceptance',
+    );
 
     const good = await ledgerProbeReceipt(h, planned.missionId, 'pass');
     const done = await h.coordinator.control.completeAcceptance(
@@ -620,7 +667,9 @@ it('succeeded is refused while the ledger closure marked a task invalidated and 
     await expect(
       h.coordinator.control.completeAcceptance(planned.missionId, pass.id),
     ).rejects.toBeInstanceOf(OpenInvalidationsError);
-    expect(await missionStatus(h, planned.missionId)).toBe('awaiting_acceptance');
+    expect(await missionStatus(h, planned.missionId)).toBe(
+      'awaiting_acceptance',
+    );
     expect((await taskRow(h, a)).status).toBe('invalidated');
   });
 });
@@ -635,7 +684,9 @@ it('a ledger invalidation the coordinator has not received blocks settling until
       preserved: planned.taskIds,
     });
     await insertLedgerInvalidation(h.admin, event);
-    expect(await h.coordinator.control.evaluate(planned.missionId)).toBe('unchanged');
+    expect(await h.coordinator.control.evaluate(planned.missionId)).toBe(
+      'unchanged',
+    );
     expect(await missionStatus(h, planned.missionId)).toBe('running');
     await h.coordinator.onInvalidation(event);
     expect(await h.coordinator.control.evaluate(planned.missionId)).toBe(
@@ -668,10 +719,13 @@ it('a mission.accept message deferred by open invalidations is never parked, and
   await withHarness(
     async (h) => {
       const planned = await plannedMission(h, two);
-      await finishAll(h, planned.taskIds);
-      await h.coordinator.outbox.drain();
-      expect(await missionStatus(h, planned.missionId)).toBe('awaiting_acceptance');
       h.probe.receipt = probeReceipt(planned.missionId, 'pass');
+      await finishAll(h, planned.taskIds);
+      // Hold the accept message back until the invalidation exists.
+      await h.coordinator.control.evaluate(planned.missionId);
+      expect(await missionStatus(h, planned.missionId)).toBe(
+        'awaiting_acceptance',
+      );
       const actionId = randomUUID() as ActionId;
       h.intents.add({
         id: actionId,
@@ -681,7 +735,10 @@ it('a mission.accept message deferred by open invalidations is never parked, and
         status: 'committed',
       } as IntentRecord);
       await h.coordinator.onInvalidation(
-        invalidationFor({ missionId: planned.missionId, actionIds: [actionId] }),
+        invalidationFor({
+          missionId: planned.missionId,
+          actionIds: [actionId],
+        }),
       );
       const messageRow = async () =>
         (
@@ -703,7 +760,9 @@ it('a mission.accept message deferred by open invalidations is never parked, and
       expect(waiting.failed_at).toBeNull();
       expect(waiting.processed_at).toBeNull();
       expect(waiting.attempts).toBeLessThan(2);
-      expect(await missionStatus(h, planned.missionId)).toBe('awaiting_acceptance');
+      expect(await missionStatus(h, planned.missionId)).toBe(
+        'awaiting_acceptance',
+      );
       // The intent settles, the invalidation resolves, and the same message succeeds.
       h.intents.setStatus(actionId, 'verified');
       await h.coordinator.recovery.reevaluate(planned.missionId);
@@ -723,7 +782,9 @@ it('the maintenance reconciler re-enqueues mission.accept when the message was p
     const planned = await plannedMission(h, two);
     await finishAll(h, planned.taskIds);
     await h.coordinator.outbox.drain();
-    expect(await missionStatus(h, planned.missionId)).toBe('awaiting_acceptance');
+    expect(await missionStatus(h, planned.missionId)).toBe(
+      'awaiting_acceptance',
+    );
     // The message exhausted its attempts (e.g. the probe was unreachable).
     await h.admin.query(
       `UPDATE coordinator.outbox SET failed_at = now()
@@ -748,6 +809,36 @@ it('the maintenance reconciler re-enqueues mission.accept when the message was p
     ).toBe(1);
     await h.coordinator.outbox.drain();
     expect(await missionStatus(h, planned.missionId)).toBe('succeeded');
+  });
+});
+
+it('a mission whose acceptance keeps parking is failed, not probed forever', async () => {
+  await withHarness(async (h) => {
+    const planned = await plannedMission(h, two);
+    await finishAll(h, planned.taskIds);
+    await h.coordinator.control.evaluate(planned.missionId);
+    for (let i = 0; i < 4; i += 1) {
+      await h.admin.query(
+        `UPDATE coordinator.outbox SET failed_at = now()
+          WHERE topic = 'mission.accept' AND mission_id = $1
+            AND processed_at IS NULL AND failed_at IS NULL`,
+        [planned.missionId],
+      );
+      await h.coordinator.runMaintenance();
+    }
+    const mission = await h.coordinator.control.get(planned.missionId);
+    expect(mission.status).toBe('failed');
+    expect(mission.failureReason).toMatch(
+      /acceptance probe could not be completed/,
+    );
+    expect(
+      await count(
+        h,
+        'coordinator.outbox',
+        `topic = 'mission.accept' AND mission_id = $1`,
+        [planned.missionId],
+      ),
+    ).toBe(4);
   });
 });
 
@@ -849,7 +940,10 @@ it('a slow handler blocks neither other messages nor the maintenance step', asyn
     await outbox.start();
     await until(async () => handled.includes('fast'), 'the fast message');
     const before = maintenanceRuns;
-    await until(async () => maintenanceRuns >= before + 2, 'maintenance to keep running');
+    await until(
+      async () => maintenanceRuns >= before + 2,
+      'maintenance to keep running',
+    );
     expect(handled).not.toContain('slow:end');
     hold.open();
     await outbox.stop();
@@ -886,7 +980,9 @@ it('a replan that cancels an invalidated root task closes its invalidation, so t
         preserved: [b],
       }),
     );
-    const replanner = await claimStart(h, { taskId: planned.plannerContext.taskId });
+    const replanner = await claimStart(h, {
+      taskId: planned.plannerContext.taskId,
+    });
     const plan = await h.coordinator.publishPlan(replanner.context, {
       createdByModelCallId: randomUUID() as never,
       plan: {
@@ -905,7 +1001,9 @@ it('a replan that cancels an invalidated root task closes its invalidation, so t
     expect(await openEvents(h, planned.missionId)).toEqual([]);
     await h.coordinator.runMaintenance();
     await h.coordinator.outbox.drain();
-    expect(await missionStatus(h, planned.missionId)).toBe('awaiting_acceptance');
+    expect(await missionStatus(h, planned.missionId)).toBe(
+      'awaiting_acceptance',
+    );
   });
 });
 
@@ -941,13 +1039,17 @@ it('a delegated child whose repairs are exhausted closes its invalidation, so th
       await h.coordinator.failAttempt(c.context, { reason: 'provider error' });
     }
     expect((await taskRow(h, child)).status).toBe('failed');
-    expect((await h.coordinator.resumeFromWaiting(parent.context)).allTerminal).toBe(true);
+    expect(
+      (await h.coordinator.resumeFromWaiting(parent.context)).allTerminal,
+    ).toBe(true);
     await h.coordinator.publishOutput(parent.context, handoff());
     await finishAll(h, [b]);
     await h.coordinator.runMaintenance();
     expect(await openEvents(h, planned.missionId)).toEqual([]);
     await h.coordinator.outbox.drain();
-    expect(await missionStatus(h, planned.missionId)).toBe('awaiting_acceptance');
+    expect(await missionStatus(h, planned.missionId)).toBe(
+      'awaiting_acceptance',
+    );
   });
 });
 
@@ -1032,7 +1134,9 @@ it('a replan supersedes the root tasks that were only waiting for a repair', asy
       }),
     );
     expect((await taskRow(h, a)).status).toBe('runnable'); // awaiting its repair
-    const replanner = await claimStart(h, { taskId: planned.plannerContext.taskId });
+    const replanner = await claimStart(h, {
+      taskId: planned.plannerContext.taskId,
+    });
     expect(replanner.attempt.kind).toBe('replan');
     await h.coordinator.publishPlan(replanner.context, {
       createdByModelCallId: randomUUID() as never,
@@ -1055,7 +1159,9 @@ it('a repair attempt of a delegated child keeps the context it inherited from it
   await withHarness(async (h) => {
     const planned = await plannedMission(h, two);
     const parent = await claimStart(h, { taskId: planned.taskIds[0] });
-    const inherited = vectorOf([{ sourceKey: 'checkout.health', sourceRevision: 4 }]);
+    const inherited = vectorOf([
+      { sourceKey: 'checkout.health', sourceRevision: 4 },
+    ]);
     const { taskId: child } = await h.coordinator.delegate(parent.context, {
       title: 'verify',
       role: 'verifier',
@@ -1094,8 +1200,12 @@ it('a repair drops only the inherited receipts the ledger no longer treats as cu
   await withHarness(async (h) => {
     const planned = await plannedMission(h, two);
     const parent = await claimStart(h, { taskId: planned.taskIds[0] });
-    const kept = vectorOf([{ sourceKey: 'checkout.health', sourceRevision: 4 }]);
-    const stale = vectorOf([{ sourceKey: 'checkout.metrics', sourceRevision: 2 }]);
+    const kept = vectorOf([
+      { sourceKey: 'checkout.health', sourceRevision: 4 },
+    ]);
+    const stale = vectorOf([
+      { sourceKey: 'checkout.metrics', sourceRevision: 2 },
+    ]);
     const base = probeReceipt(planned.missionId, 'pass');
     // Register both receipts in the ledger; the second is then superseded.
     const { insertLedgerReceipt } = await import('./harness.js');

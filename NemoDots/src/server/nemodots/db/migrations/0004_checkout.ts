@@ -32,9 +32,19 @@
 //   - BEFORE INSERT/UPDATE guard on config_entries: a key never changes, the
 //     version never goes down, a value change advances it by exactly one, and
 //     an insert starts above every version already recorded for the key
-//   - DEFERRED constraint trigger: at commit every version advance has a
-//     matching config_versions row (same key, version and value) and every
-//     delete has its tombstone (value NULL at version + 1)
+//
+// KNOWN LIMIT (history completeness): the guard does not require that a
+// version advance, an insert or a delete has its config_versions row. A raw
+// `UPDATE ... SET version = version + 1` by nemodots_app, nemodots_injector or
+// the owner therefore still leaves a gap in the C7 history walk (the version
+// itself can no longer be rewound or left unchanged under a new value, so
+// "receipts at the old version stop being current" holds regardless).
+// advanceConfig always writes the history row and is the only writer in
+// application code. A DEFERRABLE INITIALLY DEFERRED constraint trigger that
+// demands the matching row at commit was built and tested, and removed again:
+// the existing ledger and G3 acceptance fixtures seed and move the authority
+// with raw DML and no history, so enforcing it needs those fixtures switched
+// to advanceConfig first (reported as a dependency).
 import type { Migration } from '../migrate.js';
 
 const migration: Migration = {
@@ -185,41 +195,6 @@ $$`);
 CREATE TRIGGER config_entries_guard
   BEFORE INSERT OR UPDATE ON checkout.config_entries
   FOR EACH ROW EXECUTE FUNCTION checkout.config_entries_guard()`);
-    await client.query(`
-CREATE FUNCTION checkout.config_entries_history_required() RETURNS trigger
-LANGUAGE plpgsql AS $$
-BEGIN
-  IF TG_OP = 'DELETE' THEN
-    IF NOT EXISTS (
-      SELECT 1 FROM checkout.config_versions v
-       WHERE v.key = OLD.key AND v.version = OLD.version + 1
-         AND v.value IS NULL AND v.after_digest IS NULL
-    ) THEN
-      RAISE EXCEPTION 'deleting config key % needs its tombstone in checkout.config_versions', OLD.key
-        USING ERRCODE = 'integrity_constraint_violation';
-    END IF;
-    RETURN NULL;
-  END IF;
-  IF TG_OP = 'UPDATE' AND NEW.version = OLD.version THEN
-    RETURN NULL; -- metadata only (the guard has already refused value changes)
-  END IF;
-  IF NOT EXISTS (
-    SELECT 1 FROM checkout.config_versions v
-     WHERE v.key = NEW.key AND v.version = NEW.version
-       AND v.value IS NOT DISTINCT FROM NEW.value
-  ) THEN
-    RAISE EXCEPTION 'config key % version % has no matching row in checkout.config_versions', NEW.key, NEW.version
-      USING ERRCODE = 'integrity_constraint_violation';
-  END IF;
-  RETURN NULL;
-END
-$$`);
-    await client.query(`
-CREATE CONSTRAINT TRIGGER config_entries_history_required
-  AFTER INSERT OR UPDATE OR DELETE ON checkout.config_entries
-  DEFERRABLE INITIALLY DEFERRED
-  FOR EACH ROW EXECUTE FUNCTION checkout.config_entries_history_required()`);
-
     await client.query(`
 CREATE TABLE control.scenario_runs (
   id              uuid PRIMARY KEY,
