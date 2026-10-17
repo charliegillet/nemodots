@@ -8,6 +8,7 @@ import type {
   ConnectionTool,
 } from '../shared/connection-types.js';
 import type { ConnectionStore } from './connection-store.js';
+import { getActivePolicy } from './nemodots/interception/active-policy.js';
 const MAX_TOOLS = 100;
 const MAX_SCHEMA_BYTES = 16_000;
 const MAX_RESULT_CHARS = 20_000;
@@ -282,7 +283,19 @@ export class ConnectionService {
     exposed: ExposedTool,
     args: Record<string, unknown>,
     signal?: AbortSignal,
+    // 'agent': the model's direct call. 'owner_approval': the owner approved a
+    // stored request (the route revalidates its evidence first).
+    via: 'agent' | 'owner_approval' = 'agent',
   ): Promise<ConnectionActionResult> {
+    // Module-level policy, so the per-turn instances are covered too. The
+    // default policy allows everything.
+    const decision = getActivePolicy().decideConnectionCall({
+      dotId: exposed.connection.dotId,
+      tool: exposed.tool.name,
+      via,
+    });
+    if (!decision.allow)
+      return { isError: true, text: `Refused by NemoDots policy: ${decision.reason}` };
     try {
       return await this.session(
         this.store.credentials(exposed.connection.id),

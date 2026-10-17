@@ -7,9 +7,17 @@ import {
 } from '../shared/connection-types.js';
 import type { WorkspaceStore } from './workspace.js';
 import { connectionInput, type ConnectionService } from './connections.js';
+import {
+  getActivePolicy,
+  type ActivePolicy,
+  type ApprovalVerdict,
+} from './nemodots/interception/active-policy.js';
 export function connectionRoutes(
   workspace: WorkspaceStore,
   connections: ConnectionService,
+  // Evidence revalidation in front of an approval. Defaults to the active
+  // policy's, resolved per request; the default policy has none.
+  options: { revalidate?: ActivePolicy['revalidateApproval'] } = {},
 ) {
   const app = new Hono();
   app.onError((error, c) =>
@@ -141,6 +149,34 @@ export function connectionRoutes(
         { error: 'This approval request already ran its stored action.' },
         409,
       );
+    // Approval semantics are unchanged; this only asks first whether the
+    // evidence the request was made on is still current.
+    const policy = getActivePolicy();
+    const revalidate =
+      options.revalidate ?? policy.revalidateApproval?.bind(policy);
+    if (revalidate) {
+      let verdict: ApprovalVerdict;
+      try {
+        verdict = await revalidate({
+          approvalId: approval.id,
+          threadId: thread.id,
+          dotId: approval.dotId,
+          connectionId: approval.connectionId,
+          tool: approval.tool,
+          vector: approval.dependencyVector,
+        });
+      } catch {
+        return c.json(
+          {
+            error: 'revalidation_unavailable',
+            message: 'The evidence check could not run. Nothing was run.',
+          },
+          503,
+        );
+      }
+      if (!verdict.ok)
+        return c.json({ error: verdict.code, message: verdict.message }, 409);
+    }
     if (
       !connections.store.claimAction(
         thread.id,
@@ -152,7 +188,12 @@ export function connectionRoutes(
     )
       return recovered()!;
     // Not tied to the request: once approved, finish even if the tab closes.
-    const result = await connections.call(exposed, approval.arguments);
+    const result = await connections.call(
+      exposed,
+      approval.arguments,
+      undefined,
+      'owner_approval',
+    );
     connections.store.finishAction(thread.id, body.toolCallId, result);
     return c.json(result);
   });

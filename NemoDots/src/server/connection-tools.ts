@@ -1,6 +1,7 @@
 import { toolDefinition } from '@tanstack/ai';
 import { connectionActionTool } from '../shared/connection-types.js';
 import type { ConnectionService } from './connections.js';
+import { currentDependencyVector } from './nemodots/interception/provenance-scope.js';
 // Connected MCP tools for one Dot. Tools that need approval never execute
 // here: the model is told to request owner approval, and only the owner's
 // approval route runs them.
@@ -36,6 +37,8 @@ export function connectionTools(
                 connectionId: current.connection.id,
                 tool: current.tool.name,
                 arguments: input,
+                // Null outside a NemoDots provenance scope: nothing is bound.
+                dependencyVector: currentDependencyVector(),
               }),
               instruction: `Call ${connectionActionTool.name} with this approvalId and a one-sentence summary of what it will do. Then wait for the owner.`,
             }
@@ -44,7 +47,7 @@ export function connectionTools(
               message:
                 'This action needs owner approval in the NemoDots web app. Ask the owner to continue there.',
             };
-      const result = await connections.call(current, input, signal);
+      const result = await connections.call(current, input, signal, 'agent');
       check();
       return result;
     }),

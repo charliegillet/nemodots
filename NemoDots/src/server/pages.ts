@@ -34,6 +34,25 @@ export interface Page {
 export type ReviewedPage = Page & {
   reviewDraft: PageReviewDraft | null;
 };
+// Notification of every page revision, fired inside the write's transaction
+// after the write and before COMMIT, so a consumer can record it atomically
+// (an outbox row) or refuse it by throwing, which rolls the write back. No
+// hook is installed by default and nothing changes without one.
+export interface PageRevisionEvent {
+  op: 'create' | 'create_reviewed' | 'update' | 'delete';
+  spaceId: string;
+  pageId: string;
+  /** Revision after the write; null when the page was deleted. */
+  revision: number | null;
+  /** The page after the write; null when it was deleted. */
+  page: Page | null;
+  sourceThreadId: string | null;
+  /** The review receipt key for 'create_reviewed'. */
+  review: { threadId: string; toolCallId: string } | null;
+  /** Pages re-parented by a delete: their revision changed as well. */
+  reparented: { pageId: string; revision: number }[];
+}
+export type PageRevisionHook = (event: PageRevisionEvent) => void;
 export class PageError extends Error {
   constructor(
     message: string,
@@ -43,10 +62,14 @@ export class PageError extends Error {
   }
 }
 export class Pages {
+  /** Optional revision hook; assignable after construction (bootstrap). */
+  onRevision?: PageRevisionHook;
   constructor(
     private db: DatabaseSync,
     private spaceExists: (id: string) => boolean,
+    onRevision?: PageRevisionHook,
   ) {
+    this.onRevision = onRevision;
     db.exec(
       'CREATE TABLE IF NOT EXISTS page_reviews(threadId TEXT NOT NULL, toolCallId TEXT NOT NULL, pageId TEXT NOT NULL, spaceId TEXT NOT NULL, draft TEXT, PRIMARY KEY(threadId,toolCallId))',
     );
@@ -105,10 +128,10 @@ export class Pages {
       cursor = this.get(spaceId, cursor).parentId;
     }
   }
-  create(
+  private insertPage(
     spaceId: string,
     input: z.input<typeof pageInput>,
-    sourceThreadId: string | null = null,
+    sourceThreadId: string | null,
   ): Page {
     this.requireSpace(spaceId);
     const parsed = pageInput.safeParse(input);
@@ -133,6 +156,41 @@ export class Pages {
         sourceThreadId,
       );
     return this.get(spaceId, id);
+  }
+  create(
+    spaceId: string,
+    input: z.input<typeof pageInput>,
+    sourceThreadId: string | null = null,
+  ): Page {
+    const hook = this.onRevision;
+    if (!hook) return this.insertPage(spaceId, input, sourceThreadId);
+    const emit = (page: Page) =>
+      hook({
+        op: 'create',
+        spaceId,
+        pageId: page.id,
+        revision: page.revision,
+        page,
+        sourceThreadId,
+        review: null,
+        reparented: [],
+      });
+    // Already inside a caller's transaction: the hook runs in it.
+    if (this.db.isTransaction) {
+      const page = this.insertPage(spaceId, input, sourceThreadId);
+      emit(page);
+      return page;
+    }
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const page = this.insertPage(spaceId, input, sourceThreadId);
+      emit(page);
+      this.db.exec('COMMIT');
+      return page;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
   reviewReceipt(
     threadId: string,
@@ -182,7 +240,7 @@ export class Pages {
         this.db.exec('COMMIT');
         return { ...page, reviewDraft: previous.draft };
       }
-      const page = this.create(
+      const page = this.insertPage(
         spaceId,
         { title: draft.title, content: draft.content },
         threadId,
@@ -192,6 +250,16 @@ export class Pages {
           'INSERT INTO page_reviews (threadId,toolCallId,pageId,spaceId,draft) VALUES (?,?,?,?,?)',
         )
         .run(threadId, toolCallId, page.id, spaceId, JSON.stringify(draft));
+      this.onRevision?.({
+        op: 'create_reviewed',
+        spaceId,
+        pageId: page.id,
+        revision: page.revision,
+        page,
+        sourceThreadId: threadId,
+        review: { threadId, toolCallId },
+        reparented: [],
+      });
       this.db.exec('COMMIT');
       return { ...page, reviewDraft: draft };
     } catch (error) {
@@ -229,6 +297,19 @@ export class Pages {
           id,
           data.expectedRevision,
         );
+      if (this.onRevision) {
+        const updated = this.get(spaceId, id);
+        this.onRevision({
+          op: 'update',
+          spaceId,
+          pageId: id,
+          revision: updated.revision,
+          page: updated,
+          sourceThreadId: updated.sourceThreadId,
+          review: null,
+          reparented: [],
+        });
+      }
       this.db.exec('COMMIT');
       return this.get(spaceId, id);
     } catch (error) {
@@ -294,6 +375,11 @@ export class Pages {
         return false;
       }
       const now = Date.now();
+      const children = this.onRevision
+        ? (this.db
+            .prepare('SELECT id FROM pages WHERE spaceId=? AND parentId=?')
+            .all(spaceId, id) as { id: string }[])
+        : [];
       this.db
         .prepare(
           'UPDATE pages SET parentId=?, revision=revision+1, updatedAt=? WHERE spaceId=? AND parentId=?',
@@ -304,6 +390,20 @@ export class Pages {
       this.db
         .prepare('DELETE FROM pages WHERE id=? AND spaceId=?')
         .run(id, spaceId);
+      if (this.onRevision)
+        this.onRevision({
+          op: 'delete',
+          spaceId,
+          pageId: id,
+          revision: null,
+          page: null,
+          sourceThreadId: null,
+          review: null,
+          reparented: children.map((child) => ({
+            pageId: child.id,
+            revision: this.get(spaceId, child.id).revision,
+          })),
+        });
       this.db.exec('COMMIT');
       return true;
     } catch (error) {

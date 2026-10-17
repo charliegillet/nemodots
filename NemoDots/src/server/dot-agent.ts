@@ -28,6 +28,21 @@ import {
   type PlatformConfig,
 } from './platform-config.js';
 import { browserResponse } from './research.js';
+import {
+  getActivePolicy,
+  hasActivePolicy,
+} from './nemodots/interception/active-policy.js';
+import { getInterceptionRuntime } from './nemodots/interception/active-runtime.js';
+import { createFetchTelemetry } from './nemodots/interception/fetch-telemetry.js';
+import {
+  createProvenanceMiddleware,
+  safeDigest,
+} from './nemodots/interception/provenance-middleware.js';
+import {
+  createTurnScope,
+  runInTurnScope,
+} from './nemodots/interception/provenance-scope.js';
+import { withToolPolicy } from './nemodots/interception/with-tool-policy.js';
 import { answerObserver, type SetupTelemetry } from './setup-telemetry.js';
 const channelError = () => ({
   type: EventType.RUN_ERROR,
@@ -325,15 +340,74 @@ export class DotAgent extends AbstractAgent {
           check,
         );
         const pageContext = pages.context();
-        const memories =
+        // Ids are kept (the prompt still gets only the text) so provenance can
+        // name which memories the model saw.
+        const memoryRecords =
           initialSettings.memoryAllowed && dot.memoryAllowed
-            ? this.store.memories().map((memory) => memory.text)
+            ? this.store.memories().map(({ id, text }) => ({ id, text }))
             : [];
+        const memories = memoryRecords.map((memory) => memory.text);
+        // NemoDots hooks. All absent unless bootstrap installs a runtime or a
+        // policy; then none of this changes what the turn does.
+        const interception = getInterceptionRuntime();
+        const layered = !!interception || hasActivePolicy();
+        const baseUrl = this.config.baseUrl ?? 'https://api.openai.com/v1';
+        const telemetry = interception ? createFetchTelemetry() : undefined;
+        const toolOrigins = {
+          mcp: new Set(connected.map((tool) => tool.name)),
+          composio: new Set<string>(),
+        };
+        const originOf = (name: string) =>
+          toolOrigins.mcp.has(name)
+            ? ('mcp' as const)
+            : toolOrigins.composio.has(name)
+              ? ('composio' as const)
+              : undefined;
+        const turnScope = layered
+          ? createTurnScope({
+              dotId: dot.id,
+              threadId: input.threadId,
+              runId: input.runId,
+            })
+          : undefined;
+        const provenance = turnScope
+          ? createProvenanceMiddleware({
+              turn: {
+                dotId: dot.id,
+                threadId: input.threadId,
+                runId: input.runId,
+                model: this.config.model,
+                providerHost: (() => {
+                  try {
+                    return new URL(baseUrl).host;
+                  } catch {
+                    return baseUrl;
+                  }
+                })(),
+                originOf,
+              },
+              scope: turnScope,
+              runtime: interception ?? undefined,
+              policy: getActivePolicy,
+              telemetry,
+              pages: pageContext
+                ? [
+                    {
+                      pageId: pageContext.id,
+                      revision: pageContext.revision,
+                      digest: safeDigest(pageContext),
+                    },
+                  ]
+                : [],
+              memories: memoryRecords,
+            })
+          : undefined;
         const adapter = openaiCompatibleText(this.config.model, {
           apiKey: this.config.apiKey,
-          baseURL: this.config.baseUrl ?? 'https://api.openai.com/v1',
+          baseURL: baseUrl,
           api: 'chat-completions',
           maxRetries: 1,
+          ...(telemetry ? { fetch: telemetry.fetch as typeof fetch } : {}),
         });
         const start = async () => {
           const appTools =
@@ -353,6 +427,7 @@ export class DotAgent extends AbstractAgent {
                 )
               : [];
           check();
+          for (const tool of appTools) toolOrigins.composio.add(tool.name);
           const serverTools = [
             ...tools,
             ...appTools,
@@ -403,12 +478,30 @@ export class DotAgent extends AbstractAgent {
                     ? 10
                     : 5,
                 ),
-                tools: [
-                  ...tanstackTools(serverTools),
-                  ...connected,
-                  ...converted.tools,
-                  ...learnedSkillTools(ctx, check),
-                ],
+                tools: (() => {
+                  const all = [
+                    ...tanstackTools(serverTools),
+                    ...connected,
+                    ...converted.tools,
+                    ...learnedSkillTools(ctx, check),
+                  ];
+                  // Executor-level layer: wraps only tools that have an
+                  // executor, so the client tools stay client tools.
+                  return turnScope
+                    ? withToolPolicy(all, {
+                        dotId: dot.id,
+                        policy: getActivePolicy,
+                        origin: originOf,
+                        onRefusal: ({ toolName, decision }) =>
+                          turnScope.refusals.push({
+                            toolName,
+                            code: decision.code,
+                            layer: 'executor',
+                          }),
+                      })
+                    : all;
+                })(),
+                ...(provenance ? { middleware: [provenance.middleware] } : {}),
               });
             },
           });
@@ -455,7 +548,11 @@ export class DotAgent extends AbstractAgent {
               },
             });
         };
-        void start().catch(fail);
+        // The turn runs inside its provenance scope so tool executors (the
+        // approval creator) can read the dependency vector of what the model saw.
+        void (turnScope ? runInTurnScope(turnScope, start) : start()).catch(
+          fail,
+        );
       } catch (error) {
         fail(error);
       }

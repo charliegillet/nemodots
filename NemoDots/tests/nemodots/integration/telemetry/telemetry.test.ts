@@ -103,6 +103,7 @@ function scopeOf(missionId: string) {
   return {
     ownerId: `owner-${randomUUID()}`,
     missionId,
+    spaceId: null,
     environment: 'test',
     resource: 'checkout',
   } as const;

@@ -1,5 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
+import type { DependencyVector } from './nemodots/contracts/model-call.js';
 import type {
   Connection,
   ConnectionActionResult,
@@ -22,6 +23,14 @@ export class ConnectionStore {
         .some((column) => column.name === 'approvalId')
     )
       db.exec('ALTER TABLE mcp_actions ADD COLUMN approvalId TEXT');
+    // The evidence the model acted on when it asked; NULL when none was bound.
+    if (
+      !db
+        .prepare('PRAGMA table_info(mcp_approvals)')
+        .all()
+        .some((column) => column.name === 'dependency_vector')
+    )
+      db.exec('ALTER TABLE mcp_approvals ADD COLUMN dependency_vector TEXT');
   }
   private rows(dotId?: string) {
     return this.db
@@ -107,10 +116,13 @@ export class ConnectionStore {
     connectionId: string;
     tool: string;
     arguments: Record<string, unknown>;
+    dependencyVector?: DependencyVector | null;
   }) {
     const id = randomUUID();
     this.db
-      .prepare('INSERT INTO mcp_approvals VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .prepare(
+        'INSERT INTO mcp_approvals (id, threadId, dotId, connectionId, tool, arguments, createdAt, dependency_vector) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      )
       .run(
         id,
         value.threadId,
@@ -119,6 +131,7 @@ export class ConnectionStore {
         value.tool,
         JSON.stringify(value.arguments),
         Date.now(),
+        value.dependencyVector ? JSON.stringify(value.dependencyVector) : null,
       );
     return id;
   }
@@ -135,6 +148,10 @@ export class ConnectionStore {
       tool: String(row.tool),
       arguments: JSON.parse(String(row.arguments)) as Record<string, unknown>,
       createdAt: Number(row.createdAt),
+      dependencyVector:
+        typeof row.dependency_vector === 'string'
+          ? (JSON.parse(row.dependency_vector) as DependencyVector)
+          : null,
     };
   }
   action(threadId: string, toolCallId: string) {

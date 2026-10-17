@@ -14,6 +14,12 @@ import {
 // the vector each time it builds a ContextSnapshot, and tools that read more
 // evidence mid-turn add entries.
 
+export interface PolicyRefusal {
+  toolName: string;
+  code: string;
+  layer: 'middleware' | 'executor';
+}
+
 export interface TurnScope {
   readonly dotId: string;
   readonly threadId: string;
@@ -26,6 +32,8 @@ export interface TurnScope {
    * so an approval created now is stored without one (NULL).
    */
   unresolved: string[];
+  /** Tool calls refused by policy during this turn, for the record and for tests. */
+  refusals: PolicyRefusal[];
 }
 
 const storage = new AsyncLocalStorage<TurnScope>();
@@ -33,7 +41,7 @@ const storage = new AsyncLocalStorage<TurnScope>();
 export function createTurnScope(
   identity: Pick<TurnScope, 'dotId' | 'threadId' | 'runId'>,
 ): TurnScope {
-  return { ...identity, vector: [], unresolved: [] };
+  return { ...identity, vector: [], unresolved: [], refusals: [] };
 }
 
 export function runInTurnScope<T>(scope: TurnScope, fn: () => T): T {
