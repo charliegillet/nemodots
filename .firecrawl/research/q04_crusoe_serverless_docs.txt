@@ -1,0 +1,28 @@
+Serverless Inference | Crusoe Cloud
+  URL: https://docs.crusoecloud.com/serverless-inference/
+  ## 3. (Optional) Browse available models [​](https://docs.crusoecloud.com/serverless-inference/#3-optional-browse-available-models)
+| MODEL | PROVIDER | TYPE | CONTEXT LENGTH | LICENSE | ACCEPTABLE USE POLICY |
+|-|-|-|-|-|-|
+| [openai/gpt-oss-120b](https://huggingface.co/openai/gpt-oss-120b) | OpenAI | instruct | 128k | [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0) | [Acceptable Use Policy](https://huggingface.co/openai/gpt-oss-120b/blob/main/USAGE_POLICY) |
+
+Serverless Inference - Crusoe Cloud
+  URL: https://docs.crusoecloud.com/serverless-inference/overview/
+  Use serverless inference to interact with [supported models](https://docs.crusoecloud.com/serverless-inference/available-models) through Crusoe's Intelligence Foundry APIs.
+
+Metrics - Crusoe Cloud
+  URL: https://docs.crusoecloud.com/serverless-inference/inference-metrics
+  These queries cover input and output token throughput, prefix cache effectiveness, and cumulative totals over a window. Metric, Definition, Metric query. Input ...
+
+Serverless rate limits | Crusoe Cloud
+  URL: https://docs.crusoecloud.com/serverless-inference/rate-limits/
+  How Serverless Inference enforces tokens-per-minute and requests-per-minute limits, and how to interpret 429 and 503 responses.
+
+Available models | Crusoe Cloud
+  URL: https://docs.crusoecloud.com/serverless-inference/available-models
+  You can use the OpenAI-API compatible endpoint at `api.inference.crusoecloud.com` to access the models below for [Serverless Inference](https://docs.crusoecloud.com/quickstart/getting-started-with-serverless-inference).
+
+Usage and billing | Crusoe Cloud
+  URL: https://docs.crusoecloud.com/serverless-inference/usage-billing-models
+  | Offering | Billing |
+|-|-|
+| **[Serverless Inference](https://docs.crusoecloud.com/serverless-inference/overview)** | Per-token |

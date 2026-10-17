@@ -1,0 +1,526 @@
+Memory Evaluation - Mem0 Documentation
+  URL: https://docs.mem0.ai/core-concepts/memory-evaluation
+  ## [​](https://docs.mem0.ai/core-concepts/memory-evaluation#why-memory-evaluation-matters)  Why Memory Evaluation Matters
+That works on benchmarks but not in production, where every token adds cost. **Token efficiency** means achieving high accuracy with less context per query. It is what separates benchmark performance from production viability.Mem0’s algorithm achieves competitive accuracy on LoCoMo, LongMemEval, and BEAM while averaging **under 7,000 tokens per retrieval call**. Full-context approaches on the same benchmarks routinely consume 25,000+ tokens per query. Evaluating a memory system at scale comes down to three parameters: **accuracy** (what the benchmarks measure), **cost** (context tokens per query), and **performance** (latency). Optimizing one is easy. Balancing all three at scale is the actual problem.Some benchmarks today, particularly smaller ones like LoCoMo and LongMemEval, can be materially improved by aggressive retrieval strategies, larger context windows, or frontier models.
+
+## [​](https://docs.mem0.ai/core-concepts/memory-evaluation#benchmarks)  Benchmarks
+### [​](https://docs.mem0.ai/core-concepts/memory-evaluation#locomo)  LoCoMo
+[LoCoMo](https://github.com/snap-research/locomo) tests single-hop, multi-hop, open-domain, and temporal memory recall across conversational sessions.
+
+| Category | Score |
+|-|-|
+| **Overall** | **92.5** |
+| Single-hop | 91.2 |
+| Multi-hop | 91.3 |
+| Open-domain | 72.7 |
+| Temporal | 92.0 |
+
+_Mean tokens: 6,956.
+
+### [​](https://docs.mem0.ai/core-concepts/memory-evaluation#longmemeval)  LongMemEval
+[LongMemEval](https://github.com/xiaowu0162/LongMemEval) evaluates memory across single-session and multi-session contexts, including knowledge updates and temporal reasoning.
+
+| Category | Score |
+|-|-|
+| **Overall** | **94.4** |
+| Single-session (user) | 98.6 |
+| Single-session (assistant) | 98.2 |
+| Single-session (preference) | 96.7 |
+| Knowledge update | 93.6 |
+| Temporal reasoning | 97.0 |
+| Multi-session | 88.0 |
+
+_Mean tokens: 6,787.
+
+### [​](https://docs.mem0.ai/core-concepts/memory-evaluation#beam)  BEAM
+_Mean tokens (1M): 6,719._ _Mean tokens (10M): 6,914._
+
+The results at 10M reflect where memory systems actually stand at production context volumes.
+
+### [​](https://docs.mem0.ai/core-concepts/memory-evaluation#performance-summary)  Performance Summary
+| Benchmark | Score | Average tokens / query |
+|-|-|-|
+| **LoCoMo** | **92.5** | 6,956 |
+| **LongMemEval** | **94.4** | 6,787 |
+| **BEAM (1M)** | **64.1** | 6,719 |
+| **BEAM (10M)** | **48.6** | 6,914 |
+
+## [​](https://docs.mem0.ai/core-concepts/memory-evaluation#interpreting-results)  Interpreting Results
+- **Token efficiency matters as much as accuracy.** A system that scores 95% using 25K tokens per query isn’t comparable to one scoring 90% using 7K tokens. Report mean tokens per query alongside scores.
+
+LongMemEval-V2: Evaluating Long-Term Agent Memory Toward ...
+  URL: https://arxiv.org/html/2605.12493v1
+  # LongMemEval-V2: Evaluating Long-Term Agent Memory Toward Experienced Colleagues
+## 1 Introduction
+Memory is especially important for agent systems, where LLMs interact with specialized environments over many steps. Recent works show that memorizing task procedures, interface affordances, and hidden failure modes improve agent performance at inference time ( [Wang et al., 2024a](https://arxiv.org/html/2605.12493v1#bib.bib37); [Zhao et al., 2024](https://arxiv.org/html/2605.12493v1#bib.bib49); [Bouzenia et al., 2025](https://arxiv.org/html/2605.12493v1#bib.bib4); [Wang et al., 2025b](https://arxiv.org/html/2605.12493v1#bib.bib40); [Tang et al., 2025](https://arxiv.org/html/2605.12493v1#bib.bib34)).
+
+However, benchmarks for memory in the agentic context remain limited. Existing memory works mainly evaluate retrieval and reasoning over long documents or user chat histories ( [Hsieh et al., 2024](https://arxiv.org/html/2605.12493v1#bib.bib13); [Bai et al., 2025](https://arxiv.org/html/2605.12493v1#bib.bib2); [Wu et al., 2025a](https://arxiv.org/html/2605.12493v1#bib.bib41); [Maharana et al., 2024](https://arxiv.org/html/2605.12493v1#bib.bib25); [Tavakoli et al., 2025](https://arxiv.org/html/2605.12493v1#bib.bib35)). Recent works consider evaluating memorization over agent trajectories, but often use simplified game environments ( [Fang et al., 2026](https://arxiv.org/html/2605.12493v1#bib.bib10); [Li et al., 2026](https://arxiv.org/html/2605.12493v1#bib.bib21)), emphasize limited dependencies within one or a few trajectories ( [He et al., 2026](https://arxiv.org/html/2605.12493v1#bib.bib12); [Zhao et al., 2026b](https://arxiv.org/html/2605.12493v1#bib.bib51)), or evaluate indirectly through downstream task success ( [He et al., 2026](https://arxiv.org/html/2605.12493v1#bib.bib12)). As a result, they provide limited insight into whether memory systems can accumulate holistic, environment-specific knowledge from sustained interaction with a complex environment.
+
+A high-quality memory makes an agent an experienced colleague in a specialized environment.
+
+Driven by this view, we introduce LongMemEval-V2 (LME-V2), a benchmark for evaluating whether memory systems can help web agents acquire the experience needed to become knowledgeable colleagues. We provide examples in [Figure1](https://arxiv.org/html/2605.12493v1#S1.F1) and ability definitions in § [3.1](https://arxiv.org/html/2605.12493v1#S3.SS1). These questions are specific to the customized environments and thus remain generally unanswerable by recent frontier LLMs (§ [3.4](https://arxiv.org/html/2605.12493v1#S3.SS4)). Compared to prior benchmarks, LME-V2 poses new challenges with its deep context (25M/115M tokens in the small/medium tiers) and comprehensive memory ability coverage ( [Table1](https://arxiv.org/html/2605.12493v1#S1.T1)).
+
+![Refer to caption](https://arxiv.org/html/2605.12493v1/main_figure.png)Figure 1: Examples of LongMemEval-V2 questions. We display examples from the WorkArena domain. LME-V2 questions exercise diverse memory abilities: static (row 1), dynamic (row 2), workflow (row 3), gotchas (row 4), and premise awareness (right column).
+
+LME-V2 evaluates memory with a context gathering formulation (§ [3.3](https://arxiv.org/html/2605.12493v1#S3.SS3)). This provides a direct evaluation of memory quality with a practical interface that a downstream agent would use. We report both answer accuracy and query latency.
+
+Table 1: Comparison with existing memory and long-context benchmarks. # Sess., # Tok., and # Q denote the history size in sessions or tokens, as well as the total number of questions. For benchmarks with multiple preset length tiers, we report a range between the minimum length tier and the maximum length tier. For the other benchmarks, we report the averaged context size over all examples.
+
+|  |  |  |  |  |  |  |  |  |  |  |  |
+|-|-|-|-|-|-|-|-|-|-|-|-|
+| Benchmark | Domain | Context Profile | Question Profile | Memory Ability |
+| General Long Context |
+| LongBench V2 | Mixed | N/A | 260k | ✗ | 503 | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ |
+| MemoryAgentBench | Mixed | N/A | 285k | ✗ | 2,071 | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ |
+| CL-Bench | Mixed | N/A | 10k | ✗ | 1,899 | ✗ | ✓ | ✗ | ✓ | ✗ | ✗ |
+| Conversational Long Context |
+| LoCoMo | User-user chat | 28 | ∼\sim16k | ✓ | 7,512 | ✗ | ✓ | ✓ | ✗ | ✗ | ✓ |
+| LongMemEval-V1 | User-assistant chat | 48–475 | 115k–1.5M | ✗ | 500 | ✗ | ✓ | ✓ | ✗ | ✗ | ✓ |
+| PersonaMem-v2 | User-assistant chat | 10–20 | 33k–124k | ✓ | 5,000 | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ |
+| BEAM | User-assistant chat | 4.5–100 | 124k–10M | ✗ | 2,000 | ✗ | ✓ | ✓ | ✗ | ✗ | ✓ |
+| Agentic Long Context |
+| MemoryArena | Agent (mixed) | 7 | 40k+ | ✗ | 766 | ✗ | ✓ | ✗ | ✓ | ✓ | ✗ |
+| EMemBench | Game agent | 1 | 2k–∞\infty | ✓ | 1,280+ | ✗ | ✓ | ✗ | ✓ | ✓ | ✓ |
+| FileGramBench | File-system agent | 12 | 11k | ✓ | 4,333 | ✗ | ✓ | ✗ | ✓ | ✗ | ✗ |
+| AMA-Bench | Agent (mixed) | 1 | 57k | ✗ | 2,496 | ✗ | ✓ | ✓ | ✓ | ✓ | ✗ |
+| LongMemEval-V2 | Web agent | 100–498 | 25M–115M | ✓ | 451 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+As a result, naive application of popular agent memory methods could be ineffective as they are biased towards less noisy conversational contexts ( [Chhikara et al., 2025](https://arxiv.org/html/2605.12493v1#bib.bib6)) or high-level strategic knowledge ( [Wang et al., 2025b](https://arxiv.org/html/2605.12493v1#bib.bib40); [Ouyang et al., 2025](https://arxiv.org/html/2605.12493v1#bib.bib31)). In this paper, we propose AgentRunbook, a simple yet effective baseline consisting of two variants, optimized separately for efficiency and accuracy. (§ [4.1](https://arxiv.org/html/2605.12493v1#S4.SS1)). AgentRunbook-C stores raw trajectories directly as files.
+
+We evaluate the memory designs on the small and medium tiers of LME-V2. To begin with, a simple RAG method that retrieves state slices can only achieve an overall acccuracy of 40.1%, and AgentRunbook-R further improves to 57.8%. Accuracy-wise, we find the off-the-shelf Codex agent ( [OpenAI,](https://arxiv.org/html/2605.12493v1#bib.bib27)) has competitive performance, achieving a surprisingly high 69.3% accuracy. However, the agent achieves this at a cost of about 182 seconds per query, about 6.9 times slower than AgentRunbook-R. With our specialization designs, AgentRunbook-C performs best overall with 72.5% accuracy while being 32% faster than Codex at query time. Our further analyses reveal that AgentRunbook-C significantly advances the accuracy-latency frontier, but the room for future improvement remains large (§ [5.2](https://arxiv.org/html/2605.12493v1#S5.SS2)).
+
+## References
+Cl-bench: A benchmark for context learning.
+
+_CoRR_, abs/2602.03587, 2026.
+
+doi: 10.48550/ARXIV.2602.03587.
+
+URL [[https://doi.org/10.48550/arXiv.2602.03587](https://doi.org/10.48550/arXiv.2602.03587)](https://doi.org/10.48550/arXiv.2602.03587).
+
+Memoryarena: Benchmarking agent memory in interdependent multi-session agentic tasks.
+
+_CoRR_, abs/2602.16313, 2026.
+
+doi: 10.48550/ARXIV.2602.16313.
+
+URL [[https://doi.org/10.48550/arXiv.2602.16313](https://doi.org/10.48550/arXiv.2602.16313)](https://doi.org/10.48550/arXiv.2602.16313).
+
+RULER: what’s the real context size of your long-context language models?
+
+_CoRR_, abs/2404.06654, 2024.
+
+doi: 10.48550/ARXIV.2404.06654.
+
+URL [[https://doi.org/10.48550/arXiv.2404.06654](https://doi.org/10.48550/arXiv.2404.06654)](https://doi.org/10.48550/arXiv.2404.06654).
+
+Know me, respond to me: Benchmarking llms for dynamic user profiling and personalized responses at scale.
+
+_CoRR_, abs/2504.14225, 2025a.
+
+doi: 10.48550/ARXIV.2504.14225.
+
+URL [[https://doi.org/10.48550/arXiv.2504.14225](https://doi.org/10.48550/arXiv.2504.14225)](https://doi.org/10.48550/arXiv.2504.14225).
+
+Efficient memory management for large language model serving with pagedattention.
+
+In _Proceedings of the 29th symposium on operating systems principles_, pages 611–626, 2023.
+
+Beyond a million tokens: Benchmarking and enhancing long-term memory in llms.
+
+_CoRR_, abs/2510.27246, 2025.
+
+doi: 10.48550/ARXIV.2510.27246.
+
+URL [[https://doi.org/10.48550/arXiv.2510.27246](https://doi.org/10.48550/arXiv.2510.27246)](https://doi.org/10.48550/arXiv.2510.27246).
+
+LMEB: long-horizon memory embedding benchmark.
+
+_CoRR_, abs/2603.12572, 2026a.
+
+doi: 10.48550/ARXIV.2603.12572.
+
+URL [[https://doi.org/10.48550/arXiv.2603.12572](https://doi.org/10.48550/arXiv.2603.12572)](https://doi.org/10.48550/arXiv.2603.12572).
+
+LLM Evaluation Framework: Test LLM & Agent Apps - Zep
+  URL: https://www.getzep.com/ai-agents/llm-evaluation-framework/
+  ## Key takeaways
+- Most “LLM” failures are retrieval failures — measure [context completeness](https://help.getzep.com/evaluate-zep-for-your-use-case) first, then answer correctness, latency, and token cost.
+- Evaluate [agent memory](https://www.getzep.com/ai-agents/what-is-agent-memory/) with multi-session benchmarks (LoCoMo, LongMemEval); Zep reports 94.7% LoCoMo and 90.2% LongMemEval ( [benchmark results](https://www.getzep.com/research/)).
+
+This guide gives you that framework, then extends it to the hardest case: evaluating **agent memory**.
+
+| Layer | What you measure | Methods |
+|-|-|-|
+| Output quality | Accuracy, relevance, faithfulness, format | Reference-based metrics, LLM-as-judge, human review |
+| Agent memory | Does the agent recall the right facts over time? | LoCoMo, LongMemEval, custom multi-session sets |
+
+## Evaluate the retrieval layer separately
+Most “LLM” failures are actually context failures: the right information wasn't retrieved, so the model guessed. Completeness (did you get _all_ the needed context?), not just precision, is what predicts whether retrieval holds up.
+
+## Evaluating agent memory (the hard part)
+**Agent memory needs its own evaluation because the failure mode is temporal: the agent must recall the right fact, at the right time, across many sessions, as facts change.** Single-turn benchmarks miss this entirely. Two industry-standard benchmarks target it:
+
+- **LoCoMo** — long conversational memory across very long, multi-session dialogues.
+- **LongMemEval** — long-term memory recall and reasoning over extended histories.
+
+## LOCOMO Scores
+Zep
+
+75.14%
+
+gpt-4o-mini Baseline
+
+72.9%
+
+Mem0 (Graph)
+
+68.44%
+
+Mem0 (Base)
+
+66.88%
+
+0%20%40%60%80%100%
+
+When you evaluate a memory system, measure accuracy _together with_ retrieval latency and token consumption — memory systems often trade one for another, and a system that's accurate but slow or token-hungry won't survive production. As a reference point, Zep's temporal context graph approach reports 94.7% accuracy on LoCoMo (155ms retrieval, 5,760 tokens) and 90.2% on LongMemEval (162ms, 4,408 tokens) — leading on all three dimensions at once. Build a custom multi-session set on _your_ data too: seed facts, change them, and test whether the agent answers “what's true now?” and “what was true then?” correctly.
+
+## Frequently asked questions
+### How do I evaluate agent memory specifically?
+Use multi-session benchmarks like LoCoMo and LongMemEval, plus a custom set on your data where facts change over time. Measure accuracy alongside retrieval latency and token cost.
+
+### Which benchmarks should I use for agent memory?
+LoCoMo and LongMemEval for long, multi-session memory — and always report accuracy alongside retrieval latency and token cost, since memory systems often trade one for another.
+
+Memory Benchmarks (LoCoMo & LongMemEval) - GitHub
+  URL: https://github.com/NirDiamant/Agent_Memory_Techniques/blob/main/all_techniques/29_memory_benchmarks_LoCoMo/memory_benchmarks_locomo.ipynb
+  [Skip to content](https://github.com/NirDiamant/Agent_Memory_Techniques/blob/main/all_techniques/29_memory_benchmarks_LoCoMo/memory_benchmarks_locomo.ipynb#start-of-content)
+
+{{ message }}
+
+## Files
+main
+
+Search this repository(forward slash)` forward slash/`
+
+/
+
+# memory_benchmarks_locomo.ipynb
+Copy path
+
+Blame
+
+More file actions
+
+Blame
+
+More file actions
+
+## Latest commit
+![NirDiamant](https://avatars.githubusercontent.com/u/28316913?v=4&size=40)![claude](https://avatars.githubusercontent.com/u/81847?v=4&size=40)
+
+[NirDiamant](https://github.com/NirDiamant/Agent_Memory_Techniques/commits?author=NirDiamant)
+
+and
+
+[claude](https://github.com/NirDiamant/Agent_Memory_Techniques/commits?author=claude)
+
+Open commit detailsfailure
+
+5 months agoMay 5, 2026
+
+[4a0d986](https://github.com/NirDiamant/Agent_Memory_Techniques/commit/4a0d986f75682670f36c6f62b7964561a484f334) · 5 months agoMay 5, 2026
+
+## History
+[History](https://github.com/NirDiamant/Agent_Memory_Techniques/commits/main/all_techniques/29_memory_benchmarks_LoCoMo/memory_benchmarks_locomo.ipynb)
+
+Open commit details
+
+[View commit history for this file.](https://github.com/NirDiamant/Agent_Memory_Techniques/commits/main/all_techniques/29_memory_benchmarks_LoCoMo/memory_benchmarks_locomo.ipynb) History
+
+824 lines (824 loc) · 37.5 KB
+
+/
+
+Copy path
+
+Top
+
+## File metadata and controls
+- Preview
+- Code
+- Blame
+
+824 lines (824 loc) · 37.5 KB
+
+[Raw](https://github.com/NirDiamant/Agent_Memory_Techniques/raw/refs/heads/main/all_techniques/29_memory_benchmarks_LoCoMo/memory_benchmarks_locomo.ipynb)
+
+Copy raw file
+
+Download raw file
+
+You must be signed in to make or propose changes
+
+More edit options
+
+Edit and raw actions
+
+Loading
+
+You can’t perform that action at this time.
+  Category: github
+
+Serious flaws in two popular AI Memory Benchmarks (LoCoMo ...
+  URL: https://www.reddit.com/r/AIMemory/comments/1s1jlnd/serious_flaws_in_two_popular_ai_memory_benchmarks/
+  We audited it and found 6.4% of the answer key is wrong, and the LLM judge accepts up to 63% intentionally wrong answers. LongMemEval-S fits ...
+
+Evaluating Very Long-Term Conversational Memory of LLM ...
+  URL: https://snap-research.github.io/locomo/
+  ## Evaluating Very Long-Term Conversational Memory of LLM Agents
+[Adyasha Maharana](https://adymaharana.github.io/) 1,[Dong-Ho Lee](https://www.danny-lee.info/) 2,[Sergey Tulyakov](http://www.stulyakov.com/) 3, [Mohit Bansal](https://www.cs.unc.edu/~mbansal/) 1†, [Francesco Barbieri](https://fvancesco.github.io/)†, [Yuwei Fang](https://yuwfan.github.io/) 3†
+
+1UNC Chapel Hill2University of Southern California3Snap Inc. †Equal advising
+
+[arXiv](http://arxiv.org/abs/2402.17753)[Code](https://github.com/snap-research/LoCoMo)[Data](https://github.com/snap-research/locomo/tree/main/data)
+
+![Logo](https://snap-research.github.io/locomo/static/images/evaluation_framework.svg)
+
+## Motivation
+within contexts spanning no more than five
+
+Moreover, Using this pipeline, we collect LoCoMo, a dataset of very long-term conversations, each encompassing 300 turns and 9K tokens on avg., over up to 35 sessions.
+
+Based on LOCOMO, we present a comprehensive evaluation benchmark to measure long-term memory in models, encompassing
+
+## Findings
+We present extensive experimental results on the LoCoMo benchmark using instruction-based LLMs, long-context LLMs, and RAG techniques. Our findings include:
+
+- **Long-context LLMs and RAG demonstrate effectiveness in QA tasks**, improving ‘memory’ capabilities of LLMs (with improvements ranging
+from 22-66%), but still significantly lag behind human levels (by 56%), especially in temporal reasoning, (by 73%);
+- **RAG offers a balanced compromise**, combining the accuracy of short-context LLMs with the
+extensive comprehension of wide-context LLMs, and does particularly well when dialogues are transformed into a database of assertions (observations)
+about each speaker’s life and persona.
+
+## **Question answering performance of Base, Long-context and RAG models.** Optimal performance is in bold.  Results are based on F1-score for answer prediction; higher is better.
+![Logo](https://snap-research.github.io/locomo/static/images/minigpt5_results.svg)
+
+## BibTeX
+```
+@article{maharana2024lococmo,
+  author    = {Maharana, Adyasha and Lee, Dong-Ho and Tulyakov, Sergey and Bansal, Mohit and Barbieri, Francesco and Fang, Yuwei},
+  title     = {Evaluating Very Long-Term Conversational Memory of LLM Agents.},
+  journal   = {arxiv},
+  year      = {2024},
+}
+```
+
+Agent Memory Benchmark: A Manifesto | Hindsight - Vectorize
+  URL: https://hindsight.vectorize.io/blog/2026/03/23/agent-memory-benchmark
+  [Skip to main content](https://hindsight.vectorize.io/blog/2026/03/23/agent-memory-benchmark#__docusaurus_skipToContent_fallback)
+
+New: **Introducing Hindsight Memlake**, serving 100M memories at <100ms p99 on object storage. [Read the post →](https://hindsight.vectorize.io/blog/2026/10/13/memlake)
+
+![Agent Memory Benchmark: A Manifesto](https://hindsight.vectorize.io/assets/images/explorer-0-17c05c48af1e3f5dca49e469f2891e13.png)
+
+We're building Hindsight to be the best AI memory system in the world. "Best" doesn't mean winning every benchmark. It means building something that genuinely works — and being honest about where it does and doesn't.
+
+That's why we built Agent Memory Benchmark (AMB), and why we're making it fully open.
+
+## "Best" is more than accuracy [​](https://hindsight.vectorize.io/blog/2026/03/23/agent-memory-benchmark#best-is-more-than-accuracy)
+- **Accuracy** — does the agent answer questions correctly using its memory?
+- **Speed** — how long does retain and recall actually take?
+- **Cost** — how many tokens does the system consume per operation?
+- **Usability** — how much configuration, tuning, and infrastructure does it need to work?
+
+## The problem with existing benchmarks [​](https://hindsight.vectorize.io/blog/2026/03/23/agent-memory-benchmark#the-problem-with-existing-benchmarks)
+LoComo and LongMemEval are solid datasets.
+
+On most LoComo and LongMemEval instances, a naive "dump everything into context" approach scores competitively — not because it's a good memory architecture, but because retrieval has become the easy part.
+
+This creates a false picture. The benchmark can no longer tell them apart.
+
+That was the dominant paradigm when they were designed.
+
+LoComo and LongMemEval are still a valid foundation — the question formats are good, the evaluation methodology is reasonable, and they remain useful for catching regressions.
+
+## Datasets in AMB v1 [​](https://hindsight.vectorize.io/blog/2026/03/23/agent-memory-benchmark#datasets-in-amb-v1)
+| Dataset | What it stress-tests |
+|-|-|
+| **[LoComo](https://arxiv.org/abs/2402.17753)** | Multi-hop and temporal reasoning across long multi-session conversations |
+| **[LongMemEval](https://arxiv.org/abs/2410.10813)** | Knowledge updates and belief revision — does the system handle facts that change over time? |
+
+## Hindsight on the new baseline [​](https://hindsight.vectorize.io/blog/2026/03/23/agent-memory-benchmark#hindsight-on-the-new-baseline)
+| Dataset | Accuracy |
+|-|-|
+| LoComo | **92.0%** |
+| LongMemEval | **94.6%** |
+| LifeBench | **71.5%** |
+| PersonaMem | **86.6%** |
+
+- **Better retain process** — more accurate fact extraction means the right information gets stored in the first place; garbage in, garbage out applies directly to memory recall
+- **Retrieval algorithm** — the retrieval pipeline has been substantially reworked, with meaningfully better accuracy, while preserving the same semantic interface that users already rely on
+
+## Two modes, two tradeoffs [​](https://hindsight.vectorize.io/blog/2026/03/23/agent-memory-benchmark#two-modes-two-tradeoffs)
+LLM orchestration is evolving fast, and there isn't one right way to build a memory-augmented agent. AMB reflects that by supporting two distinct evaluation modes.
+
+AMB lets you run both modes against the same dataset and compare the results directly — accuracy, latency, and token cost side by side — so you can make that tradeoff deliberately rather than by default.
+
+## Try it [​](https://hindsight.vectorize.io/blog/2026/03/23/agent-memory-benchmark#try-it)
+AMB is live at **[agentmemorybenchmark.ai](https://agentmemorybenchmark.ai/)**.
+
+The repo is at **[github.com/vectorize-io/agent-memory-benchmark](https://github.com/vectorize-io/agent-memory-benchmark)** — follow the instructions there to run the benchmarks against your own system and upload your results to the leaderboard.
+
+We'd rather hear the hard feedback now than six months from now.
+
+Emergence AI Broke the Agent Memory Benchmark. I Tried to ...
+  URL: https://medium.com/asymptotic-spaghetti-integration/emergence-ai-broke-the-agent-memory-benchmark-i-tried-to-break-their-code-23b9751ded97
+  # Emergence AI Broke the Agent Memory Benchmark. I Tried to Break Their Code.
+[Calvin Ku](https://medium.com/@calvinjku?source=post_page---byline--23b9751ded97-----------------------------------------)
+
+Follow
+
+9 min read
+
+·
+
+Aug 4, 2025
+
+24
+
+Share
+
+I’ve talked a lot about the **LongMemEval** dataset on my blog. If you’re not deep in the agent memory space, you’ve probably never heard of it.
+
+Long story short, LongMemEval is the new gold standard for benchmarking conversational agent memory. He invited me to check out their blog post, [SOTA on LongMemEval with RAG](https://www.emergence.ai/blog/emergence-is-the-new-new-state-of-the-art-in-agent-memory), where they, well, beat Zep by a mile. 🤯
+
+## How They Did It
+![](https://miro.medium.com/v2/resize:fit:540/1*uF9vmIXgnMDkyeSbj6kzLA.png)
+
+EmergenceMem Accuracy on LongMemEval
+
+1. **EmergenceMem Simple** — 82.40%
+
+2. **EmergenceMem Simple Fast** — 79.00%
+
+3. **EmergenceMem Internal** — 86.00%
+
+A session’s relevance score is based on how many of its turns appear in the top search results after reranking. For example, if the highest-ranked turns are mostly from Session 37, the entire Session 37 is pulled into context for the LLM.
+
+1.
+
+2.
+
+3.
+
+## A Quick Detour: Making the Benchmark More Reliable
+Before we go deeper, we need to talk about evaluation.
+
+To that end, I created a 10-choice version of LongMemEval, which you can find [here](https://huggingface.co/datasets/Percena/lme-mc10). Testing **EmergenceMem Simple Fast** with GPT-4o mini on this version gave us a nice performance bump to **76.8%**.
+
+Here are the results:
+
+![](https://miro.medium.com/v2/resize:fit:700/1*uv6260s7bWLS2gCh4dCkeQ.png)
+
+EmergenceMem Simple Fast on MSC, LoCoMo, LongMemEval
+
+The high score on MSC is expected — it’s a relatively easy dataset. The score on LoCoMo, however, is a huge red flag.
+
+## Get Calvin Ku’s stories in your inbox
+Join Medium for free to get updates from this writer.
+
+Subscribe
+
+Subscribe
+
+This isn’t the first time the LoCoMo benchmark has raised eyebrows.
+
+Press enter or click to view image in full size
+
+![](https://miro.medium.com/v2/resize:fit:700/1*YuHpZwDgpKyuOMaLELc_Sg.png)
+
+Zep vs. Mem0 on LoCoMo
+
+This brings us to a critical puzzle. LongMemEval is widely considered to be a much harder benchmark than LoCoMo. So why does the Emergence AI solution perform so much worse on the supposedly easier dataset?
+
+## The Culprit: A Hardcoded K
+To understand the strange LoCoMo result, I had to dig into the code.
+
+The second, Top-k, determines how many of those units get retrieved to answer a query. Every dataset is different.
+
+## Beyond the Magic Number: An Adaptive-k Approach
+2.
+
+3.
+
+And the results speak for themselves:
+
+EmergenceMeme Simple Fast (MMR + Top-p) on MSC, LoCoMo, and LongMemEval
+
+As you can see, performance improves on all three benchmarks, and the problematic LoCoMo score is now much healthier. The best part?
+
+This performance bump does come at a cost, of course. This, in turn, increased the cost of running the full evaluation on GPT-4o mini to **$1.99** — a 42% increase. 😉
+
+A closer look at the retrieval stats shows there’s still plenty of room for improvement:
+
+Retrieval Analysis (LongMemEval)
+
+However, a quick regression shows that simply using more tokens doesn’t have a strong correlation with accuracy.
+
+## Conclusion
+This journey started with a simple goal: to understand Emergence AI’s new state-of-the-art result on LongMemEval. Their work is a huge step forward for agent memory, but a surprising performance dip on the LoCoMo benchmark pointed to a small but significant detail: a hardcoded retrieval limit of **k=42**.
+
+This experiment shows that we can build on their impressive foundation. Performance improved significantly across all benchmarks, and the system became far more robust. However, while the adaptive method fixed the initial performance drop on LoCoMo, the final score still falls short of the state-of-the-art results reported by competitors like Zep.
+
+My gut feeling is that the unique structure of the LoCoMo dataset is the key.
+
+And of course, this flexibility isn’t a free lunch — the adaptive method increased the average number of retrieved items, leading to a higher token cost.
+
+This adaptability is the key to creating solutions that are not just powerful, but also reliable and efficient.
+
+What are your thoughts? Let me know in the comments below!
+
+[Agent Memory](https://medium.com/tag/agent-memory?source=post_page---footer_tags--23b9751ded97-----------------------------------------)
+
+[LLM](https://medium.com/tag/llm?source=post_page---footer_tags--23b9751ded97-----------------------------------------)
+
+Follow
+
+[**Written by Calvin Ku**](https://medium.com/@calvinjku?source=post_page---post_author_info--23b9751ded97-----------------------------------------)
+
+[218 followers](https://medium.com/@calvinjku/followers?source=post_page---post_author_info--23b9751ded97-----------------------------------------)
+
+Sapere aude.
+
+Follow
+
+Follow
+
+Rigorous math, GPU-hot dad jokes, 🍝🤖 & marinara warnings.
+
+Follow
+
+[Help](https://help.medium.com/hc/en-us?source=post_page-----23b9751ded97-----------------------------------------)
+
+[Status](https://status.medium.com/?source=post_page-----23b9751ded97-----------------------------------------)
+
+[About](https://medium.com/about?autoplay=1&source=post_page-----23b9751ded97-----------------------------------------)
+
+[Careers](https://medium.com/jobs-at-medium/work-at-medium-959d1a85284e?source=post_page-----23b9751ded97-----------------------------------------)
+
+[Press](mailto:pressinquiries@medium.com)
+
+[Blog](https://blog.medium.com/?source=post_page-----23b9751ded97-----------------------------------------)
+
+[Store](https://medium.com/store)
+
+[Rules](https://policy.medium.com/medium-rules-30e5502c4eb4?source=post_page-----23b9751ded97-----------------------------------------)
+
+[Terms](https://policy.medium.com/medium-terms-of-service-9db0094a1e0f?source=post_page-----23b9751ded97-----------------------------------------)
+
+Daily Papers - Hugging Face
+  URL: https://huggingface.co/papers?q=LongMemEval
+  Extensive experiments on the LongMemEval and LoCoMo benchmarks demonstrate that CoM outperforms strong baselines with accuracy gains of 7.5%-10.4%, while ...
+
+LOCOMO Benchmark: Long-Horizon Memory in LLMs - Emergent Mind
+  URL: https://www.emergentmind.com/topics/locomo-benchmark-d06cff1a-d4a5-4df8-ab85-fdca157d190b
+  The benchmark drives advances in memory system architectures, demonstrating significant gains in judge accuracy, retrieval precision, and input ...

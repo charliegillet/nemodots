@@ -1,0 +1,223 @@
+## [doc:https://github.com/ruvnet/ruvector/blob/46d816ddc4c2a8a06cd3613534a79b1d557d858b/docs/research/dspy/dspy-ts-comprehensive-research.md] (doc) DSPy.ts Comprehensive Research Report
+License: MIT
+# DSPy.ts Comprehensive Research Report
+## 3. Advanced Optimization Techniques
+### 3.1 Bootstrap Few-Shot Learning
+
+### 3.4 Teleprompter Patterns (Legacy Term)
+
+## 7. Research Findings Summary
+### 7.1 Key Insights
+- GEPA: 22-90x cost reduction with maintained quality
+- MIPROv2: 32-113% accuracy improvements
+- BootstrapFewShot: 15-30% typical improvement
+- All optimizers support metric-driven learning
+
+## [issue:stanfordnlp/dspy#1775] (issue) Failed to reproduce the intro.ipynb#1775
+https://github.com/stanfordnlp/dspy/issues/1775
+License: MIT
+# Failed to reproduce the intro.ipynb#1775
+## Retrieval Score for compiled Baleen: 60.0
+Further changing the teleprompter call to simplify the metric as follows `dspy.BootstrapFewShot(metric=exact_match, max_labeled_demos=4)` gives us 64% after compiling.
+
+1. `tp = dspy.MIPROv2(metric=exact_match, auto="light", num_threads=8)`
+
+I had to run `tp = dspy.MIPROv2(metric=exact_match, num_threads=16)` which worked fine
+
+## [doc:https://github.com/vicentereig/dspy.rb/blob/b18a402143091a6b435972d460b8c4c8feca0b2d/docs/src/optimization/prompt-optimization.md] (doc) Program Optimization in Ruby | MIPROv2 & GEPA
+License: NOASSERTION
+## Compile with MIPROv2
+
+MIPROv2 lives in the optional `dspy-miprov2` gem:
+
+```ruby
+gem "dspy"
+gem "dspy-miprov2"
+```
+
+Compile the program against training and validation examples:
+
+```ruby
+optimizer = DSPy::Teleprompt::MIPROv2::AutoMode.medium(metric: metric)
+
+result = optimizer.compile(
+  predictor,
+  trainset: training_examples,
+  valset: validation_examples
+)
+
+optimized_program = result.optimized_program
+puts optimized_program.prompt.instruction
+puts result.best_score_value
+```
+
+MIPROv2 searches over instructions and demonstrations. Its API returns an `OptimizationResult`; deploy or serialize `result.optimized_program`, not the optimizer itself.
+
+See MIPROv2 for budgets, presets, and multi-predictor programs.
+
+## Compile with GEPA
+
+GEPA uses scalar scores and textual feedback to propose instruction changes. It lives in the optional `dspy-gepa` gem.
+
+Use GEPA when your metric can explain a failure, not merely mark it wrong. The reflection model receives that feedback and uses it to propose the next candidate.
+
+See GEPA for its metric contract, reflection model, and evaluation budget.
+… (23 more lines)
+
+## [doc:https://dspy.ai/diving-deeper/choosing-an-optimizer/] (doc) Optimizers: choosing one [¶](https://dspy.ai/diving-deeper/choosing-an-optimizer/\#optimizers-choosing-one "Permanent link")
+## Selection cheat sheet ¶
+
+| Situation | Try |
+| --- | --- |
+| Just starting; no idea what helps | `BootstrapFewShot` |
+| Demos vary in quality across attempts | `BootstrapFewShotWithRandomSearch` |
+| Large trainset; inputs need different demos | `KNNFewShot` |
+| Instructions look wrong; demos look fine | `COPRO` or `GEPA` |
+| Both look weak; you have budget | `MIPROv2` or `GEPA` |
+| Failure cases share a pattern you can name | `SIMBA` or `InferRules` |
+| Prompt-only has plateaued; the model is tunable | `BootstrapFinetune` |
+| You want to combine prompt + weight tuning | `BetterTogether` |
+| You have multiple competent programs to combine | `Ensemble` |
+| Agent / tool-use task | `AvatarOptimizer` or `GEPA` |
+
+## Cross-links ¶
+
+- Metrics and evaluation — every optimizer compiles against a metric defined there; the `Prediction(score, feedback)` shape GEPA expects is documented there.
+- GEPA in depth — the deep dive on the optimizer above.
+- BootstrapFewShot family — the deep dive on `BootstrapFewShot` and its random-search variants.
+- Fine-tuning with `BootstrapFinetune` — the deep dive on weight tuning.
+
+Back to top
+
+Ask AI
+
+## [readme:avnlp/dspy-opt] (readme) avnlp/dspy-opt
+https://github.com/avnlp/dspy-opt
+License: MIT
+The prompts and few-shot examples in the DSPy modules are optimized using the MIPRO, COPRO, BootstrapFewShot, SIMBA, and GEPA optimizers and DeepEval metrics.
+
+## Features
+- **5 DSPy optimizers** - MIPROv2, COPRO, BootstrapFewShot, SIMBA, and GEPA.
+
+## Optimizers
+All optimizers are driven by the DeepEval metrics evaluation loop, GEPA additionally requires a _reflection LLM_ and a feedback-producing metric function.
+
+| Optimizer | What it tunes | Search strategy | Recommended for | Hyperparameters |
+|-|-|-|-|-|
+| **MIPROv2** | Instructions + Few-shot examples (jointly) | Bayesian optimization over candidate prompt/demo sets | Strong general-purpose default; sufficient search budget available | `max_bootstrapped_demos`, `max_labeled_demos`, `auto` |
+| **GEPA** | Instructions + few-shot examples (reflective evolution) | Pareto-based candidate selection with LLM reflection on failures | Reflection-driven improvements with multi-metric trade-offs | `max_full_evals`, `reflection_minibatch_size`, `candidate_selection_strategy`, `use_merge` |
+
+## Components
+### Metrics
+- Creates metric functions compatible with DSPy optimizers.
+- Provides two factory functions for optimizer compatibility:
+  - `create_metrics_function()` returns a single **float** (averaged metric score), used by MIPROv2, COPRO, BootstrapFewShotWithRandomSearch, and SIMBA.
+Citation: https://raw.githubusercontent.com/avnlp/dspy-opt/HEAD/README.md
+
+## [doc:https://dspy.ai/cheatsheet/] (doc) DSPy Cheatsheet [¶](https://dspy.ai/cheatsheet/\#dspy-cheatsheet "Permanent link")
+(no content)
+
+## [issue:stanfordnlp/dspy#8878] (issue) Does MIPROv2 support not generating examples? Besides GEPA, what other optimizers can be used without optimizing examples?#8878
+https://github.com/stanfordnlp/dspy/issues/8878
+License: MIT
+# Does MIPROv2 support not generating examples? Besides GEPA, what other optimizers can be used without optimizing examples?\#8878
+
+## Description
+
+oashua
+
+Apart from GEPA, which optimizer supports optimizing instructions only without generating few-shot examples? For MIPROv2, even if I set both `max_bootstrapped_demos` and `max_labeled_demos` to 0, examples will still be generated.
+
+MIPROv2 and SIMBA also support instruction-only optimization. Speaking of MIPROv2, there's a bug that arguments passed to `compile` are ignored, which we're actively fixing. Can you try passing `max_bootstrapped_demos` and `max_labeled_demos` in the constructor of MIPROv2?
+
+apparently I am supposed to pass the args with their values set to 0, but setting the parameter auto shows N samples = 12 chosen, is there a way to confirm whether the auto is overwriting the max\_bootstrapped\_demos behaviour because I intend to optimize a zero-shot prompt
+
+```
+teleprompter = MIPROv2(metric = validity_metric,
+                       auto="light",
+                       init_temperature=1.0)
+
+optimized_program = teleprompter.compile(
+                                        program,
+                                        trainset=train,
+                                        valset=val,
+                                        max_bootstrapped_demos=0,
+                                        max_labeled_demos=0
+                                        )
+```
+
+> apparently I am supposed to pass the args with their values set to 0, but setting the parameter auto shows N samples = 12 chosen, is there a way to confirm whether the auto is overwriting the max\_bootstrapped\_demos behaviour because I intend to optimize a zero-shot prompt
+>
+> ```
+> teleprompter = MIPROv2(metric = validity_metric,
+>                        auto="light",
+>                        init_temperature=1.0)
+>
+> optimized_program = teleprompter.compile(
+>                                         program,
+>                                         trainset=train,
+>                                         valset=val,
+>                                         max_bootstrapped_demos=0,
+>                                         max_labeled_demos=0
+… (4 more lines)
+
+## [issue:stanfordnlp/dspy#9308] (issue) [Bug] MIPROv2 ignores metric_threshold for unshuffled few-shot bootstrap (seed=-1)#9308
+https://github.com/stanfordnlp/dspy/issues/9308
+License: MIT
+# \[Bug\] MIPROv2 ignores metric\_threshold for unshuffled few-shot bootstrap (seed=-1)\#9308
+
+#9317
+
+#9317
+
+## Description
+
+arutamonofu
+
+### What happened?
+
+When using MIPROv2 with `metric_threshold` parameter, the threshold is **not applied** to one of the bootstrap candidate sets (specifically the "unshuffled few-shot" case with `seed == -1`). This causes examples with metrics below the threshold to be incorrectly included as "full traces" during bootstrapping.
+
+### Steps to reproduce
+
+1. Configure MIPROv2 with `metric_threshold=1.0`
+2. Run optimization with training data where examples have metrics < 1.0 (e.g., 0.8)
+3. Observe that bootstrapping reports success even though no examples should pass the threshold
+
+Example code:
+… (114 more lines)
+
+## [doc:https://github.com/langwatch/langwatch/blob/9b089a78b5cef8eeb73fa0493f56b41ce45eb0bf/docs/improve-your-agent/optimize-with-dspy.mdx] (doc) Optimize with DSPy Using Scenarios as the Metric
+License: Apache-2.0
+## Step 4: Run the optimizer
+
+```python
+import langwatch
+import langwatch.dspy
+
+dspy.configure(lm=dspy.LM("openai/gpt-5-mini", cache=False))
+program = ScenarioProgram(build_agent())
+
+optimizer = dspy.GEPA(
+    metric=scenario_metric,
+    max_metric_calls=48,
+    reflection_minibatch_size=3,
+    num_threads=3,
+    reflection_lm=dspy.LM("openai/gpt-5", temperature=1.0, max_tokens=16000),
+    track_stats=True,
+)
+langwatch.dspy.init(experiment="returns-agent-scenarios", optimizer=optimizer)
+
+optimized = optimizer.compile(program, trainset=trainset, valset=trainset)
+optimized.save("optimized_agent.json")
+print(optimized.agent.react.signature.instructions)
+```
+
+`max_metric_calls=48` gave four iterations on the example: the first full pass costs six calls, and each accepted candidate costs a minibatch of three for the parent, three for the candidate and a full pass of six. GEPA's `auto="light"` budget plans hundreds of metric calls, which is too many when every call is a full simulation.
+
+`langwatch.dspy.init` records the seed program and every candidate that reaches a full validation pass as one step each, with the candidate's instructions per predictor and the score of every scenario in that pass. GEPA drops a candidate that loses on its minibatch before the validation set, so that candidate has no step.
+… (35 more lines)
+
+## [doc:https://github.com/stanfordnlp/dspy/blob/869874767729866f96f77e757a685ee72fb663a5/docs/docs/cheatsheet.md] (doc) DSPy Cheatsheet
+License: MIT
+(no content)

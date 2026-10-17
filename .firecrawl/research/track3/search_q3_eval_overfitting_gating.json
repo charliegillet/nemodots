@@ -1,0 +1,191 @@
+Self-improving agents: what changes, what persists, and how to prove it
+  URL: https://arize.com/resources/self-improving-agents/
+  # Self-improving agents: what changes, what persists, and how to prove it
+## **How to prove a self-improving agent actually improved**
+![Prove a candidate with target cases, repeated runs, held-out cases, and regression checks.](https://arize.com/wp-content/uploads/2026/09/fig-proof-gates.png)Each evaluation gate answers a different failure mode.
+
+Every candidate needs an evidence plan, not one universal checklist. [Start with repeat comparisons](https://arize.com/ai-agents/agent-evaluation/) and cases outside the update data; then add regression, constraint, and independent-review checks as the change becomes broader or harder to reverse.
+
+### **Discovery and evaluation solve different problems**
+A team can write deterministic checks for malformed tool arguments, an LLM judge for a known semantic criterion, or a regression test for a failure it has already seen.
+
+### **What evaluations have asked over time**
+- **Broader validation (Patel et al., 2024; Ye et al., 2026)**: [Large Language Models Can Self-Improve At Web Agent Tasks](https://arxiv.org/abs/2405.20309) added measures of performance, robustness, capabilities, and trajectory quality on WebArena; [On the Fragility of Self-Improving Agents](https://arxiv.org/abs/2608.18066) used repeated runs and shuffled task order to re-evaluate memory-based methods.
+
+## **Autonomy should depend on reversibility and blast radius**
+### **Minimum promotion evidence by risk**
+- Memory, prompt, or guidance: snapshot the candidate; repeat comparisons on held-out tasks; check regressions; name the rollback path.
+
+## **Measure the whole agent**
+### **Test the candidate as a system, not only as a prompt**
+A code change can produce a different trajectory even when the model and prompt stay constant.
+
+Validation should therefore execute the **complete candidate agent** whenever possible.
+
+This is stronger evidence than scoring a proposed prompt or diff in isolation because it tests the behavior that users will actually inherit.
+
+This provides stronger evidence than reviewing a proposed prompt or code change in isolation because the candidate is tested as the system users will actually experience.
+
+## **FAQ**
+### **How do you evaluate a self-improving agent?**
+- Held-out cases: does the gain transfer beyond the data used to create or select the update?
+- Regression and constraint checks: did the agent preserve prior successes and stay within relevant safety, permission, cost, or latency limits?
+
+Do Self-Evolving Skills Generalize to Held-Out Tasks? - arXiv
+  URL: https://arxiv.org/html/2609.39148v2
+  AI agents can externalize what they learn from past tasks into reusable skills, such as procedures, checklists, code, or other executable ...
+
+Self-Improving AI Agent Harnesses Overfit, So Regularize Them Like ...
+  URL: https://medium.com/@Micheal-Lanham/self-improving-ai-agent-harnesses-overfit-so-regularize-them-like-models-41a299bae6be
+  Treat a self-editing harness as a model in training, with parameters, an optimizer and data · Separate the tasks a proposer reads from the tasks ...
+
+The Path to Recursive Self-Improving Agents: Foundation, Framework ...
+  URL: https://www.preprints.org/manuscript/202608.0051
+  # The Path to Recursive Self-Improving Agents: Foundation, Framework, and Future Directions
+## 3. Agent Harness Self-Improvement
+### 3.1. Module-Level Self-Improvement
+#### 3.1.3. Prompt and Context Self-Optimization
+TextGrad abstracts LLM critique as a gradient-like signal over textual variables [ [102](https://www.preprints.org/manuscript/202608.0051#B102-preprints-225447)], and GEPA uses execution and evaluation traces for reflective prompt evolution [ [103](https://www.preprints.org/manuscript/202608.0051#B103-preprints-225447)]. EEVEE and Combee further scale prompt learning to heterogeneous task streams and large volumes of agentic traces, pushing prompt-program adaptation from offline tuning toward deployment-time learning [ [108](https://www.preprints.org/manuscript/202608.0051#B108-preprints-225447), [109](https://www.preprints.org/manuscript/202608.0051#B109-preprints-225447)].
+
+### 3.3. Self-Referential Code Modification
+#### 3.3.3. Open-Ended and Governed Recursive Self-Modification
+The Darwin Gödel Machine (DGM) replaces the original Gödel Machine’s impractical proof obligation with empirical validation: a coding agent edits its own repository, evaluates the resulting descendant on downstream tasks, and retains viable variants in a branching archive from which later agents can be selected for further modification [ [234](https://www.preprints.org/manuscript/202608.0051#B234-preprints-225447)].
+
+A selected parent uses this evidence to diagnose bottlenecks, determine an edit scope, and rewrite its implementation to create a child, which is executed on sampled tasks to produce trajectories and verification artifacts.
+
+Governed Evolution of Agent Runtimes generalizes this discipline into a runtime architecture in which prompts, tools, evaluators, routing policies, skills, and agent-generated code artifacts become persistent operational capabilities only through lifecycle promotion, validation, traceability, audit trails, and rollback [ [242](https://www.preprints.org/manuscript/202608.0051#B242-preprints-225447)].
+
+## 5. Agent Trainer Self-Improvement
+### 5.2. Outer-Loop Trainer Search through Experiments
+#### 5.2.3. Trainer Candidate Evaluation
+##### Robust Validation
+Validation may further require the advantage to survive a second evaluation boundary, such as held-out tasks or seeds, a different horizon or model scale, a shifted data distribution, human assessment, or deployment traffic.
+
+This rule turns repeated outcomes into a candidate-level decision and prevents one favorable stochastic run from becoming the baseline for all later experiments.
+
+Such a second boundary can confirm the apparent advantage, restrict it to the conditions where it survives, or leave the incumbent unchanged.
+
+Evaluating whether a mutable mechanism will produce better future candidates instead crosses into Meta-Loop Improvement-Mechanism Evolution.
+
+Must-read paper from Google on self-improving agent harnesses ... - X
+  URL: https://x.com/omarsar0/status/2102853768266256738
+  # Post by @omarsar0
+## Post
+If you auto-optimize your agent's harness, your eval score can go up while the agent gets worse on real tasks.
+
+This paper shows how to prevent that.
+
+Of five harness-evolution methods compared on agentic workspace tasks, RRSI scored the lowest on the tasks it evolved against and highest on all three out-of-distribution benchmarks.
+
+Automated harness evolution proposes edits to prompts, control flow, tools and memory, keeps the ones that raise the score, and repeats.
+
+The authors show this overfits the training tasks.
+
+In the ablation, unregularized evolution used 3.80M tokens per trial against 2.42M for RRSI. With Gemini 3.5 Flash, RRSI raised Terminal-Bench 2.1 from 64.6 to 78.7 and carried a 2.2-point gain over to SWE-bench Verified.
+
+## Top Comments
+### 3. @EternitiesAI
+Author: Dominik Posted: 2026-09-23T21:29:19.000Z
+
+Likes: 1
+
+GitHub - XMUDeepLIT/Awesome-Self ...
+  URL: https://github.com/XMUDeepLIT/Awesome-Self-Evolving-Agents
+  # Awesome-Self-Evolving-Agents
+[Permalink: Awesome-Self-Evolving-Agents](https://github.com/XMUDeepLIT/Awesome-Self-Evolving-Agents#awesome-self-evolving-agents)
+
+[![](https://camo.githubusercontent.com/9d49598b873146ec650fb3f275e8a532c765dabb1f61d5afa25be41e79891aa7/68747470733a2f2f617765736f6d652e72652f62616467652e737667)](https://awesome.re/)[![](https://camo.githubusercontent.com/04a4daccbffa4d19acb5431562650baa8cfc58aba75c7d757494d9b4b631f0a9/68747470733a2f2f696d672e736869656c64732e696f2f62616467652f5052732d77656c636f6d652d677265656e2e737667)](http://makeapullrequest.com/)[![arXiv:2602.05665](https://camo.githubusercontent.com/1c6ae38d2a8572ff5a4d1aea8d9bb8c27f4bdd18f4e15a7e7552dfeb118345a8/68747470733a2f2f696d672e736869656c64732e696f2f62616467652f50617065722d41727869762d7265643f6c6f676f3d6172786976267374796c653d666c61742d737175617265)](https://doi.org/10.36227/techrxiv.177203250.05832634/v2)[![](https://camo.githubusercontent.com/2a44dce6ba8def2fd5563239431fc4c4657b97ff9e6957bfe9f861c2efe2e717/68747470733a2f2f696d672e736869656c64732e696f2f6769746875622f73746172732f584d55446565704c49542f417765736f6d652d53656c662d45766f6c76696e672d4167656e7473)](http://makeapullrequest.com/)
+
+# 📜 Research Papers
+[Permalink: 📜 Research Papers](https://github.com/XMUDeepLIT/Awesome-Self-Evolving-Agents#-research-papers)
+
+# 🏆 Benchmarks
+## Self-Evolution Evaluation
+[Permalink: Self-Evolution Evaluation](https://github.com/XMUDeepLIT/Awesome-Self-Evolving-Agents#self-evolution-evaluation)
+
+Benchmarks that evaluate whether agents can turn capability goals, interaction experience, or harness revisions into improvements on held-out tasks.
+
+| Name | Domain | Modality | Feature | Link | Paper |
+|-|-|-|-|-|-|
+| S3Gym | Experience-Based Self-Improvement | Text | Seven Games, Self-Testing and Self-Judging, Held-Out Evaluation | [🌐 Project](https://self-developing-agents.github.io/) | [[Paper]](https://arxiv.org/abs/2608.31100) |
+| HarnessDev | Agent Harness Creation and Evolution | Text / Code | Runnable Harness Artifacts, Downstream Feedback, Held-Out Evaluation | [🌐 Project](https://self-developing-agents.github.io/) | [[Paper]](https://arxiv.org/abs/2609.01437) |
+
+# 🍀 Citation
+[Permalink: 🍀 Citation](https://github.com/XMUDeepLIT/Awesome-Self-Evolving-Agents#-citation)
+
+If you find this survey helpful, please cite our paper:
+  Category: github
+
+Self-Evolving Agents: Survey, Taxonomy & How They Improve
+  URL: https://agentspulse.github.io/tutorials/self-evolving-agents-review-en/
+  Hold out tasks the updater cannot see. Measure retention across domains, EEVEE exists because prompt evolution on one stream destroys another. ...
+
+Self-Improving Agent Harness - LinkedIn
+  URL: https://www.linkedin.com/pulse/self-improving-agent-harness-bassel-haidar-gvyce
+  A field map of self-improving agent harnesses, why the abstraction has shifted, and where the next two years take us 1.
+
+[PDF] Self-Improving Agents in the Era of Experience: A Survey of Self
+  URL: https://openreview.net/pdf/f78c7628291a3b4253b1a75bfb09030d96107c34.pdf
+  # Self-Improving Agents in the Era of Experience: A Survey of Self- to Meta-Evolution
+## 1.Introduction
+Recent self-improving coding agents replace this proof gate with empirical implemented, tested, checked for regressions or reward hacks, and then folded into the context for later attempts [Recursive,2026].
+
+as AlphaEvolve, SkillRL, and Agent0 illustrate this shift from isolated task execution toward
+
+Evaluation must distinguish real longitudinal gain from overfitting, cost transfer, and hidden regression; safety must control mutable skills, memories, tools, feedback channels, and
+
+## ti Eiesn v i r o n m e n t a s t h e C e i l i n s [Image: IM9]\
+**A deployed agent can improve**  
+through prompting, memory, skills, and harness-side control only within the executable world  
+exposed by the environment. Environments with narrow action surfaces, mostly final  
+pass/fail verification, and short horizons can still support prompting or one-shot tool use, but  
+they provide a limited substrate for accumulating reusable experience.  
+  
+without improving observability yields richer but harder-to-diagnose trajectories.   
+\
+
+## 8.1.1.Why Self-improvement Itself Must Be Evaluated\
+A higher post-adaptation score can therefore  
+hide regression elsewhere. That is why SI itself has to be  
+evaluated: not justdid the agent improve somewhere, butdid the same evolving agent improve on  
+_new tasks, retain old capability, and do so at acceptable cost and risk?_   
+\
+
+## 8.3.SIP-Bench as a Protocol Layer\
+It is not meant to  
+  
+Finally, evaluation environments are becoming more process-aware.Frontier-Eng[Chi et al.,  
+2026] evaluates self-evolving agents on 47 human-verified engineering optimization tasks across  
+five categories, where agents repeatedly propose artifacts, execute them, receive continuous  
+verifier reward, and revise under a fixed interaction budget.   
+\
+
+Self-Evolving Agents - A Cookbook for Autonomous Agent Retraining
+  URL: https://developers.openai.com/cookbook/examples/partners/self_evolving_agents/autonomous_agent_retraining
+  # Self-Evolving Agents - A Cookbook for Autonomous Agent Retraining
+## Overview
+### What You Will Learn
+- Assemble a self-healing workflow that combines human review, LLM-as-judge evals, and iterative prompt refinement.
+
+## 2. Using the OpenAI Evals Platform
+### Step 6: Optimize Prompt
+After collecting feedback, the platform can automatically generate an improved prompt.
+
+## Agent Setup
+- `VersionedPrompt`: A utility class to track prompt versions, this will be important in production when analyzing the evolution of the prompt as well as ensuring there is a fallback history in case of a regression
+
+## 4. Going Further
+### a. Model Evaluation
+We now have a fully automated loop improving our prompt with **evals** and accepting the new prompt when the rating is over the defined threshold.
+
+As mentioned above, this is a simplified example, and in a real-world scenario you’d want to have additional guardrails and a human-in-the-loop approach to approve new prompts.
+
+1. Optimize the prompt
+2. Generate candidate outputs from the optimized prompt using two or more different models
+
+### b. Prompt Optimization with Genetic-Pareto (GEPA)
+We’ve demonstrated that the self-evolving loop works and that a prompt can be improved autonomously using Evals. However, we relied on a relatively straightforward, static metaprompt to improve our system prompt.
+
+The code below draws generously on the GEPA Github repository available [here](https://github.com/gepa-ai/gepa).
+
+We defined three hooks

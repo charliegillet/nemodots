@@ -1,0 +1,449 @@
+Cluster-scale KV caching with MemoryAlloy - Crusoe
+  URL: https://www.crusoe.ai/resources/blog/crusoe-memoryalloy-reinventing-kv-caching-for-cluster-scale-inference
+  # Crusoe MemoryAlloy technology: Reinventing KV caching for cluster-scale inference
+Technical deep dive into Crusoe's MemoryAlloy technology: A distributed KV cache and gateway architecture that achieves 9.9x faster TTFT and 5x higher throughput for multi-node LLM inference.
+
+![Omer Landau Photo](https://cdn.prod.website-files.com/6863cc86499b79ce3ab28f8b/691b9e859cb36bea483936bb_omer.avif)
+
+Omer Landau
+
+VP, Engineering
+
+Omri Berkovitch
+
+Senior Manager, Research
+
+September 30, 2026
+
+![Crusoe MemoryAlloy: Cluster-Scale KV Caching for 9.9× Faster LLM Inference](https://cdn.prod.website-files.com/6863cc86499b79ce3ab28f8b/69336a72cfb1e5f99cda0d42_J385_MI_blog%201200x675_opt1_F1.avif)
+
+Table of contents
+
+[MemoryAlloy technology: Core components and architecture](https://www.crusoe.ai/resources/blog/crusoe-memoryalloy-reinventing-kv-caching-for-cluster-scale-inference#memoryalloy-technology-core-components-and-architecture)
+
+[Cluster-wide MemoryAlloy technology](https://www.crusoe.ai/resources/blog/crusoe-memoryalloy-reinventing-kv-caching-for-cluster-scale-inference#cluster-wide-memoryalloy-technology)
+
+[Performance and data paths](https://www.crusoe.ai/resources/blog/crusoe-memoryalloy-reinventing-kv-caching-for-cluster-scale-inference#performance-and-data-paths)
+
+[High-performance multi-rail sharding](https://www.crusoe.ai/resources/blog/crusoe-memoryalloy-reinventing-kv-caching-for-cluster-scale-inference#high-performance-multi-rail-sharding)
+
+[Core mechanisms: Send graph and shadow pools](https://www.crusoe.ai/resources/blog/crusoe-memoryalloy-reinventing-kv-caching-for-cluster-scale-inference#core-mechanisms-send-graph-and-shadow-pools)
+
+[Cluster-wide caching and efficiency](https://www.crusoe.ai/resources/blog/crusoe-memoryalloy-reinventing-kv-caching-for-cluster-scale-inference#cluster-wide-caching-and-efficiency)
+
+[Crusoe’s gateway](https://www.crusoe.ai/resources/blog/crusoe-memoryalloy-reinventing-kv-caching-for-cluster-scale-inference#crusoes-gateway)
+
+[Experiments and benchmarks](https://www.crusoe.ai/resources/blog/crusoe-memoryalloy-reinventing-kv-caching-for-cluster-scale-inference#experiments-and-benchmarks)
+
+[Measuring cache hit performance](https://www.crusoe.ai/resources/blog/crusoe-memoryalloy-reinventing-kv-caching-for-cluster-scale-inference#measuring-cache-hit-performance)
+
+[Results](https://www.crusoe.ai/resources/blog/crusoe-memoryalloy-reinventing-kv-caching-for-cluster-scale-inference#results)
+
+[Single-node deployment](https://www.crusoe.ai/resources/blog/crusoe-memoryalloy-reinventing-kv-caching-for-cluster-scale-inference#single-node-deployment)
+
+[Two-node deployment](https://www.crusoe.ai/resources/blog/crusoe-memoryalloy-reinventing-kv-caching-for-cluster-scale-inference#two-node-deployment)
+
+[Scaling beyond two nodes](https://www.crusoe.ai/resources/blog/crusoe-memoryalloy-reinventing-kv-caching-for-cluster-scale-inference#scaling-beyond-two-nodes)
+
+[What’s next for Crusoe’s inference engine](https://www.crusoe.ai/resources/blog/crusoe-memoryalloy-reinventing-kv-caching-for-cluster-scale-inference#whats-next-for-crusoes-inference-engine)
+
+Share:
+
+[Twitter share](https://www.crusoe.ai/resources/blog/crusoe-memoryalloy-reinventing-kv-caching-for-cluster-scale-inference#)[Linkedin share](https://www.crusoe.ai/resources/blog/crusoe-memoryalloy-reinventing-kv-caching-for-cluster-scale-inference#)
+
+[Copy URL](https://www.crusoe.ai/resources/blog/crusoe-memoryalloy-reinventing-kv-caching-for-cluster-scale-inference#)
+
+Chat sessions keep appending turns on top of the same prefix. Long-document question answering repeatedly references shared context. Agentic workloads cycle over large, stable prompts.
+
+Scaling this caching layer to larger memory capacity holds enormous potential: more users served at lower latency, better throughput, and less wasted compute. In practice, this falls apart in real inference clusters where many LLM engines run across multiple machines.
+
+Crusoe’s inference engine takes a different approach by addressing this pain directly: treat KV as a first-class, cluster-wide memory object. Our system [introduces MemoryAlloy technology](https://www.crusoe.ai/cloud/managed-inference), a unified memory plane independent of any single model or runtime that persists and shares KV segments across nodes with the lowest latency achievable on the underlying hardware. This enables efficient query distribution, removes queue bottlenecks, and reduces latency across the entire cluster.
+
+This higher throughput directly reduces per-token cost, as each compute unit produces significantly more tokens for the same hardware budget.
+
+This post marks **our first deep dive into Crusoe’s managed AI inference stack**, where we shed light on our **distributed KV cache solution (MemoryAlloy technology)** and our **gateway**, the two core components that power this architecture. Throughout this blog, we’ll explore how these systems work together to accelerate inference and present the benchmarks that demonstrate their impact.
+
+## Results
+### Single-node deployment
+- For **Llama-3.3-70B**, median TTFT dropped from 0.7s on vLLM to 0.17s with Crusoe’s MemoryAlloy technology, a **4x** reduction overall and up to 20x faster for long prompts (64K to 128K).
+
+![Improvement of Crusoe inference engine with MemoryAlloy technology  vs. vLLM for TTFT, Throughput, QPS, and E2E Latency on a single-node deployment.](https://cdn.prod.website-files.com/6863cc86499b79ce3ab28f8b/691e175fb99046462d99d177_5e3ca03a.avif)
+
+## Application: Chat sessions
+We used the same production-style deployment as in the long-document QA application, comparing Crusoe’s inference engine with MemoryAlloy technology against vLLM under identical KV-aware TTFT-based routing, using Llama-3.3-70B.
+
+This distribution remained consistent throughout the experiment.
+
+On a single node, Crusoe’s inference engine reduced TTFT by **7×** and nearly doubled serving capacity.
+
+![Improvement of Crusoe inference engine with MemoryAlloy technology vs. vLLM for TTFT, Throughput, QPS, and E2E Latency on a single-node deployment.](https://cdn.prod.website-files.com/6863cc86499b79ce3ab28f8b/691e175fb99046462d99d183_3df53cec.avif)
+
+**Figure 7:** _Improvement of Crusoe inference engine with MemoryAlloy technology vs. vLLM for TTFT, Throughput, QPS, and E2E Latency on a single-node deployment._
+
+![Throughput scaling of Crusoe’s inference engine powered by MemoryAlloy technology compared to vLLM (both using the Crusoe gateway) on Chat Session Application Benchmark. Dashed lines denote extrapolated results beyond the measured 4-node deployment.](https://cdn.prod.website-files.com/6863cc86499b79ce3ab28f8b/691e175fb99046462d99d17a_efd89541.avif)
+
+## What’s next for Crusoe’s inference engine
+At Crusoe, we are determined to build the most advanced and reliable managed inference platform for AI models. build the most advanced and reliable managed inference platform for large language models. We are driven by a clear goal: to make every stage of AI inference faster, smarter, and more efficient.
+
+In this post, we highlighted our distributed KV cache, Crusoe's MemoryAlloy technology, which dramatically reduces prefill times and unlocks much higher GPU utilization by removing the bottlenecks caused by large, repetitive prompts.
+
+This is just the beginning. In our upcoming posts, we will explore how we are accelerating the next phase of inference, decoding, through techniques such as speculative decoding, quantization, model pruning, and more. Together, these efforts represent our continued commitment to redefining what is possible in large-scale, energy-efficient AI inference. Sign up to [get started with Crusoe Managed Inference](https://console.crusoecloud.com/request-foundry).
+
+‍
+
+## Are you ready to build something amazing?
+Qualified
+
+Nemotron 3 Ultra agents: 10x cheaper on Crusoe Cloud
+  URL: https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-ultra-langchain-deep-agents-on-crusoe-managed-inference
+  # Frontier Agents at 10x lower cost: NVIDIA Nemotron 3 Ultra + LangChain Deep Agents on Crusoe Managed Inference
+Nemotron 3 Ultra pairs with a tuned LangChain Deep Agents harness to match frontier closed-model agent accuracy at roughly a tenth of the cost, and Crusoe Managed Inference plus a native langchain-crusoe integration make it a ten-minute setup.
+
+![Emmanuel Acheampong photo](https://cdn.prod.website-files.com/6863cc86499b79ce3ab28f8b/69e67893a754f3e7f54808fe_emmanuel_blogimage.jpg)
+
+Emmanuel Acheampong
+
+Senior Developer Relations Manager
+
+September 3, 2026
+
+![Isometric cloud and server illustration for Crusoe Managed Inference hosting the Nemotron 3 model family](https://cdn.prod.website-files.com/6863cc86499b79ce3ab28f8b/6a99a1c8596f3794e867c6cd_6a4e646246eff30422dd4a79_used_7_8.avif)
+
+Table of contents
+
+[The gap just closed](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-ultra-langchain-deep-agents-on-crusoe-managed-inference#the-gap-just-closed)
+
+[The numbers behind the headline](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-ultra-langchain-deep-agents-on-crusoe-managed-inference#the-numbers-behind-the-headline)
+
+[Meet Deep Agents: the harness](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-ultra-langchain-deep-agents-on-crusoe-managed-inference#meet-deep-agents-the-harness)
+
+[Meet Nemotron 3 Ultra: the model](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-ultra-langchain-deep-agents-on-crusoe-managed-inference#meet-nemotron-3-ultra-the-model)
+
+[Why Crusoe is the right place to run it](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-ultra-langchain-deep-agents-on-crusoe-managed-inference#why-crusoe-is-the-right-place-to-run-it)
+
+[The walkthrough: a Deep Agent on Crusoe in ten minutes](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-ultra-langchain-deep-agents-on-crusoe-managed-inference#the-walkthrough-a-deep-agent-on-crusoe-in-ten-minutes)
+
+[Prerequisites](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-ultra-langchain-deep-agents-on-crusoe-managed-inference#prerequisites)
+
+[Step 1: Generate a Crusoe API key](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-ultra-langchain-deep-agents-on-crusoe-managed-inference#step-1-generate-a-crusoe-api-key)
+
+[Step 2: Install the stack](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-ultra-langchain-deep-agents-on-crusoe-managed-inference#step-2-install-the-stack)
+
+[Step 3: Sanity-check the model](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-ultra-langchain-deep-agents-on-crusoe-managed-inference#step-3-sanity-check-the-model)
+
+[Step 4: Create the agent](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-ultra-langchain-deep-agents-on-crusoe-managed-inference#step-4-create-the-agent)
+
+[Step 5: Run a real task](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-ultra-langchain-deep-agents-on-crusoe-managed-inference#step-5-run-a-real-task)
+
+[Step 6: Tier your models](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-ultra-langchain-deep-agents-on-crusoe-managed-inference#step-6-tier-your-models)
+
+[Taking it to production: the NemoClaw blueprint](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-ultra-langchain-deep-agents-on-crusoe-managed-inference#taking-it-to-production-the-nemoclaw-blueprint)
+
+[Try it](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-ultra-langchain-deep-agents-on-crusoe-managed-inference#try-it)
+
+Share:
+
+[Twitter share](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-ultra-langchain-deep-agents-on-crusoe-managed-inference#)[Linkedin share](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-ultra-langchain-deep-agents-on-crusoe-managed-inference#)
+
+[Copy URL](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-ultra-langchain-deep-agents-on-crusoe-managed-inference#)
+
+_NVIDIA's new open flagship, a Deep Agents harness tuned specifically for it, and a first-class `langchain-crusoe` integration._ _A developer walkthrough for running frontier-class open agents on the Crusoe Intelligence Foundry in about ten minutes._ ‍
+
+## Meet Nemotron 3 Ultra: the model
+[Nemotron 3 Ultra](https://developer.nvidia.com/blog/nvidia-nemotron-3-ultra-powers-faster-more-efficient-reasoning-for-long-running-agents/) is a 550B-parameter Mixture-of-Experts model with 55B active parameters, built explicitly for the hard calls in agent workflows: orchestration, long-horizon planning, and synthesis across large contexts. The design choices read like a checklist for agentic inference:
+
+## Why Crusoe is the right place to run it
+An open model and a tuned harness still need an inference layer that behaves well under agent workloads: fan-out subagent calls, long accumulated contexts, unattended runs. Three things make Crusoe the natural home for this stack.
+
+**The full Nemotron catalog, day zero.** The [Crusoe Intelligence Foundry](https://console.crusoecloud.com/foundry/models) hosts the Nemotron 3 family end to end: Nemotron 3 Ultra for frontier orchestration, Nemotron 3 Super 120B for mid-tier reasoning, and Nemotron 3 Nano Omni for fast multimodal turns, alongside DeepSeek Gemma, Qwen, Llama, GLM , and others. Crusoe's NVIDIA Cloud Partner status means new Nemotron releases land with day-zero support.
+
+**MemoryAlloy.** Crusoe's cluster-wide KV cache fabric routes requests cache-aware, which is exactly what a Deep Agent needs: the harness re-sends system prompts, skills, and accumulated history on every turn, and cache hits are the difference between a snappy loop and a sluggish one. Crusoe benchmarks up to 9.9x faster time-to-first-token and 5x throughput versus vLLM, and the gap widens as contexts grow.
+
+No custom endpoint wiring, no OpenAI-compat shims. It's a first-class provider, which means it slots directly into `create_deep_agent()`.
+
+Pricing stays predictable at agent scale: Nemotron 3 Ultra at $1.00 / $3.20 per 1M input/output tokens with cached input at $0.25 per 1M, and Nemotron 3 Nano Omni at $0.30 / $1.83 for the high-volume tier. For a harness that revisits the same context every turn, the cached-token price is the number that actually shapes your bill.
+
+## The walkthrough: a Deep Agent on Crusoe in ten minutes
+The shape: generate a Crusoe API key, install two packages, point `ChatCrusoe` at Nemotron 3 Ultra, and hand it to `create_deep_agent()`. The tuned Nemotron profile activates automatically inside Deep Agents.
+
+### Step 6: Tier your models
+The pattern Crusoe recommends for multi-agent systems is tiered: the frontier reasoner orchestrates, cheap fast models execute. With the full Nemotron family on one endpoint, that's a two-line change:
+
+At $0.30 per 1M input tokens on the subagent tier, fan-out gets cheap enough that you stop thinking about it. MemoryAlloy's cache reuse across parallel subagent runs compounds the effect.
+
+## Try it
+- [**Crusoe Managed Inference**](https://www.crusoe.ai/cloud/managed-inference) for the model brain. Generate a key in the [Intelligence Foundry](https://console.crusoecloud.com/request-foundry) and you're hitting Nemotron 3 Ultra, Super, and Nano Omni in minutes.
+- [**LangChain Deep Agents**](https://docs.langchain.com/oss/python/deepagents/overview) for the harness, with the tuned Nemotron profile built in.
+- [**langchain-crusoe**](https://pypi.org/project/langchain-crusoe/) to connect them: `pip install -U deepagents langchain-crusoe`.
+
+## Are you ready to build something amazing?
+[Contact Us](https://www.crusoe.ai/contact-us)
+
+Qualified
+
+Managed Inference for demanding AI workloads - Crusoe
+  URL: https://www.crusoe.ai/resources/blog/crusoe-managed-inference-optimize-performance-for-demanding-ai-workloads
+  # Crusoe Managed Inference: Optimize performance for the most demanding AI workloads
+Crusoe Managed Inference uses cluster-native KV caching (Crusoe's MemoryAlloy technology) to achieve 9.9× faster TTFT and 5× higher throughput for demanding AI workloads.
+
+Erwan Menard
+
+SVP, Product Management
+
+![Aditya Shanker Photo](https://cdn.prod.website-files.com/6863cc86499b79ce3ab28f8b/691e4b0758b8e0027b5335da_aditya.avif)
+
+Aditya Shanker
+
+Group Product Manager
+
+![Crusoe Managed Inference: 9.9× faster LLM inference with cluster KV cache](https://cdn.prod.website-files.com/6863cc86499b79ce3ab28f8b/691e32fdafd0472d92e0be02_J385_MI_blog%201200x675_opt2_F2.avif)
+
+[The problem: Re-processing and resource waste](https://www.crusoe.ai/resources/blog/crusoe-managed-inference-optimize-performance-for-demanding-ai-workloads#the-problem-re-processing-and-resource-waste)
+
+[3. Seamless elastic scaling](https://www.crusoe.ai/resources/blog/crusoe-managed-inference-optimize-performance-for-demanding-ai-workloads#3-seamless-elastic-scaling)
+
+[Multiple use cases benefit from these optimizations](https://www.crusoe.ai/resources/blog/crusoe-managed-inference-optimize-performance-for-demanding-ai-workloads#multiple-use-cases-benefit-from-these-optimizations)
+
+[Experience next-level AI inference today](https://www.crusoe.ai/resources/blog/crusoe-managed-inference-optimize-performance-for-demanding-ai-workloads#experience-next-level-ai-inference-today)
+
+Share:
+
+[Copy URL](https://www.crusoe.ai/resources/blog/crusoe-managed-inference-optimize-performance-for-demanding-ai-workloads#)
+
+Today, we're launching **Crusoe Managed Inference**, powered by our proprietary inference engine with **Crusoe's MemoryAlloy technology.** AI developers can use the new **Crusoe Intelligence Foundry** to rapidly deploy and automatically scale production-ready models, instantly enabling new capabilities like AI agents and complex task automation.
+
+Crusoe Managed Inference: Achieve 9.9x faster TTFT with Crusoe’s inference engine + MemoryAlloy tech - YouTube
+
+[Crusoe Managed Inference: Achieve 9.9x faster TTFT with Crusoe’s inference engine + MemoryAlloy tech](https://www.youtube.com/watch?v=ymyt2XpyjKE) [Crusoe AI](https://www.youtube.com/channel/UCFKvMIkL20rlt9-u6evBA5g)
+
+Crusoe AI3.36K subscribers
+
+Today, **Crusoe Intelligence Foundry** offers developers access to run the world's top open-source models including Kimi-K2 Thinking, Llama 3.3 70B Instruct, Gemma 3 12B, gpt-oss-120b, Qwen3 235B A22B Instruct 2507, DeepSeek V3 0324, and DeepSeek R1 0528.
+
+## The solution: Cluster-native KV cache and fabric
+**Crusoe's MemoryAlloy technology**, which fuels our inference engine, is fundamentally different because it is designed to optimize resources and knowledge sharing across the entire cluster, not just a single GPU.
+
+### 3. Seamless elastic scaling
+The challenge is always doing that at scale without compromising speed; something which Crusoe's MemoryAlloy technology tackles.
+
+## Multiple use cases benefit from these optimizations
+| Use case | Challenge | The Crusoe Managed Inference difference |
+|-|-|-|
+| Software development | Duplicating redundant pre-fills in large codebases. | The shared KV cache fabric acts as a persistent, cluster-wide context cache, enabling instant multi-developer context continuity and shared repository prefix caching. |
+| Customer service + operations | Slow response times requiring recalculations of prefill memory. | Persistent session memory and contextual continuity across agents and nodes allow for a unified offloaded fast cache, resulting in faster, SLA-predictable response times. |
+| Knowledge + search (RAG) | Slow RAG pipelines requiring zero-re-embedding of document memory. | Once a document is pre-fetched into the unified cache, every subsequent query across the cluster reuses the same embeddings, making search and retrieval orders of magnitude faster than traditional RAG. |
+
+## Experience next-level AI inference today
+**Crusoe Managed Inference**, powered by our unique **MemoryAlloy** technology and delivered through the **Crusoe Intelligence Foundry**, redefines the paradigm and removes the operational burden entirely.
+
+For an in-depth look at our distributed KV cache solution and benchmarking methodology, [read our technical post on the MemoryAlloy technology architecture](https://www.crusoe.ai/resources/blog/crusoe-memoryalloy-reinventing-kv-caching-for-cluster-scale-inference).
+
+## Latest articles
+October 13, 2026
+
+![Chase Lochmiller - Co-founder, CEO](https://cdn.prod.website-files.com/6863cc86499b79ce3ab28f8b/6ac860b78c8a6f98f2501645_Tech%20Blog%2036.png)
+
+## Are you ready to build something amazing?
+Qualified
+
+NVIDIA Nemotron 3 Nano Omni on Managed Inference | Crusoe
+  URL: https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-nano-omni-now-available
+  # NVIDIA Nemotron 3 Nano Omni now available on Crusoe Managed Inference
+NVIDIA Nemotron 3 Nano Omni and the full Nemotron 3 model family are now available on Crusoe Managed Inference. Here's a breakdown of what each model is built for and how to get started in Crusoe Intelligence Foundry.
+
+![Eesha Pathak photo](https://cdn.prod.website-files.com/6863cc86499b79ce3ab28f8b/69ebb8915e3984cb7c42d5cc_eeshablogpic.png)
+
+Eesha Pathak
+
+Senior Director, Product Management, Managed AI
+
+September 30, 2026
+
+![Blog header image with text reading "NVIDIA Nemotron 3 Nano Omni: Now available on Crusoe Managed Inference" on a black background with white abstract wave lines and the Crusoe logo.](https://cdn.prod.website-files.com/6863cc86499b79ce3ab28f8b/6a999faada6446fbb27f47b2_69ebe2d324103b7c476431a3_NVIDIA%20Nemotron3__blog%201200x675_F1%20(1).avif)
+
+Table of contents
+
+[Nemotron 3 Nano Omni](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-nano-omni-now-available#nemotron-3-nano-omni)
+
+[Open, multimodal reasoning across video, audio, and documents](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-nano-omni-now-available#open-multimodal-reasoning-across-video-audio-and-documents)
+
+[NVIDIA Nemotron 3 Nano](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-nano-omni-now-available#nvidia-nemotron-3-nano)
+
+[High-accuracy reasoning at minimal inference cost](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-nano-omni-now-available#high-accuracy-reasoning-at-minimal-inference-cost)
+
+[NVIDIA Nemotron 3 Super](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-nano-omni-now-available#nvidia-nemotron-3-super)
+
+[Multi-agent reasoning at enterprise scale](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-nano-omni-now-available#multi-agent-reasoning-at-enterprise-scale)
+
+[NVIDIA Nemotron 3 VoiceChat](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-nano-omni-now-available#nvidia-nemotron-3-voicechat)
+
+[Real-time, full-duplex voice AI](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-nano-omni-now-available#real-time-full-duplex-voice-ai)
+
+[Get started with Crusoe Intelligence Foundry](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-nano-omni-now-available#get-started-with-crusoe-intelligence-foundry)
+
+Share:
+
+[Twitter share](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-nano-omni-now-available#)[Linkedin share](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-nano-omni-now-available#)
+
+[Copy URL](https://www.crusoe.ai/resources/blog/nvidia-nemotron-3-nano-omni-now-available#)
+
+[NVIDIA Nemotron](https://www.nvidia.com/en-us/ai-data-science/foundation-models/nemotron/) open models empower developers to build specialized AI agents with leading efficiency and accuracy. NVIDIA NemotronTM 3 Nano Omni is now available on [Crusoe Managed Inference](https://www.crusoe.ai/cloud/managed-inference).
+
+This new addition expands the family of NVIDIA Nemotron 3 open models that you can consume via fully managed endpoints from within the [Crusoe Intelligence Foundry](https://console.crusoecloud.com/request-foundry). As an NVIDIA Cloud Partner offering day zero support, you get access to new models as soon as they’re released. We handle the optimization and the infrastructure complexities so you can build and ship faster.
+
+Here's a breakdown of what’s available, what each model is built for, and the benefits of using these models on Crusoe Managed Inference.
+
+## Nemotron 3 Nano Omni
+### Open, multimodal reasoning across video, audio, and documents
+- Enterprise document intelligence
+- GUI-based agents
+- Video and audio reasoning
+- Multimodal RAG
+
+Nemotron 3 Nano Omni combines NVIDIA Parakeet speech encoder for audio transcription, CRADIO for visual and document reasoning, and a dedicated GUI-trained visual system for computer use agents — enabling it to understand and act across interfaces, not just text. Efficient Video Sampling (EVS) and 3D convolution layers further optimize video reasoning by reducing redundant computation and enabling efficient temporal understanding across long video inputs.
+
+Using this model, an AI system can achieve 9x higher throughput than other open omni models with the same interactivity, resulting in lower cost and better scalability without sacrificing responsiveness.
+
+Crusoe's inference engine with MemoryAlloyTM technology is purpose-built for workloads like these. At 256K tokens of shared multimodal context, managing cached visual, audio, and document state across agent turns is a hard infrastructure challenge. MemoryAlloy technology handles this efficiently without recomputation, keeping latency low and throughput high. Try Nemotron 3 Nano Omni in the [Crusoe Intelligence Foundry](https://console.crusoecloud.com/request-foundry).
+
+## NVIDIA Nemotron 3 Nano
+### High-accuracy reasoning at minimal inference cost
+- Targeted agentic tasks
+- High-volume automation
+- Cost-sensitive pipelines
+
+For multi-agent systems, Nemotron 3 Nano is an excellent choice for executing targeted, individual steps within an agentic workflow like simple merge requests, single-step tool calls, or discrete classification tasks. If you're running dozens or hundreds of parallel agents and need maximum tokens per second at the lowest cost, Nemotron 3 Nano is the right starting point.
+
+Crusoe’s inference engine dramatically reduces KV cache overhead so you can run Nemotron 3 Nano with higher concurrent request throughput without sacrificing accuracy. Try Nemotron 3 Nano in the [Crusoe Intelligence Foundry](https://console.crusoecloud.com/request-foundry).
+
+## NVIDIA Nemotron 3 Super
+### Multi-agent reasoning at enterprise scale
+- Complex multi-step agents
+- Software development
+- IT automation
+- RAG over long documents
+
+Multi-token prediction (MTP) layers in the Nemotron 3 Super deliver over 50% higher token generation compared to leading open models, while Latent MoE enables calling four experts for the inference cost of only one.It was trained across 10+ reinforcement learning environments, with [strong benchmark performance](https://openrouter.ai/nvidia/nemotron-3-super-120b-a12b:free) on AIME 2025, TerminalBench, and SWE-Bench Verified.
+
+In a software development context, simple merge requests can be handled by Nemotron 3 Nano, while complex tasks requiring deeper understanding of a codebase are ideal for Nemotron 3 Super. Expert-level coding tasks can be escalated to proprietary frontier models.This tiered architecture is exactly the pattern that drives cost-efficient, high-accuracy agentic pipelines.
+
+Crusoe’s inference engine with MemoryAlloy technology is particularly impactful for Nemotron 3 Super. Long-context workloads with 100K-1M token histories see the greatest benefit from intelligent KV cache reuse, reducing redundant computation and lowering latency per request. Try Nemotron 3 Super in the [Crusoe Intelligence Foundry.](https://console.crusoecloud.com/request-foundry)
+
+## NVIDIA Nemotron 3 VoiceChat
+### Real-time, full-duplex voice AI
+On the [Artificial Analysis](https://artificialanalysis.ai/articles/nemotron-3-voicechat-leader-speech-pareto) Speech-to-Speech leaderboard, Nemotron 3 VoiceChat is the only open-weights model to land in the top three on both conversational dynamics and speech reasoning simultaneously, making it the Pareto leader across both dimensions.
+
+For voice AI workloads, Crusoe’s inference engine reduces the latency tail that makes or breaks user experience, keeping response times consistently low even under concurrent load. Try Nemotron 3 VoiceChat in the [Crusoe Intelligence Foundry](https://console.crusoecloud.com/request-foundry).
+
+All four models are available now for serverless inference. Here's how to get started.
+
+## Are you ready to build something amazing?
+[Contact Us](https://www.crusoe.ai/contact-us)
+
+Qualified
+
+Quantized weights, full precision: The math behind 75% cheaper fine-tuning
+  URL: https://www.crusoe.ai/resources/blog/quantized-weights-full-precision
+  # Quantized weights, full precision: The math behind 75% cheaper fine-tuning
+[Forward pass in inference](https://www.crusoe.ai/resources/blog/quantized-weights-full-precision#forward-pass-in-inference)
+
+## Why base weights are stored in bf16 for LoRA fine-tuning
+At Crusoe we leverage state-of-the-art techniques such as MemoryAlloy, proprietary kernels, and scheduling optimizations to serve 4-bit models efficiently.
+
+## LoRA operations and quantization
+In inference, there are only forward operations.
+
+## This page is used by Marketo Forms 2 to proxy cross domain AJAX requests.
+Robinson, AI Agent
+
+How Crusoe cut NIXL's memory footprint by 70%
+  URL: https://www.crusoe.ai/resources/blog/how-crusoes-root-cause-analysis-drove-a-70-memory-reduction-in-upstream-nixl
+  Crusoe traced the root cause to firmware-page fan-out across all 8 NICs — driving a fix that cuts host memory overhead by up to 75%.
+
+Introducing Self-Serve Deployments for production-scale inference
+  URL: https://www.crusoe.ai/resources/blog/crusoe-self-serve-deployments
+  # Introducing Self-Serve Deployments for production-scale inference
+Now available in Crusoe Intelligence Foundry.
+
+![Graphic for the Self-Serve Deployments launch: dedicated inference endpoints now live in Crusoe Intelligence Foundry](https://cdn.prod.website-files.com/6863cc86499b79ce3ab28f8b/6a99a1fcecdae3045267107a_6a5574d603cd1552b1eaa1f2_J712_SSD_LaunchBlog1_1200x675_F1.avif)
+
+[Serverless Inference](https://www.crusoe.ai/resources/blog/crusoe-self-serve-deployments#serverless-inference)
+
+## How Crusoe scales with you: three deployment options
+All three options run on Crusoe's inference engine, powered by MemoryAlloyTM technology, a cluster-native memory fabric that persists across nodes and eliminates redundant prefill for superior price performance.
+
+### Serverless Inference
+Access a curated library of open models (GLM 5.2, Kimi K2, Qwen 3, DeepSeek v4, Gemma 4, Llama, GPT-OSS, and more) via a fully managed, OpenAI-compatible API.
+
+Crusoe Serverless Inference provides this seamless on-ramp, powered by a purpose-built engine underneath.
+
+### Here's how the three deployment options compare
+|  | Serverless Inference | Self-Serve Deployments | Tailored Deployments |
+|-|-|-|-|
+| When to use | Early-stage exploration | Reserved capacity, fine-tuned model inference | Complex or proprietary model optimization |
+| Models | Open-source models | Your base or fine-tuned | Any, including your proprietary |
+| Pricing | Per token | Per GPU per hour | Custom |
+| SLA | No | No | Yes |
+
+Bring Your Own Model to Crusoe Managed Inference
+  URL: https://www.crusoe.ai/resources/blog/building-the-worlds-favorite-ai-cloud
+  # Building the world’s favorite AI cloud
+![Abstract cloud visualization representing Crusoe's Bring Your Own Model (BYOM) service for AI inference, featuring interconnected nodes symbolizing scalable GPU infrastructure](https://cdn.prod.website-files.com/6863cc86499b79ce3ab28f8b/698645a274d4820df9df9a26_Blog%20-BYOM%20(1).avif)
+
+[Today’s news: Bring your own model for Managed Inference](https://www.crusoe.ai/resources/blog/building-the-worlds-favorite-ai-cloud#todays-news-bring-your-own-model-for-managed-inference)
+
+[Crusoe Managed Inference](https://www.crusoe.ai/resources/blog/building-the-worlds-favorite-ai-cloud#crusoe-managed-inference)
+
+[MemoryAlloy™ Technology](https://www.crusoe.ai/resources/blog/building-the-worlds-favorite-ai-cloud#memoryalloyTM-technology)
+
+Crusoe is building a platform that gets out of your way so you can focus on what matters: innovating by building and optimizing AI models that power AI agents needed to operate at scale.
+
+## Today’s news: Bring your own model for Managed Inference
+Innovation at Crusoe isn't a roadmap item; it's a constant drumbeat. Today, we are excited to announce that customers can now use [Crusoe Managed Inference](https://www.crusoe.ai/cloud/managed-inference) with their own models, whether they trained them from scratch or optimized an open model. Our Managed Inference is the fastest way to deploy the world’s leading open-weights models like DeepSeek, Qwen, Kimi or gpt-oss. Now, we are opening that same "best-in-class" speed, throughput, and reliability to your proprietary IP.
+
+Customers who build their own models or invest significantly in optimizing their favorite open model are now routinely benchmarking their current inference price/performance baseline with Crusoe. We have observed multiple instances of gains more than 4x in Queries Per Second (QPS) with lower latency, leading to superior performance at a lower price - a win/win for all!
+
+When you bring your own model to our platform, our team will work directly with you to optimize performance based on your unique weights and architecture, enabling you to scale quickly and reliably, with SLA guarantees on the managed API endpoint we operate for you. This is a unique value proposition that hyperscalers do not offer: [Work with the AI specialists](https://www.crusoe.ai/contact-sales) at Crusoe and let’s scale together.
+
+## Innovating up the stack
+### Crusoe Managed Inference
+In November 2025 we launched [Crusoe Managed Inference](https://www.crusoe.ai/resources/newsroom/crusoe-launches-managed-inference-delivering-breakthrough-speed-for-production-ai), a fully managed service that allows developers to deploy leading open/open-source models like Qwen3 and DeepSeek with a single API call. Through the new Crusoe Intelligence Foundry, AI developers can discover models, generate API keys in minutes, and transition from model checkpoint to global production without managing the underlying GPU clusters.
+
+### MemoryAlloy™ Technology
+Crusoe’s inference engine is powered by our proprietary MemoryAlloy technology, a cluster-native KV cache fabric. By bridging the gap between hardware and software, we’ve achieved [9.9x faster Time-to-First-Token (TTFT) and 5x higher throughput](https://www.crusoe.ai/resources/blog/crusoe-memoryalloy-reinventing-kv-caching-for-cluster-scale-inference) for demanding workloads compared to standard commodity cloud configurations like vLLM. As context windows for modern AI workloads grow, so does the memory required for the prefill phase of inference. MemoryAlloy technology decouples the KV cache from individual model processes and exposes it as a shared resource.
+
+## Talent density
+The technical caliber of our global engineering team allowed us to deliver our Managed Inference service powered by MemoryAlloy technology in record time, setting a new bar in breakthrough latency and throughput for AI inference.
+
+GPU fundamentals for Triton programmers: kernels to memory
+  URL: https://www.crusoe.ai/resources/blog/gpu-programming-with-triton-part-1
+  # GPU programming with Triton, part 1
+## Squaring an array: two memories
+### Launches are asynchronous
+```shell
+launch returned after      25 us
+work finished after       993 us
+```
+
+Tokens per watt: tuning the inference stack for efficiency - Crusoe
+  URL: https://www.crusoe.ai/resources/blog/how-green-is-crusoes-inference-engine
+  # How green is Crusoe's inference engine?
+When measuring on identical hardware, we found that tuning Crusoe's inference stack cut energy per output token by 26.9%, while MemoryAlloy cut energy by 23% in cache tests.
+
+## Inference stack optimizations
+- **Transport**: how the KV cache and intermediate state move between GPUs. Execution, which is how the engine actually runs the model once a request lands on a GPU, lives here.
+  - **MemoryAlloy™**, our cluster-wide distributed KV cache that uses peer-to-peer GPU interconnects to skip the CPU round-trip competing caches rely on, is a feature that is offered in the transport layer. (Read more about MemoryAlloy and its benefits [here](https://www.crusoe.ai/resources/blog/crusoe-memoryalloy-reinventing-kv-caching-for-cluster-scale-inference)). As explained below in the setup, MemoryAlloy was not adjusted as a part of our first experiment.
+
+## The setup
+2. **The MemoryAlloy isolation.** Two passes over an identical prompt set with MemoryAlloy on, and the other using `vLLM`.
+
+## Results
+### Experiment 2: MemoryAlloy cache vs vLLM Cache
+In our MemoryAlloy isolation test running two passes over an identical prompt set at 4 QPS, MemoryAlloy achieved a 30.7% cache hit rate (via its offload tier) compared to `vLLM`’s 19.8% (HBM prefix cache).
+
+| Comparison | J / output token | Tokens per watt |
+|-|-|-|
+| Delta between MemoryAlloy cache vs vLLM cache | -23% | +30.0% |
+
+## This page is used by Marketo Forms 2 to proxy cross domain AJAX requests.
+Robinson, AI Agent

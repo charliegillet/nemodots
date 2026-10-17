@@ -1,0 +1,453 @@
+Agent memory: Letta vs Mem0 vs Zep vs Cognee - Community
+  URL: https://forum.letta.com/t/agent-memory-letta-vs-mem0-vs-zep-vs-cognee/88
+  # [Agent memory: Letta vs Mem0 vs Zep vs Cognee](https://forum.letta.com/t/agent-memory-letta-vs-mem0-vs-zep-vs-cognee/88)
+## [Heading link](https://forum.letta.com/t/agent-memory-letta-vs-mem0-vs-zep-vs-cognee/88#p-196-how-agent-memory-works-2) How agent memory works
+### [Heading link](https://forum.letta.com/t/agent-memory-letta-vs-mem0-vs-zep-vs-cognee/88#p-196-semantic-knowledge-graphs-5) Semantic knowledge graphs
+While temporal knowledge graphs focus on when facts are valid, semantic knowledge graphs focus on what facts mean and how they relate to one another. This approach uses ontologies (structured representations of domain knowledge) to understand the relationships between concepts.
+
+When you mention “Python,” the system understands it relates to “programming languages,” “Guido van Rossum,” and “machine learning libraries.” These relationships enable more intelligent retrieval.
+
+This approach combines vector search for semantic similarity with graph traversal for relationship-based queries. You can ask, “What programming languages has the user worked with?” and get answers that understand the conceptual relationships.
+
+[Cognee](https://www.cognee.ai/) builds these semantic knowledge graphs on the fly during document processing and retrieval.
+
+## [Heading link](https://forum.letta.com/t/agent-memory-letta-vs-mem0-vs-zep-vs-cognee/88#p-196-zep-temporal-knowledge-graphs-for-agent-memory-11) Zep: Temporal knowledge graphs for agent memory
+[Zep](https://www.getzep.com/) is a context engineering platform built around temporal knowledge graphs. Unlike systems that simply store facts, Zep tracks how information changes over time and maintains historical context. This makes it particularly useful when facts evolve or contradict previous information.
+
+### [Heading link](https://forum.letta.com/t/agent-memory-letta-vs-mem0-vs-zep-vs-cognee/88#p-196-how-zep-works-12) How Zep works
+At the core of Zep is [Graphiti](https://github.com/getzep/graphiti), an open-source library for building temporal knowledge graphs. When you add conversation data to Zep, Graphiti extracts entities (for example, people, places, and concepts) and relationships (for example, works at, lives in, and prefers) and stores them as a graph.
+
+What makes this graph temporal is Zep’s [bi-temporal model](https://arxiv.org/abs/2501.13956), which tracks two separate timelines:
+
+### [Heading link](https://forum.letta.com/t/agent-memory-letta-vs-mem0-vs-zep-vs-cognee/88#p-196-integrating-zep-into-your-agent-14) Integrating Zep into your agent
+Install [Graphiti](https://help.getzep.com/graphiti/getting-started/welcome):
+
+```bash
+
+pip install graphiti-core
+```
+
+Initialize Graphiti and build indices:
+
+Query with temporal awareness:
+
+## [Heading link](https://forum.letta.com/t/agent-memory-letta-vs-mem0-vs-zep-vs-cognee/88#p-196-letta-memory-as-infrastructure-20) Letta: Memory as infrastructure
+### [Heading link](https://forum.letta.com/t/agent-memory-letta-vs-mem0-vs-zep-vs-cognee/88#p-196-memory-blocks-self-modifying-agent-state-23) Memory blocks: Self-modifying agent state
+Memory blocks can also be shared between multiple agents. By attaching the same block to different agents, you can create powerful multi-agent systems where agents collaborate through shared memory. For example, multiple agents working on a project could share an “organization” or “project context” block, allowing them to maintain synchronized state and share learned information.
+
+The current agent architecture in Letta leverages the model’s built-in reasoning capabilities and produces responses directly rather than routing them through intermediate tool invocations. This approach is compatible across different LLM providers.
+
+### [Heading link](https://forum.letta.com/t/agent-memory-letta-vs-mem0-vs-zep-vs-cognee/88#p-196-building-with-letta-24) Building with Letta
+Create shared memory blocks for multi-agent systems:
+
+AI Agent Memory Architectures: From Context Windows to Persistent ...
+  URL: https://zylos.ai/research/2026-04-05-ai-agent-memory-architectures-persistent-knowledge/
+  ## Executive Summary
+This survey covers the full stack: the theoretical taxonomy and its implementation in major frameworks (MemGPT/Letta, LangGraph, CrewAI, Mem0, Zep, Cognee), the mechanics of context window management and retrieval, the emerging pattern of declarative memory injection via CLAUDE.md and AGENTS.md files, and the open problems that the community has not yet solved.
+
+The frameworks that have shipped this architecture at scale — Mem0, Zep/Graphiti, Letta — are pulling ahead of competitors that still treat memory as an afterthought.
+
+## Memory Taxonomy: Episodic, Semantic, and Procedural
+### Episodic Memory
+Zep's Graphiti engine stores episodic subgraphs with explicit bitemporal annotations: event time (when the fact was true in the world) and ingestion time (when the agent first observed it).
+
+## Production Memory Systems
+### Letta (formerly MemGPT)
+Letta, the production version of the MemGPT research project, raised a $10M seed round from Felicis Ventures in September 2024 and has since become the reference implementation for LLM-managed tiered memory. Its three-tier model (core/archival/recall) maps cleanly to the episodic/semantic/procedural taxonomy and handles paging entirely through LLM function calls, giving the agent full autonomy over what to remember and what to forget.
+
+Letta's architecture has a meaningful weakness that its own benchmarking blog acknowledges: LLM-managed memory operations add latency and token cost to every interaction where the model decides to page. For high-frequency interactions, this overhead accumulates.
+
+### Zep and Graphiti
+Zep's January 2025 paper (arxiv 2501.13956) introduced Graphiti, a temporally-aware knowledge graph engine built on Neo4j. Graphiti's key innovation is bitemporal edge annotation: every relationship carries both event time (when the fact was true) and ingestion time (when the agent first observed it). This enables precise handling of contradictory or updated facts without information loss.
+
+Zep's retrieval stack is notable for its latency profile: hybrid search combining semantic embeddings, BM25 keyword search, and graph traversal achieves P95 retrieval latency of 300ms with no LLM calls during retrieval. MemGPT's 93.4%.
+
+## Emerging Patterns
+### Multi-Agent Shared Memory
+Multi-agent systems introduce coordination challenges that single-agent memory architectures are not designed to handle. LangGraph's approach — a centralized TypedDict state object with reducer functions controlling merge semantics — provides the simplest shared memory model. MongoDB's LangGraph integration extends this to cross-session persistence, allowing multi-agent teams to resume work across sessions.
+
+The research literature identifies three emerging multi-agent memory patterns: shared global memory (all agents have full read/write access), hierarchical memory (global team-level + role-specific + agent-private tiers), and isolated memory with message-passing (no shared state, explicit communication only).
+
+## Conclusion
+- [Best AI Agent Memory Frameworks 2026: Mem0, Zep, LangChain, Letta](https://atlan.com/know/best-ai-agent-memory-frameworks-2026/)
+- [AI Agent Memory Systems in 2026 — Mem0, Zep, Hindsight, Memvid Compared](https://yogeshyadav.medium.com/ai-agent-memory-systems-in-2026-mem0-zep-hindsight-memvid-and-everything-in-between-compared-96e35b818da8)
+- [Mem0: Building Production-Ready AI Agents with Scalable Long-Term Memory (arxiv)](https://arxiv.org/abs/2504.19413)
+- [Mem0 Graph Memory Documentation](https://docs.mem0.ai/open-source/features/graph-memory)
+- [Zep: A Temporal Knowledge Graph Architecture for Agent Memory (arxiv)](https://arxiv.org/abs/2501.13956)
+- [Graphiti: Knowledge Graph Memory for an Agentic World (Neo4j)](https://neo4j.com/blog/developer/graphiti-knowledge-graph-memory/)
+- [MAGMA: A Multi-Graph based Agentic Memory Architecture (arxiv)](https://arxiv.org/pdf/2601.03236)
+- [Build persistent memory with Mem0, Amazon ElastiCache and Neptune Analytics (AWS)](https://aws.amazon.com/blogs/database/build-persistent-memory-for-agentic-ai-applications-with-mem0-open-source-amazon-elasticache-for-valkey-and-amazon-neptune-analytics/)
+
+Best AI agent memory tools in 2026 - Articles - Braintrust
+  URL: https://www.braintrust.dev/articles/best-ai-agent-memory-tools-2026
+  Tools differ in how they structure memory, including semantic recall, knowledge graphs, temporal validity, and agent-managed memory, as well as whether they run as managed services or self-hosted systems.
+
+## [6 AI agent memory tools to know in 2026](https://www.braintrust.dev/articles/best-ai-agent-memory-tools-2026#6-ai-agent-memory-tools-to-know-in-2026)
+### [1. Mem0: a general-purpose semantic memory layer](https://www.braintrust.dev/articles/best-ai-agent-memory-tools-2026#1-mem0-a-general-purpose-semantic-memory-layer)
+**What it is:** Mem0 is an open-source memory layer that extracts useful information from agent interactions and retrieves it in later conversations. Its current memory algorithm uses single-pass extraction, entity linking, and retrieval signals that combine semantic, keyword, and graph-based context.
+
+### [2. Zep: temporal knowledge graph memory](https://www.braintrust.dev/articles/best-ai-agent-memory-tools-2026#2-zep-temporal-knowledge-graph-memory)
+![Zep Context Lake showing active graphs for users, organizations, agents, and domains](https://www.braintrust.dev/articles/img/best-ai-agent-memory-tools-2026/zep.png)
+
+**What it is:** Zep is a managed context and memory service based on Graphiti, its open-source temporal graph engine. Graphiti converts conversations, documents, and structured business data into entities, relationships, and facts with temporal metadata. When information changes, the graph can invalidate earlier facts while preserving when they were valid and where they came from.
+
+**Known for:** Retrieving context that reflects both relationships and time. Zep can distinguish a current fact from an earlier version and preserve the sequence of changes without treating every stored statement as equally current.
+
+**Commonly used for:** Support, account management, and assistant workflows where customer status, preferences, or business records change over time.
+
+**Worth noting:** Zep manages the production service, while Graphiti provides the underlying open-source framework. Teams using Graphiti directly must build their own user, conversation, storage, and operational layers.
+
+### [3. Letta: agent-managed memory, formerly MemGPT](https://www.braintrust.dev/articles/best-ai-agent-memory-tools-2026#3-letta-agent-managed-memory-formerly-memgpt)
+![Letta memory model managing context for coding, computer use, and interaction models](https://www.braintrust.dev/articles/img/best-ai-agent-memory-tools-2026/letta.png)
+
+Letta grew from the MemGPT research project and retains the core idea of moving information between active context and external storage.
+
+**Commonly used for:** Long-running assistants, coding agents, and other stateful systems expected to build knowledge over repeated interactions.
+
+Adopting it usually affects the broader application architecture, making it easier to introduce it into a new agent build than to add it as a narrow memory component to an existing runtime. Self-hosted deployments use PostgreSQL with the pgvector extension.
+
+### [Other agent memory options worth knowing](https://www.braintrust.dev/articles/best-ai-agent-memory-tools-2026#other-agent-memory-options-worth-knowing)
+**Graphiti:** Zep's open-source temporal graph engine.
+
+## [AI agent memory tools compared](https://www.braintrust.dev/articles/best-ai-agent-memory-tools-2026#ai-agent-memory-tools-compared)
+| **Tool** | **Memory model** | **Deployment** | **Storage architecture** | **Agent-managed memory** | **Open source** | **Primary scope** |
+|-|-|-|-|-|-|-|
+| **Mem0** | Extracted facts with semantic, keyword, and entity-aware retrieval | Managed cloud or self-hosted | Configurable vector store, with graph memory support | No | Yes | Individual users, agents, and applications |
+| **Zep** | Temporal knowledge graph with fact invalidation and historical context | Managed cloud | Vendor-managed temporal graph built on Graphiti | No | Zep: No; Graphiti: Yes | Users, customers, agents, teams, or other defined subjects |
+| **Cognee** | Knowledge graph combined with embeddings and hybrid retrieval | Managed cloud or self-hosted | Configurable graph and vector databases | No | Yes | Individual agents, shared datasets, and multi-agent systems |
+| **Sentra** | Organization-wide bi-temporal knowledge graph | Managed cloud, isolated VPC, or air-gapped deployment | Managed graph infrastructure | No | No | Shared organizational memory for teams and agents |
+
+## [Which agent memory tool fits your use case](https://www.braintrust.dev/articles/best-ai-agent-memory-tools-2026#which-agent-memory-tool-fits-your-use-case)
+**Mem0** works well when the goal is to add persistent recall without replacing the current agent runtime.
+
+Its temporal graph records when information became valid and when it changed, which suits account history, support workflows, and evolving user preferences.
+
+Zep: A Temporal Knowledge Graph Architecture for Agent Memory - arXiv
+  URL: https://arxiv.org/abs/2501.13956
+  # Title:Zep: A Temporal Knowledge Graph Architecture for Agent Memory
+Abstract:We introduce Zep, a novel memory layer service for AI agents that outperforms the current state-of-the-art system, MemGPT, in the Deep Memory Retrieval (DMR) benchmark. Zep addresses this fundamental limitation through its core component Graphiti -- a temporally-aware knowledge graph engine that dynamically synthesizes both unstructured conversational data and structured business data while maintaining historical relationships. In the DMR benchmark, which the MemGPT team established as their primary evaluation metric, Zep demonstrates superior performance (94.8% vs 93.4%).
+
+|  |  |
+|-|-|
+| Comments: | 12 pages, 3 tables |
+|  | (or [arXiv:2501.13956v1](https://arxiv.org/abs/2501.13956v1) [cs.CL] for this version) |
+
+## Access Paper:
+- [View PDF](https://arxiv.org/pdf/2501.13956)
+- [TeX Source](https://arxiv.org/src/2501.13956)
+
+[![license icon](https://arxiv.org/icons/licenses/by-nc-sa-4.0.png)view license](http://creativecommons.org/licenses/by-nc-sa/4.0/)
+
+### References & Citations
+- [Google Scholar](https://scholar.google.com/scholar_lookup?arxiv_id=2501.13956)
+
+export BibTeX citation
+
+Mem0 vs Letta vs Zep: Choosing Your AI Agent's Memory Layer
+  URL: https://dataaspirant.com/blog/mem0-vs-letta-vs-zep/
+  **Mem0** is a memory layer you bolt onto any stack: it extracts facts from conversations and hands them back at prompt time. **Letta** is an agent runtime descended from MemGPT, where the agent itself edits what it remembers using tools. **Zep** stores memory as a temporal knowledge graph that tracks not just facts but when they were true.
+
+## [Letta: the agent that edits its own mind#](https://dataaspirant.com/blog/mem0-vs-letta-vs-zep/#letta-the-agent-that-edits-its-own-mind)
+That is also the honest cost: Letta is not a library you sprinkle onto an existing [LangGraph](https://dataaspirant.com/blog/langgraph-tutorial/) app; it is the app.
+
+## [Zep: memory with a time axis#](https://dataaspirant.com/blog/mem0-vs-letta-vs-zep/#zep-memory-with-a-time-axis)
+![Zep Graphiti bi-temporal memory diagram showing world time and system time for a user moving from London to Berlin, with valid_at and invalid_at timestamps](https://d2565bmq0op2ju.cloudfront.net/blog-assets/mem0-vs-letta-vs-zep-a59feb/images/zep-graphiti-bitemporal-agent-memory-exp-fa2a9922.png)Graphiti tracks both when a fact was true in the world and when the system learned or superseded it, allowing historical and current answers to coexist.
+
+Zep's engine, the open-source **Graphiti** (one of the most-starred agent-memory projects on GitHub), ingests **episodes**: a conversation turn, a JSON record, a document.
+
+The distinctive machinery is **bi-temporal modelling**: every fact carries two timelines, one for the world and one for the system, using the four timestamps in the table below.
+
+When new information contradicts an existing edge, Graphiti does not delete it; it writes an `invalid_at`, a mechanism called edge invalidation.
+
+Zep's own 2025 paper reports beating MemGPT on the Deep Memory Retrieval benchmark (94.8% versus 93.4%) and larger gains on LongMemEval's temporal reasoning tasks alongside roughly 90% lower latency than full-context baselines.
+
+Graphiti's bi-temporal model: two timelines per fact, four timestamps. The first pair describes the world; the second pair describes the system's knowledge of it.
+
+## [Hands-on: the same memory job, three ways#](https://dataaspirant.com/blog/mem0-vs-letta-vs-zep/#hands-on-the-same-memory-job-three-ways)
+Install with `pip install mem0ai letta-client graphiti-core` (Graphiti additionally wants a Neo4j or FalkorDB instance; Zep's hosted platform wraps it as an API).
+
+One scenario, three philosophies: Mem0 consolidates facts, Letta lets the agent edit its own blocks, Graphiti closes the old fact with a timestamp.
+
+## [Head to head#](https://dataaspirant.com/blog/mem0-vs-letta-vs-zep/#head-to-head)
+|  | Mem0 | Letta | Zep (Graphiti) |
+|-|-|-|-|
+| What it is | Memory API beside your agent | Agent runtime with self-editing memory | Temporal knowledge graph service |
+| Memory unit | Distilled facts, scoped by user, agent or run | Editable in-context blocks plus recall and archival tiers | Entities and relationship edges with validity intervals |
+| Handles a changed fact by | Consolidation: UPDATE to current state | Agent rewrites its own block | Edge invalidation: old fact closed with a timestamp, kept queryable |
+| Temporal reasoning | Current-state focus | Whatever the agent wrote down | First-class: bi-temporal, point-in-time queries |
+| Integration effort | Hours: two API calls and a prompt paste | Days to weeks: adopt the runtime and server | Hours against hosted Zep; days self-hosting Graphiti plus a graph database |
+
+## Frequently asked questions
+### What is the main difference between Mem0, Letta and Zep?
+They occupy different architectural layers. Mem0 is a memory API beside your agent: it extracts and consolidates facts from conversations and serves them at prompt time. Letta is an agent runtime where the model edits its own in-context memory blocks with tools, descended from MemGPT. Zep stores memory as a temporal knowledge graph (via its open-source engine Graphiti) where facts carry validity intervals and contradictions close old facts instead of deleting them.
+
+### References and further reading
+1. [Mem0: Building Production-Ready AI Agents with Scalable Long-Term Memory (Chhikara et al.)](https://arxiv.org/abs/2504.19413) (2025)
+3. [Zep: A Temporal Knowledge Graph Architecture for Agent Memory (Rasmussen et al.)](https://arxiv.org/abs/2501.13956) (2025)
+4. [Graphiti: temporal knowledge graphs for agent memory (open source)](https://github.com/getzep/graphiti) (2026)
+7. [Mem0 documentation](https://docs.mem0.ai/) (2026)
+
+Open-Source Agent Memory: Mem0 vs Letta vs Zep - Digital Applied
+  URL: https://www.digitalapplied.com/blog/open-source-agent-memory-mem0-letta-zep-compared
+  # Open-Source Agent Memory:Mem0 vsLetta vs _Zep_
+Mem0, Letta and Zep are the three most-starred standalone open-source memory projects, and they make three incompatible bets on what remembering means: passive fact extraction, agent-curated tiers, and a temporal knowledge graph.
+
+DA
+
+Digital Applied Team
+
+PublishedAugust 4, 2026
+
+Mem0
+
+62.7k
+
+mem0ai/mem0 · Apache-2.0
+
+Zep / Graphiti
+
+29.6k
+
+getzep/graphiti · Apache-2.0
+
+Letta
+
+letta-ai/letta · Apache-2.0
+
+45.4pts
+
+▼Same benchmark name
+
+Open-source agent memory is the least standardised layer in the whole agent stack, and the three projects that dominate it — Mem0, Letta and Zep — do not even agree on what the layer is for. One treats memory as a background extraction pipeline. One treats it as a temporal knowledge graph where facts expire rather than disappear.
+
+They are not.
+
+Every figure below is attributed to whoever produced it.
+
+## 01 — Three BetsThree projects, three _incompatible_ ideas of memory.
+Mem0, Letta (formerly MemGPT) and Zep’s Graphiti are the three most-starred, most-referenced standalone open-source agent-memory projects, and all three ship under Apache-2.0.
+
+##### _Letta_
+letta-ai/letta · Apache-2.0
+
+Temporal graph
+
+#### GitHub stars · standalone open-source agent-memory projects
+Zep · Graphitigetzep/graphiti · 2,998 forks · the OSS core
+
+Lettaletta-ai/letta · 2,569 forks · formerly MemGPT
+
+Zep narrowed its open-source strategy to the graph engine, which means the “Zep” you can self-host today is Graphiti — a component — while the full product around it stays commercial.
+
+## 02 — Mem0Extraction, then _reconciliation_.
+Mem0’s architecture, described in its ECAI 2025 paper (arXiv:2504.19413) and unchanged in its current documentation, is a two-phase pipeline.
+
+On the paid graph-memory path, messages are additionally converted into entity-and-relation triplets during extraction, with conflict detection and resolution running during update — layered on top of the base vector-store pipeline rather than replacing it.
+
+Mem0 publishes an efficiency claim alongside the accuracy ones: a mean of roughly 6,900 tokens per retrieval call against 25,000 or more for full-context baselines, which it presents as a three- to fourfold token-cost advantage at comparable accuracy.
+
+Graph memory, the entity-linking capability that most closely resembles what Zep does structurally, is gated behind Mem0’s top self-serve tier on the hosted service, alongside the “Dream” memory consolidation feature.
+
+## 03 — LettaTiered memory the agent _edits itself_.
+##### Archival Memory
+In MemGPT, Letta’s predecessor design, memory management, conversation and other tasks were bundled into a single agent — which Letta’s own writing says could make that agent slower and less reliable.
+
+## 08 — RAG or MemoryWhen plain RAG is still the _right_ call.
+##### History that has to survive the correction
+Pick Zep / Graphiti
+
+Mem0 already sells a graph tier, Letta already has an archival store, and Zep’s graph has to solve extraction before it can build an edge — the three designs are converging on a similar feature surface from different starting points.
+
+Every one of these systems pays for memory in LLM calls on the write path — extraction for Mem0, consolidation for Letta, entity and edge construction for Zep.
+
+Star, fork, licence and last-push figures come from the GitHub REST API for `mem0ai/mem0`, `letta-ai/letta`,`getzep/graphiti` and `getzep/zep`, read at the time of writing. Architecture and self-reported scores: the Mem0 research page, Mem0’s ECAI 2025 paper (arXiv:2504.19413) and the Mem0 graph-memory documentation; Letta’s agent-memory post, its sleep-time compute post of April 21, 2025 with arXiv:2504.13171, and the Letta Leaderboard methodology post of May 29, 2025; the Graphiti README, Zep’s paper arXiv:2501.13956 and Zep’s open-source strategy announcement. Pricing: the Mem0, Letta and Zep pricing pages, read at the time of writing.
+
+## The questions teams ask before _they pick a memory layer._
+What is the difference between Mem0, Letta and Zep?
+
+They are three different architectures wearing one category label. Mem0 is an extraction pipeline: an LLM pulls candidate facts out of each new message pair, then a second pass compares each candidate against existing memories by vector similarity and decides ADD, UPDATE, DELETE or NOOP. Letta is an agent runtime with memory modelled on computer architecture — Core Memory in context like RAM, Recall Memory as searchable conversation history, and Archival Memory as a vector-backed store the agent queries through tool calls. Zep's open core, Graphiti, builds a temporal knowledge graph where every fact carries a validity window, so contradicted facts are invalidated rather than deleted. Practically: Mem0 asks least of your application, Letta asks you to adopt its runtime, and Zep gives you auditable history at the cost of running a graph database.
+
+Best MCP Memory Servers for AI Agents (2026) - Sentra
+  URL: https://www.sentra.app/articles/best-mcp-memory-servers
+  Letta's hierarchical memory model is thoughtful for single-agent context management but wasn't designed for multi-agent, multi-team sharing. Best forZep, best ...
+
+Benchmarking AI Agent Memory: Is a Filesystem All You Need? - Letta
+  URL: https://www.letta.com/blog/benchmarking-ai-agent-memory/
+  # Benchmarking AI Agent Memory: Is a Filesystem All You Need?
+## Memory for AI Agents
+[MemGPT](https://arxiv.org/abs/2310.08560) introduced [memory management for agents](https://www.letta.com/blog/agent-memory/) by creating a memory hierarchy inspired by a traditional operating system (OS). Many agentic systems today, including Letta, implement MemGPT’s design to enable long-term memory in LLM agents.
+
+## Attempts at Benchmarking Memory Tools (e.g., Mem0, LangMem, Zep)
+One memory tool creator, Mem0, published [controversial results](https://www.reddit.com/r/LangChain/comments/1kash7b/i_benchmarked_openai_memory_vs_langmem_vs_letta/) claiming to have run MemGPT on LoCoMo. Mem0 [did not respond](https://github.com/mem0ai/mem0/issues/3004) to requests for clarification on how the benchmarking numbers were computed, or provide any modified MemGPT implementation that supports meaningful backfill of LoCoMo data.
+
+Zep: A Temporal Knowledge Graph Architecture for Agent Memory
+  URL: https://www.youtube.com/watch?v=NBZGieN8S6E
+  ## Zep: A Temporal Knowledge Graph Architecture for Agent Memory
+The Knowledge Graph Conference 939 views 4mo ago
+
+Copy link
+
+Info
+
+Shopping
+
+If playback doesn't begin shortly, try restarting your device.
+
+•
+
+You're signed out
+
+Videos you watch may be added to the TV's watch history and influence TV recommendations. To avoid this, cancel and sign in to YouTube on your computer.
+
+CancelConfirm
+
+Up next
+
+Live
+
+Upcoming
+
+CancelPlay Now
+
+I'm
+
+Share
+
+Include playlist
+
+An error occurred while retrieving sharing information. Please try again later.
+
+0:00
+
+[Next (SHIFT+n)](https://www.youtube.com/watch?v=HMh63kmgOKc)
+
+0:00 / 41:38
+
+Live
+
+•Watch full video
+
+• The concept of agent memory
+
+•
+
+[20:17\
+Build the Swap, Design the Protocol — Sasha Kazachenko | CoW DAOETH Belgrade38 • 7d agoLivePlaylist ()Mix (50+)](https://www.youtube.com/watch?v=gzApp_SIqgs) [13:54\
+Context Language Models: Your Agent Doesn't Need CompactionPrompt Engineering25K • 7d agoLivePlaylist ()Mix (50+)](https://www.youtube.com/watch?v=Bgtr1Ue40Jo) [2:34:26\
+AI Agents With Reusable Data Products and Decentralized Knowledge GraphThe Knowledge Graph Conference 289 • 5mo agoLivePlaylist ()Mix (50+)](https://www.youtube.com/watch?v=dwcryVEqsTY) [30:25\
+What It Truly Takes to Build a Knowledge Graph in an EnterpriseThe Knowledge Graph Conference 381 • 2mo agoLivePlaylist ()Mix (50+)](https://www.youtube.com/watch?v=0qI3zxe-MHE) [21:18\
+Why Agentic Systems Need Ontologies — Frank Coyle, UC BerkeleyAI Engineer448K • 2mo agoLivePlaylist ()Mix (50+)](https://www.youtube.com/watch?v=Sir59K8ZDPU) [14:34\
+Anthropic's Chloe Lubinski explains how AI works (in 14 minutes)Alliance for Responsible Citizenship2.9M • 3mo agoLivePlaylist ()Mix (50+)](https://www.youtube.com/watch?v=aBUniZHgCnE) [55:27\
+Beyond the Model Card - AIBOMs - by Matt Rutkowski - ML & AI OttawaReliza117 • 2w agoLivePlaylist ()Mix (50+)](https://www.youtube.com/watch?v=TS8_LTqFFjE) [1:28:24\
+Building Agentic APIs with LLM Tool Use & Knowledge GraphsThe Knowledge Graph Conference 210 • 2mo agoLivePlaylist ()Mix (50+)](https://www.youtube.com/watch?v=H0p6ppclaYM) [31:23\
+AI Agents Should Be Treated Like HackersAgentic Conversations and Agentic AI Foundation106 • 3mo agoLivePlaylist ()Mix (50+)](https://www.youtube.com/watch?v=HMh63kmgOKc) [23:57\
+When to Build Your Own Agent Harness | Harrison Chase, LangChainSequoia Capital104K • 1mo agoLivePlaylist ()Mix (50+)](https://www.youtube.com/watch?v=HI2q3ci3Iuc) [15:03\
+What Is Jev? The AI Model That Doesn't Generate TextIBM Technology1.1M • 11d agoLivePlaylist ()Mix (50+)](https://www.youtube.com/watch?v=YGgNBcIgI4s) [19:15\
+GraphRAG: The Marriage of Knowledge Graphs and RAG: Emil EifremAI Engineer291K • 2y agoLivePlaylist ()Mix (50+)](https://www.youtube.com/watch?v=knDDGYHnnSI)
+
+# Zep: A Temporal Knowledge Graph Architecture for Agent Memory
+3.08K subscribers
+
+Subscribe
+
+Subscribed
+
+31
+
+Share
+
+Download
+
+Download
+
+Save
+
+939 views4mo ago [#agenticai](https://www.youtube.com/hashtag/agenticai) [#kgc2025](https://www.youtube.com/hashtag/kgc2025) [#knowledgegraph](https://www.youtube.com/hashtag/knowledgegraph)
+
+939 views • Jun 4, 2026 • #agenticai #kgc2025 #knowledgegraph
+
+Zep: A Temporal Knowledge Graph Architecture for Agent Memory
+
+more
+
+0:00
+
+7:40
+
+[**Why knowledge graphs**](https://www.youtube.com/watch?v=NBZGieN8S6E&t=735s)
+
+12:15
+
+[**Graph architecture**  **Graph architecture** \
+\
+14:38](https://www.youtube.com/watch?v=NBZGieN8S6E&t=878s)
+
+[**Graph architecture**](https://www.youtube.com/watch?v=NBZGieN8S6E&t=878s)
+
+14:38
+
+23:01
+
+24:58
+
+Follow along using the transcript.
+
+Show transcript
+
+## Zep: A Temporal Knowledge Graph Architecture for Agent Memory
+31Likes
+
+Jun 42026
+
+Zep: A Temporal Knowledge Graph Architecture for Agent Memory
+
+Unlike traditional systems that rely on static corpora, Zep integrates a temporally-aware knowledge graph engine, Graphiti, to dynamically synthesize unstructured conversational data and structured business data while maintaining historical relationships. Zep’s hierarchical knowledge graph structure mirrors human memory, consisting of episodic, semantic, and community subgraphs that store raw data, extracted entities, and high-level domain summaries, respectively.
+
+In the Deep Memory Retrieval (DMR) task, Zep achieved a 94.8% accuracy, outperforming MemGPT (93.4%). On the more demanding LongMemEval benchmark, Zep achieved up to an 18.5% accuracy improvement and reduced latency by 90%, excelling in complex tasks like temporal reasoning and multi-session information synthesis.
+
+Zep’s innovations include a bi-temporal model for accurate historical tracking, efficient retrieval through multi-method search and reranking, and scalable, latency-optimized performance.
+
+hashtags [#kgc2025](https://www.youtube.com/hashtag/kgc2025)[#agenticai](https://www.youtube.com/hashtag/agenticai)[#knowledgegraph](https://www.youtube.com/hashtag/knowledgegraph)[#agentmemory](https://www.youtube.com/hashtag/agentmemory)
+
+...more Show less
+
+0:00
+
+3:15
+
+7:40
+
+[**Why knowledge graphs**](https://www.youtube.com/watch?v=NBZGieN8S6E&t=735s)
+
+12:15
+
+Show transcript
+
+Guides - Vectorize.io
+  URL: https://vectorize.io/articles
+  # Guides
+## [Best AI Agent Memory Systems in 2026: 8 Frameworks Compared](https://vectorize.io/articles/best-ai-agent-memory-systems)
+We ranked the 8 best agent memory systems in 2026 — Hindsight, mem0, Zep, Letta, Cognee, and more — with architecture breakdowns, real code, and a decision guide.
+
+## [Mem0 vs Letta (MemGPT): AI Agent Memory Compared (2026)](https://vectorize.io/articles/mem0-vs-letta)
+[![Mem0 vs Zep (Graphiti): AI Agent Memory Compared (2026)](https://vectorize.io/_next/image?url=%2Farticles%2Fmem0-vs-zep%2Ffeatured.png&w=3840&q=75)](https://vectorize.io/articles/mem0-vs-zep)
+
+## [Mem0 vs Zep (Graphiti): AI Agent Memory Compared (2026)](https://vectorize.io/articles/mem0-vs-zep)
+Mem0 vs Zep — compare dual-store vector+graph architecture with temporal knowledge graphs for AI agent memory.
+
+[Read more →](https://vectorize.io/articles/mem0-vs-zep)
+
+## [Zep (Graphiti) vs Cognee: AI Agent Memory Compared (2026)](https://vectorize.io/articles/zep-vs-cognee)
+Zep vs Cognee — compare temporal knowledge graphs with multimodal knowledge extraction for AI agent memory.
+
+## [Best LangChain Memory Alternatives for AI Agents in 2026](https://vectorize.io/articles/langchain-memory-alternatives)
+Hindsight, Mem0, Letta, and Zep — strengths, limitations, pricing, and decision guide.
+
+## [Best Letta Alternatives for AI Agent Memory in 2026](https://vectorize.io/articles/letta-alternatives)
+Hindsight, Mem0, Zep, and SuperMemory — strengths, limitations, pricing, and decision guide.
+
+## [Best Mem0 Alternatives for AI Agent Memory in 2026](https://vectorize.io/articles/mem0-alternatives)
+Compare 4 AI agent memory frameworks — Hindsight, Letta, Zep, and SuperMemory — with pricing, architecture, and a decision guide.
+
+## [Best Zep Alternatives for AI Agent Memory Systems (2026)](https://vectorize.io/articles/zep-alternatives)
+Hindsight, Mem0, Letta, and Cognee — self-hosting, pricing, architecture, and decision guide.

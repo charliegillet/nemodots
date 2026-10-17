@@ -1,0 +1,181 @@
+Automated Design of Agentic Systems: A Survey of Algorithms for ...
+  URL: https://www.preprints.org/manuscript/202606.0238
+  # Automated Design of Agentic Systems: A Survey of Algorithms for Searching, Optimizing, and Evolving LLM Agents, Workflows, and Prompts
+## 2. Foundations and Problem Definition
+Hu, Lu, and Clune name the problem of automating such design ADAS [ [18](https://www.preprints.org/manuscript/202606.0238#B18-preprints-216468)], extrapolating from features and architectures to agents themselves. ADAS targets the automatic design of precisely that complete object.
+
+## 7. Search over Modular Agents and Architectures
+### 7.1. From Open-Ended Code Search to Structured Architecture Search
+The earliest formulation of ADAS treats an agent as an arbitrary program and lets a meta agent write new agents from scratch, collecting discoveries in an archive [ [18](https://www.preprints.org/manuscript/202606.0238#B18-preprints-216468)].
+
+**AgentSquare** is the analogue of cell-based NAS, but on the agent side [ [42](https://www.preprints.org/manuscript/202606.0238#B42-preprints-216468)].
+
+## 8. Evolutionary and Self-Evolving Agents
+An increasingly prominent branch of ADAS conceives of building agents as open-ended iteration: agents, or the meta-systems that produce them, are gradually transformed by mutation, recombination, and selection. It draws on quality-diversity / open-endedness (MAP-Elites [ [31](https://www.preprints.org/manuscript/202606.0238#B31-preprints-216468)]) and recursive self-improvement (Schmidhuber’s Gödel machine [ [41](https://www.preprints.org/manuscript/202606.0238#B41-preprints-216468)]).
+
+### 8.2. Symbolic Learning and Recursive Self-Modification
+Gödel Agent [ [55](https://www.preprints.org/manuscript/202606.0238#B55-preprints-216468)] “leverages LLMs to dynamically modify its own logic and behavior, guided solely by high-level objectives through prompting” [ [55](https://www.preprints.org/manuscript/202606.0238#B55-preprints-216468)] via introspection and runtime monkey-patching; unlike ADAS [ [18](https://www.preprints.org/manuscript/202606.0238#B18-preprints-216468)], it “recursively updates both the policy π and the meta-learning algorithm I” [ [55](https://www.preprints.org/manuscript/202606.0238#B55-preprints-216468)], sacrificing provable optimality for noisy hill-climbing in which a single bad rewrite can corrupt the agent.
+
+## 13. Challenges, Limitations, Safety, and Directions for Future Work
+ADAS has matured exceptionally fast—from Meta Agent Search, which programs new agents as code [ [18](https://www.preprints.org/manuscript/202606.0238#B18-preprints-216468)], to recursively self-improving systems such as Gödel Agent [ [55](https://www.preprints.org/manuscript/202606.0238#B55-preprints-216468)] and the Darwin Gödel Machine (DGM) [ [62](https://www.preprints.org/manuscript/202606.0238#B62-preprints-216468)]—and in doing so has outpaced our understanding of when these systems work, how much they cost, and whether they are safe.
+
+## References
+14. He, Shan; Wang, Runze; Du, Zhuoyun; et al. Learning to evolve: A self-improving framework for multi-agent systems via textual parameter graph optimization. arXiv **2026**, arXiv:2604.20714. [ [Google Scholar](https://scholar.google.com/scholar_lookup?title=Learning+to+evolve:+A+self-improving+framework+for+multi-agent+systems+via+textual+parameter+graph+optimization&author=He,+Shan&author=Wang,+Runze&author=Du,+Zhuoyun&author=et+al.&publication_year=2026&journal=arXiv)]
+55. Yin, Xunjian; Wang, Xinyi; Pan, Liangming; et al. Godel agent: A self-referential agent framework for recursive self-improvement. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (ACL), 2025; pp. pages 27890–27913. [ [Google Scholar](https://scholar.google.com/scholar_lookup?title=Godel+agent:+A+self-referential+agent+framework+for+recursive+self-improvement&conference=Proceedings+of+the+63rd+Annual+Meeting+of+the+Association+for+Computational+Linguistics+(ACL)&author=Yin,+Xunjian&author=Wang,+Xinyi&author=Pan,+Liangming&author=et+al.&publication_year=2025&pages=pages+27890%E2%80%9327913)]
+56. Yuan, Siyu; Song, Kaitao; Chen, Jiangjie; et al. Evoagent: Towards automatic multi-agent generation via evolutionary algorithms. In Proceedings of the 2025 Conference of the Nations of the Americas Chapter of the Association for Computational Linguistics (NAACL), 2025; pp. pages 6192–6217. [ [Google Scholar](https://scholar.google.com/scholar_lookup?title=Evoagent:+Towards+automatic+multi-agent+generation+via+evolutionary+algorithms&conference=Proceedings+of+the+2025+Conference+of+the+Nations+of+the+Americas+Chapter+of+the+Association+for+Computational+Linguistics+(NAACL)&author=Yuan,+Siyu&author=Song,+Kaitao&author=Chen,+Jiangjie&author=et+al.&publication_year=2025&pages=pages+6192%E2%80%936217)]
+
+| Method | Year | Target | Search strategy | Representation | Feedback signal | Ref. |
+|-|-|-|-|-|-|-|
+| AgentSquare | 2024 | Agent modules (4-slot cell) + code | LLM-evolutionary (mutation + recombination, hill climbing) | Code + module sets with standardized I/O | In-context surrogate performance predictor | [ [42](https://www.preprints.org/manuscript/202606.0238#B42-preprints-216468)] |
+| EvoAgent | 2024 | Agent modules (persona) → multi-agent topology | Evolutionary (population GA, LLM operators) | Natural-language personas / settings | Quality check with LLM-as-judge | [ [56](https://www.preprints.org/manuscript/202606.0238#B56-preprints-216468)] |
+| Gödel Agent | 2024 | Full code system (self-referential) | LLM-as-optimizer hill climbing, recursive self-rewriting | Runtime code | LLM-estimated utility | [ [55](https://www.preprints.org/manuscript/202606.0238#B55-preprints-216468)] |
+| Darwin Gödel Machine | 2025 | Full code system (self-improving) | Open-ended quality-diversity (archive + LLM mutation) | Agent code | Empirical benchmark (SWE-bench / Polyglot) | [ [62](https://www.preprints.org/manuscript/202606.0238#B62-preprints-216468)] |
+
+A Taxonomy of Self-evolving Agents | Shilong Liu Homepage
+  URL: http://lsl.zone/blog/2026/a-taxonomy-of-self-evolving-agents/
+  Auto-research agents aim to self-evolve for scientific discovery. They all use similar words: self-evolving, self-improving, learning, adapting.
+
+## Agent Harness Self-improvement
+**Towards Multi-agent Self-evolving**
+
+This leads to multi-agent self-evolving solutions. It therefore proposes using multiple expert agents for different tasks, with a router assigning each task to the right expert.
+
+## A Blurred Boundary
+The same thing should happen to self-evolving agent systems.
+
+A Survey of Self-Evolving Agents: On Path to Artificial Super Intelligence
+  URL: https://arxiv.org/html/2507.21046v3
+  # A Survey of Self-Evolving Agents: On Path to Artificial Super Intelligence
+## 3 What to Evolve?
+### 3.4 Architecture
+The defining feature of next-generation agentic systems is their intrinsic capacity for self-improvement.
+
+## References
+Gödel agent: A self-referential agent framework for recursive self-improvement, 2025.
+
+Agentsquare: Automatic LLM agent search in modular design space.
+
+Automated design of agentic systems.
+
+Sirius: Self-improving multi-agent systems via bootstrapped reasoning.
+
+Self-evolving multi-agent collaboration networks for software development.
+
+Adaptive self-improvement llm agentic system for ml library development.
+
+GitHub - XMUDeepLIT/Awesome-Self ...
+  URL: https://github.com/XMUDeepLIT/Awesome-Self-Evolving-Agents
+  # Awesome-Self-Evolving-Agents
+🤗 **You're very welcome to contribute to this repository**.
+
+```
+@article{xiang2026systematic,
+  title={A Systematic Survey of Self-Evolving Agents: From Model-Centric to Environment-Driven Co-Evolution},
+  author={Xiang, Zhishang and Yang, Chengyi and Chen, Zerui and Wei, Zhimin and Tang, Yunbo and Teng, Zongpei and Peng, Zexi and Li, Zongxia and Huang, Chengsong and He, Yicheng and others},
+  journal={Available at SSRN 6626878},
+  year={2026}
+}
+```
+
+# 📜 Research Papers
+## Environment-Centric Self-Evolution
+### Modular Architecture Evolution
+#### Tool-Augmented Evolution
+- (ACL'25) Gödel Agent: A Self-Referential Agent Framework for Recursively Self-Improvement [[Paper]](https://aclanthology.org/2025.acl-long.1354/)
+  Category: github
+
+The What & When of Self-Evolving Agents | Xinming Tu
+  URL: http://xinmingtu.cn/blog/2026/self-evolving-agents/
+  # The What & When of Self-Evolving Agents
+## Appendix: The Complete Landscape
+**Across Users · Layer 2** — Platform Harness Flywheels and Automated Design
+
+- **Automated Design of Agentic Systems (ADAS)** established the search template behind this cell: a meta-agent programs new agents in code, evaluates them, and iterates against a growing archive of discovered designs
+  - **Automated Design of Agentic Systems** [[PDF]](http://arxiv.org/pdf/2408.08435.pdf) S. Hu, C. Lu, J. Clune. arXiv preprint arXiv:2408.08435. 2024.
+
+ADAS - Shengran Hu
+  URL: https://www.shengranhu.com/ADAS/
+  ## TL;DR
+In this work, we describe a newly forming research area **A** utomated **D** esign of **A** gentic **S** ystems ( **ADAS**), which aims to automatically create powerful agentic system designs, including inventing novel building blocks and/or combining them in new ways.
+
+We present a simple yet effective ADAS algorithm named **Meta Agent Search** to demonstrate that **agents can invent novel and powerful agent designs by programming in code**.
+
+## New Research Area: Automated Design of Agentic Systems (ADAS)
+![overview](https://www.shengranhu.com/ADAS/img/ADAS_three_components.png)
+
+**The three key components of ADAS.**
+
+## Experiments
+### Citation
+```
+title={Automated Design of Agentic Systems},
+```
+
+Gödel Agent: A Self-Referential Framework Helps for Recursively...
+  URL: https://openreview.net/forum?id=dML3XGvWmy
+  ## Gödel Agent: A Self-Referential Framework Helps for Recursively Self-Improvement
+[![Download PDF](https://openreview.net/images/pdf_icon_blue.svg)](https://openreview.net/pdf?id=dML3XGvWmy)
+
+### [Xunjian Yin](https://openreview.net/profile?id=~Xunjian_Yin1), [Xinyi Wang](https://openreview.net/profile?id=~Xinyi_Wang2), [Liangming Pan](https://openreview.net/profile?id=~Liangming_Pan1), [Xiaojun Wan](https://openreview.net/profile?id=~Xiaojun_Wan1), [William Yang Wang](https://openreview.net/profile?id=~William_Yang_Wang2)
+In this paper, we introduce Gödel Agent, a self-evolving framework inspired by the Gödel machine, enabling agents to recursively improve themselves without relying on predefined routines or fixed optimization algorithms.
+
+Gödel Agent: A Self-Referential Agent Framework for Recursively Self ...
+  URL: https://aclanthology.org/2025.acl-long.1354/
+  ## [Gödel Agent: A Self-Referential Agent Framework for Recursively Self-Improvement](https://aclanthology.org/2025.acl-long.1354.pdf)
+[Xinyi Wang](https://aclanthology.org/people/xinyi-wang/unverified/), [William Yang Wang](https://aclanthology.org/people/william-yang-wang/)
+
+##### Abstract
+In this paper, we introduce Gödel Agent, a self-evolving framework inspired by the Gödel Machine, enabling agents to recursively improve themselves without relying on predefined routines or fixed optimization algorithms.
+
+[Gödel Agent: A Self-Referential Agent Framework for Recursively Self-Improvement](https://aclanthology.org/2025.acl-long.1354/).
+
+[PDF](https://aclanthology.org/2025.acl-long.1354.pdf) [Cite](https://aclanthology.org/2025.acl-long.1354/#) [Search](https://www.semanticscholar.org/search?+q=G%C3%B6del+Agent%3A+A+Self-Referential+Agent+Framework+for+Recursively+Self-Improvement) [Fix data](https://aclanthology.org/2025.acl-long.1354/#)
+
+Self-Improvements in Modern Agentic Systems — Survey Hub
+  URL: https://selfimproving-agent.github.io/
+  # Self-Improvements in Modern Agentic Systems
+## Quick start: representative papers
+**[Darwin Godel Machine](https://arxiv.org/abs/2505.22954)**
+
+## Curated paper library
+### 2.3 Tool
+| Year | Title | Venue | Links |
+|-|-|-|-|
+| 2026 | [EvoDS: Self-Evolving Autonomous Data Science Agent with Skill Learning and Context Management](https://arxiv.org/abs/2606.03841) | arXiv | [Paper](https://arxiv.org/abs/2606.03841) · [Code](https://github.com/usail-hkust/EvoDS) |
+| 2026 | [Autonomous Evolution of EDA Tools: Multi-Agent Self-Evolved ABC](https://arxiv.org/abs/2604.15082) | DAC | [Paper](https://arxiv.org/abs/2604.15082) · Code |
+
+### 2.4 Full Scaffolding
+| Year | Title | Venue | Links |
+|-|-|-|-|
+| 2024 | [Automated Design of Agentic Systems](https://arxiv.org/abs/2408.08435) | NeurIPS | [Paper](https://arxiv.org/abs/2408.08435) · [Code](https://github.com/ShengranHu/ADAS) |
+| 2025 | [Gödel Agent: A Self-Referential Agent Framework for Recursive Self-Improvement](https://arxiv.org/abs/2410.04444) | ACL | [Paper](https://arxiv.org/abs/2410.04444) · [Code](https://github.com/Arvid-pku/Godel_Agent) |
+
+Self-Improving AI Agents: The 2026 Guide | Articles | o-mega
+  URL: https://o-mega.ai/articles/self-improving-ai-agents-the-2026-guide
+  ## 3. The Lineage: ADAS to DGM to HyperAgents
+### ADAS: Automated Design of Agentic Systems (2024)
+The [first paper](https://arxiv.org/abs/2408.08435), published in August 2024 and accepted at ICLR 2025, introduced the concept of **Automated Design of Agentic Systems** (ADAS). The core algorithm, Meta Agent Search, uses a "meta" agent to iteratively design new agents by writing Python code. The meta agent maintains an archive of discovered agents, evaluates each one, and generates variations. [Shengran Hu](https://www.shengranhu.com/ADAS/), Cong Lu, and Jeff Clune showed that automatically discovered agents outperformed hand-designed baselines by **+13.6 F1** on the DROP reasoning benchmark and **+14.4% accuracy** on MGSM math tasks. Discovered agents also transferred across different foundation models and domains.
+
+The bottleneck ADAS did not address: the meta agent itself was fixed. A human wrote the meta agent's logic, and it never improved. If the meta agent had a blind spot in how it designed agents, that blind spot persisted forever.
+
+### Darwin Godel Machine: Open-Ended Self-Improvement (2025)
+The Darwin Godel Machine allowed the agent to modify its own code, including the code responsible for proposing modifications. The results were dramatic. On [SWE-bench](https://www.swebench.com/), performance improved from **20.0% to 50.0%**. On the Polyglot coding benchmark, it went from **14.2% to 30.7%**. The system autonomously discovered better code editing tools, long-context window management strategies, and peer-review mechanisms for validating its own outputs.
+
+Improving at coding made the agent better at modifying its own code, creating a natural feedback loop.
+
+## 4. The Self-Improving Agent Landscape
+### Self-Play and Reinforcement Learning
+Three co-evolving agents (Proposer, Solver, Judge) are instantiated from a single LLM and optimized via reinforcement learning.
+
+### Self-Referential Agent Modification
+[Godel Agent](https://arxiv.org/abs/2410.04444), published at ACL 2025, takes a runtime approach.
+
+### Prompt and Agent Optimization
+It uses GEPA for dynamic prompt evolution.
+
+## 9. What Comes Next
+The EvoAgentX framework offers a complete self-evolving agent toolkit.
+
+The self-improving agent is not a future technology.
+
+_The self-improving agent field is evolving rapidly._

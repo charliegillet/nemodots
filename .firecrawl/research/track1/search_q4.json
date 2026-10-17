@@ -1,0 +1,115 @@
+Toward Safe and Responsible AI Agents - arXiv
+  URL: https://arxiv.org/html/2601.06223v1
+  conformal prediction to quantify uncertainty, KNOWNO enables robots to detect when their confidence falls below a uncertainty alignment provides formal statistical guarantees on task success while minimizing unnecessary human
+
+Human involvement serves as both a safeguard and
+
+This demonstrates consistent accuracy and reliability, the level of human intervention can be reduced. reduction must be based on measurable improvements, not assumption.
+
+agents must demonstrate reliability before operating independently in high-stakes environments.
+
+calibrate the agent’s performance as autonomy increases.
+
+uncertainty or ambiguity, it may consult a human collaborator for guidance.
+
+Abort State. Abort events may occur if the agent cannot fulfill its
+
+As AI agents gain more
+
+This is closely related to the principle of
+
+input ambiguous? that omitted critical information? Without explicit records of each decision and the reasoning behind it, no clear
+
+confidence and willingness to rely on autonomous systems.
+
+trust AI agents only if they can see clear boundaries of control and know that humans can intervene when necessary.
+
+exhibit higher reliability than human operators. confidence. designed to rely on validated human inputs and to defer judgment appropriately when required.
+
+On Controllability in Agentic AI: A Survey | Minds and Machines
+  URL: https://link.springer.com/article/10.1007/s11023-026-09783-y
+  # On Controllability in Agentic AI: A Survey
+## 3 Results and Discussion
+### 3.3 Agent-in-the-Loop (AITL)
+Similarly, HITL preserves direct human authority over review or intervention, whereas AITL delegates first-order monitoring to an artificial supervisor, often with escalation to humans only when uncertainty or risk exceeds a threshold.
+
+HULA shows the promise of this strategy, effective use of limited expert calls without relying on expert supervision during training, but it also exposes a major failure mode: if uncertainty estimation is poor, human oversight may be withheld precisely when it is needed most.
+
+### 3.4 Human-in-the-Loop (HITL)
+Good switching criteria should consider uncertainty, reversibility, safety criticality, value sensitivity, user intent ambiguity, model confidence, and operator availability.
+
+## 4 Future Directions
+### 4.2 Fault-Tolerant Safety Net
+If an agent deviates from expected behavioral patterns, it is automatically flagged or temporarily suspended to prevent further escalation Raza et al.
+
+### 4.4 Safe Agentic AI via HITL
+Rather than continuous human supervision or purely reactive interventions, agents can learn to escalate to human oversight only when necessary, based on assessed risk, task complexity, or calibrated uncertainty.
+
+Knowing when to escalate: Prompt-based uncertainty ...
+  URL: https://www.sciencedirect.com/science/article/pii/S2590005626004509
+  # Knowing when to escalate: Prompt-based uncertainty quantification for selective automation of LLM-based intrusion detection
+## Highlights
+- •
+Accuracy, not calibration, is the binding constraint on safe automation.
+
+## Abstract
+First, the binding constraint on safe automation is classification accuracy, not calibration: with a mean accepted accuracy of 0.630 — well below the 0.95 operational target — even well-calibrated uncertainty cannot license autonomous acceptance, so UQ’s value here is escalation, not full automation.
+
+LLM Calibration and Uncertainty Quantification in Production AI Agents
+  URL: https://zylos.ai/research/2026-04-18-llm-calibration-uncertainty-production-agents/
+  ## Executive Summary
+As agents take longer chains of action and operate with greater autonomy, a miscalibrated confidence signal becomes more than an inconvenience: it becomes a root cause of cascading failures.
+
+## A Taxonomy of Uncertainty in Agents
+In practice they are correlated, sometimes canceling but often amplifying.
+
+## The Verbalization Gap: When Words Don't Match Internal State
+(arXiv:2601.07767, January 2026) finds a critical limitation: while models can often accurately verbalize their uncertainty in isolation, they fail to use this information to guide their own decisions.
+
+Calibrated communication of uncertainty ("I'm fairly confident this is correct, but you may want to verify the specific date") produces better human-AI collaboration outcomes than either extreme.
+
+## Production Patterns and Industry Adoption
+**Confidence-gated escalation** is the dominant pattern: when an agent's internal confidence falls below a threshold, it pauses and routes the case to a human owner rather than proceeding autonomously. Google Cloud's 2025 retrospective on agent deployment ("AI Grew Up and Got a Job") identifies this pattern as critical to building organizational trust in autonomous agents — humans can calibrate their trust in the agent by seeing, over time, that escalations are well-targeted rather than over-triggering.
+
+## Design Principles for Calibrated Agents
+**Principle 1: Instrument uncertainty, don't assume it.**
+
+Build uncertainty gating at the infrastructure level rather than relying on the model's self-reported confidence to drive decisions.
+
+The verbalization research shows that medium-expressed uncertainty — specific hedging rather than confident assertion or reflexive "I don't know" — produces the best human-AI collaboration outcomes.
+
+## The Road Ahead
+**Underspecification uncertainty** remains under-theorized. Current methods focus on factual uncertainty (does the model know the answer?) but not interpretive uncertainty (is the model solving the right problem?).
+
+The field is converging on a clear architectural principle: uncertainty is not a diagnostic to monitor after the fact, but a runtime signal to act on in real time. The agent systems that perform reliably over long horizons will be those that treat uncertainty as a first-class runtime value — something to propagate, reason about, and act on — rather than a byproduct of computation to be logged and ignored.
+
+Calibrating Agent-Based Models Using Uncertainty Quantification ...
+  URL: https://www.jasss.org/25/2/1.html
+  The HM process continues until one or more stopping criteria are met. For example, it may be stopped when all of the parameters are found to be non-implausible.
+
+Levels of Autonomy for AI Agents - | Knight First Amendment Institute
+  URL: https://knightcolumbia.org/content/levels-of-autonomy-for-ai-agents-1
+  ### References
+Ho, V.
+
+How Human Approvals Make AI Agents More Autonomous
+  URL: https://cacm.acm.org/blogcacm/how-human-approvals-make-ai-agents-more-autonomous/
+  The premise of the agentic AI argument was that humans could sit back and let AI handle repetitive tasks that were consuming someone’s time.
+
+Although on surface such checkpoints might seem like they are taking away an agent’s autonomy, they do the opposite because one is more comfortable with an outcome they can trust.
+
+Multi-Agent Coordination: 10 Strategies to Prevent System Failures
+  URL: https://www.splunk.com/en_us/blog/artificial-intelligence/multi-agent-coordination-strategies.html
+  # Multi-Agent Coordination: 10 Strategies to Prevent System Failures
+## Strategy #1: Establish deterministic task allocation
+You've probably watched agents ping-pong the same task, each replanning because no one knows who owns it.
+
+Escalation Ladder for AI Agents: Managing Uncertainty - LinkedIn
+  URL: https://www.linkedin.com/posts/hamza-rehman-5377a8161_aiagents-automation-systemdesign-activity-7503663681357078528-hrzs
+  The most important behavior in an AI agent is not what it does when everything goes right. It is what it does when the inputs are incomplete ...
+
+(PDF) Agentic AI and Autonomous Decision-Making: A Review of ...
+  URL: https://www.researchgate.net/publication/403947038_Agentic_AI_and_Autonomous_Decision-Making_A_Review_of_Human-in-the-Loop_Frameworks_Oversight_Mechanisms_and_Trust_Calibration
+  # Agentic AI and Autonomous Decision-Making: A Review of Human-in-the-Loop Frameworks, Oversight Mechanisms, and Trust Calibration
+## Abstract and Figures
+configurations can degrade performance below unaided human baselines when trust is miscalibrated (Hemmer

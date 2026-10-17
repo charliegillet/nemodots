@@ -1,0 +1,76 @@
+The Rise of Agent-as-a-Judge Evaluation for LLMs - arXiv
+  URL: https://arxiv.org/html/2508.02994v1
+  # When AIs Judge AIs: The Rise of Agent-as-a-Judge Evaluation for LLMs
+## 6 Limitations of Agent-Based Evaluation
+As noted, if the judge agent shares the same model or training biases as one of the participants, it may favor that side [Chan et al. (2024)](https://arxiv.org/html/2508.02994v1#bib.bib6).
+
+LLM-as-a-Judge: The Ultimate Guide for AI Developers - Comet
+  URL: https://www.comet.com/site/blog/llm-as-a-judge/
+  # LLM-as-a-Judge: How to Build Reliable, Scalable Evaluation for LLM Apps and Agents
+## Known LLM-as-a-Judge Biases and How to Mitigate Them
+### Self-Preference Bias (Self-Enhancement)
+Models tend to rate their own outputs, or outputs from the same model family, higher than outputs from other models. This self-enhancement effect has been documented across several model families and is thought to be related to [perplexity](https://www.comet.com/site/blog/perplexity-for-llm-evaluation/): models find text that matches their own training distribution more “natural” and therefore score it higher.
+
+The official repo for paper, LLMs-as-Judges: A ... - GitHub
+  URL: https://github.com/CSHaitao/Awesome-LLMs-as-Judges
+  # 📖 Cite Our Work
+```
+@misc{li2024llmsasjudgescomprehensivesurveyllmbased,
+      title={LLMs-as-Judges: A Comprehensive Survey on LLM-based Evaluation Methods},
+      author={Haitao Li and Qian Dong and Junjie Chen and Huixue Su and Yujia Zhou and Qingyao Ai and Ziyi Ye and Yiqun Liu},
+      year={2024},
+      eprint={2412.05579},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2412.05579},
+}
+```
+  Category: github
+
+A survey on LLM-as-a-judge - ScienceDirect.com
+  URL: https://www.sciencedirect.com/science/article/pii/S2666675825004564
+  At its core, LLM-as-a-judge denotes the use of LLMs to evaluate objects, actions, or decisions based on predefined rules, criteria, or ...
+
+LLM-as-a-Judge: Guide & Pre-built Evaluators | Arize AI
+  URL: https://arize.com/guides/llm-as-a-judge/
+  LLM-as-a-Judge is an evaluation method that uses a language model to assess AI-generated responses or agent behavior against a defined rubric.
+
+LLM-as-a-Judge Simply Explained: The Complete Guide ... - Confident AI
+  URL: https://www.confident-ai.com/blog/why-llm-as-a-judge-is-the-best-llm-evaluation-method
+  2 days ago · LLM-as-a-Judge is an LLM evaluation method that uses a large language model to automatically score the outputs of another LLM system against a ...
+
+Agent-as-a-Judge | alphaXiv
+  URL: https://www.alphaxiv.org/abs/2601.05111
+  This paper is foundational to the survey as it formalized the "LLM-as-a-Judge" paradigm that the "Agent-as-a-Judge" approach evolves from. The ...
+
+Self-Preference Bias in LLM-as-a-Judge - NeurIPS 2026
+  URL: https://neurips.cc/virtual/2024/106181
+  in
+
+# Self-Preference Bias in LLM-as-a-Judge
+### Abstract
+However, the self-preference bias in LLMs has posed significant risks, including promoting specific styles or policies intrinsic to the LLMs. Our experimental results demonstrate that GPT-4 exhibits a significant degree of self-preference bias. Our findings reveal that LLMs assign significantly higher evaluations to outputs with lower perplexity than human evaluators, regardless of whether the outputs were self-generated. This suggests that the essence of the bias lies in perplexity and that the self-preference bias occurs because the LLMs' own outputs have lower perplexity.
+
+LLM-as-a-Judge Evaluation for LLMs & Agents - MLflow
+  URL: https://mlflow.org/llm-as-a-judge/
+  # LLM-as-a-Judge for LLM and Agent Evaluation
+## How to Implement LLM-as-a-Judge
+```
+from mlflow.genai.judges.optimizers import MemAlignOptimizer
+
+optimizer = MemAlignOptimizer(reflection_lm="openai:/gpt-5")
+
+aligned_judge = my_judge.align(
+    traces=labeled_traces,
+    optimizer=optimizer,
+)
+
+results = mlflow.genai.evaluate(
+    data=eval_data,
+    scorers=[aligned_judge],
+)
+```
+
+LLM-As-Judge: 7 Best Practices & Evaluation Templates
+  URL: https://montecarlo.ai/blog-llm-as-judge/
+  LLM-as-judge is a technique that uses AI to evaluate the fitness of AI outputs. For example, one agent may be prompted to answer customer ...

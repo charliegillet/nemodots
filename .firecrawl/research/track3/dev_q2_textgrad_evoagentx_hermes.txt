@@ -1,0 +1,240 @@
+## [readme:evoagentx/evoagentx] (readme) evoagentx/evoagentx
+https://github.com/evoagentx/evoagentx
+License: NOASSERTION
+## What is EvoAgentX
+It introduces a self-evolving agent ecosystem, where AI agents can be constructed, assessed, and optimized through iterative feedback loops—much like how software is continuously tested and improved.
+
+### 🚀 What You Can Do with EvoAgentX
+- 🔍 **Struggling to improve your workflows?**
+EvoAgentX can **automatically evolve and optimize your agentic workflows** using SOTA self-evolving algorithms, driven by your dataset and goals.
+
+## Evolution Algorithms
+We have integrated some effective agent/workflow evolution algorithms into EvoAgentX:
+
+| **Algorithm** | **Description** | **Link** |
+|-|-|-|
+| **TextGrad** | Gradient-based optimization for LLM prompts and reasoning chains, enabling differentiable planning. | 📄 Nature (2025) |
+Citation: https://raw.githubusercontent.com/evoagentx/evoagentx/HEAD/README.md
+
+## [doc:https://github.com/nousresearch/hermes-agent-self-evolution/blob/0a929e3aa20e15cf04dc7c28492a7d41a5139125/PLAN.md] (doc) Hermes Agent Self-Evolution — Evolutionary Self-Improvement for Hermes Agent
+# Hermes Agent Self-Evolution — Evolutionary Self-Improvement for Hermes Agent
+
+## Vision
+
+A standalone optimization pipeline that systematically improves Hermes Agent's performance by evolving skills, prompts, tool descriptions, and agent configurations using automated optimization loops. Lives in its own repo (`NousResearch/hermes-agent-self-evolution`), operates ON hermes-agent — not part of it.
+
+Three complementary engines, unified under one workflow:
+
+| Engine | What It Optimizes | License | Integration |
+|--------|------------------|---------|-------------|
+| **DSPy + GEPA** | Skills, prompts, instructions, tool descriptions | MIT | Native Python, primary engine |
+| **Darwinian Evolver** | Code files, algorithms, tool implementations | AGPL v3 | External CLI only |
+| **DSPy MIPROv2** | Few-shot examples, instruction text | MIT | Native Python, fallback optimizer |
+
+GEPA is the star — it's integrated into DSPy, reads execution traces to understand WHY things fail (not just that they fail), and works with as few as 3 examples. It outperforms both RL and previous DSPy optimizers.
+
+**Important: No GPU training required.** Everything in this plan operates via API calls only. DSPy+GEPA and MIPROv2 optimize the *text* of prompts, instructions, and few-shot examples — they mutate and evaluate strings, not model weights. The Darwinian Evolver evolves code files (also text). The only DSPy component that trains weights (`BootstrapFinetune`) is explicitly excluded from this plan. All evaluation runs through batch_runner making standard LLM API calls.
+
+---
+
+## What Can Be Improved
+
+### Tier 1: Skill Files (Highest Value, Lowest Risk)
+
+- **What:** SKILL.md files — procedural instructions the agent follows
+- **How:** Wrap skill text as a DSPy module, evaluate on test tasks via batch_runner, evolve with GEPA
+- **Why it works:** Skills are pure text, easily mutated, and directly measurable (did the agent complete the task correctly when following this skill?)
+- **Example:** Evolve the `github-code-review` skill to produce better reviews by testing against a dataset of known-good code reviews
+
+## [doc:https://github.com/evoagentx/evoagentx/blob/d77fd6b9a3e76c8dd83bebe3374c53a3f5d16f54/docs/tutorial/sew_optimizer.md] (doc) SEW Optimizer Tutorial
+License: NOASSERTION
+# SEW Optimizer Tutorial
+
+This tutorial will guide you through the process of setting up and running the SEW (Self-Evolving Workflow) optimizer in EvoAgentX. We'll use the HumanEval benchmark as an example to demonstrate how to optimize a multi-agent workflow.
+
+## 1. Overview
+
+The SEW optimizer is a powerful tool in EvoAgentX that enables you to:
+
+- Automatically optimize multi-agent workflows (prompts and workflow structure)
+- Evaluate optimization results on benchmark datasets
+- Support different workflow representation scheme (Python, Yaml, BPMN, etc.)
+
+## 2. Setting Up the Environment
+
+First, let's import the necessary modules for setting up the SEW optimizer:
+
+```python
+from evoagentx.config import Config
+from evoagentx.models import OpenAILLMConfig, OpenAILLM
+from evoagentx.workflow import SEWWorkFlowGraph
+from evoagentx.agents import AgentManager
+from evoagentx.benchmark import HumanEval
+from evoagentx.evaluators import Evaluator
+from evoagentx.optimizers import SEWOptimizer
+from evoagentx.core.callbacks import suppress_logger_info
+```
+
+### Configure the LLM Model
+
+Similar to other components in EvoAgentX, you'll need a valid OpenAI API key to initialize the LLM.
+
+```python
+llm_config = OpenAILLMConfig(model="gpt-4o-mini", openai_key=OPENAI_API_KEY)
+llm = OpenAILLM(config=llm_config)
+```
+… (38 more lines)
+
+## [doc:https://github.com/killop/anything_about_game/blob/7aad0ee1c08268d47784578a9f41dba9402c48b3/AI.md] (doc) AI
+License: Apache-2.0
+## Hermes-Agent
+- [https://github.com/OnlyTerp/hermes-optimization-guide](https://github.com/OnlyTerp/hermes-optimization-guide)
+- hermes-agent-self-evolution  Evolutionary self-improvement for Hermes Agent  optimize skills, prompts, and code using DSPy + GEPA
+
+## Evolving
+- [https://github.com/EvoAgentX/EvoAgentX](https://github.com/EvoAgentX/EvoAgentX) 构建自进化的 AI 智能体生态系统
+- recursive-improve Make your agents recursively self-improve
+
+## [doc:https://github.com/evoagentx/evoagentx/blob/d77fd6b9a3e76c8dd83bebe3374c53a3f5d16f54/docs/index.md] (doc) **EvoAgentX**
+License: NOASSERTION
+# **EvoAgentX**
+
+  An automated framework for evaluating and evolving agentic workflows.
+
+## What is EvoAgentX
+
+EvoAgentX is an open-source framework for building, evaluating, and evolving LLM-based agents or agentic workflows in an automated, modular, and goal-driven manner.
+
+At its core, EvoAgentX enables developers and researchers to move beyond static prompt chaining or manual workflow orchestration. It introduces a self-evolving agent ecosystem, where AI agents can be constructed, assessed, and optimized through iterative feedback loops—much like how software is continuously tested and improved.
+
+### ✨ Key Features
+
+- 🧱 **Agent Workflow Autoconstruction**
+
+  From a single prompt, EvoAgentX builds structured, multi-agent workflows tailored to the task.
+
+- 🔍 **Built-in Evaluation**
+
+  It integrates automatic evaluators to score agent behavior using task-specific criteria.
+
+- 🔁 **Self-Evolution Engine**
+
+  Agents don’t just work—they learn. EvoAgentX evolves workflows using optimization strategies like retrieval augmentation, mutation, and guided search.
+
+- 🧩 **Plug-and-Play Compatibility**
+
+  Easily integrate original OpenAI and qwen or other popular models, including Claude, Deepseek, kimi models through (LiteLLM, siliconflow or openrouter). If you want to use LLMs locally deployed on your own machine, you can try LiteLLM.
+
+- 🧰 **Comprehensive Built-in Tools**
+
+  EvoAgentX ships with a rich set of built-in tools that empower agents to interact with real-world environments.
+
+- 🧠 **Memory Module**
+… (6 more lines)
+
+## [web:https://medium.com/@pratikabnave97/building-a-self-evolving-ecosystem-of-ai-agents-with-evoagentx-5249f733cb06] Building a Self-Evolving Ecosystem of AI Agents with EvoAgentX - Medium
+EvoAgentX is an automated framework for evaluating and evolving multi-agent workflows. Self-evolution — workflows can optimize themselves over
+
+## [doc:https://github.com/shubhamsaboo/awesome-llm-apps/blob/40b16b66e5257c528059bb93ca9410b55d39278a/advanced_ai_agents/multi_agent_apps/ai_self_evolving_agent/README.md] (doc) 🧬 Self-Evolving AI Agent
+License: Apache-2.0
+# 🧬 Self-Evolving AI Agent
+
+A multi-agent app built on EvoAgentX that turns a
+single natural-language goal into a working program. It **automatically generates a
+multi-agent workflow**, executes it to produce code, then **verifies and repairs** that code
+with a second model — no manual agent wiring required.
+
+The included example takes the goal *"Generate HTML code for a Tetris game that can be played
+in the browser"* and writes a ready-to-play `index.html`.
+
+## ✨ What It Demonstrates
+
+- **Automatic workflow generation** — `WorkFlowGenerator` designs the agents and steps from a plain-English goal.
+- **Multi-agent execution** — `AgentManager` + `WorkFlow` instantiate and run the generated agents.
+- **Cross-model code verification** — generation runs on OpenAI `gpt-4o-mini`; a separate Anthropic Claude pass verifies and fixes the output.
+- **Self-evolving by design** — the workflow is built and refined by the system itself rather than hand-coded.
+
+## 🛠️ How to Get Started
+
+1. **Clone the repository**
+
+   ```bash
+   git clone https://github.com/Shubhamsaboo/awesome-llm-apps.git
+   cd awesome-llm-apps/advanced_ai_agents/multi_agent_apps/ai_self_evolving_agent
+   ```
+
+2. **Install dependencies**
+
+   ```bash
+   pip install -r requirements.txt
+   pip install git+https://github.com/ANative-Lab/EvoAgentX.git
+   ```
+
+3. **Set your API keys**
+
+   ```bash
+   export OPENAI_API_KEY=<your-openai-api-key>
+   export ANTHROPIC_API_KEY=<your-anthropic-api-key>
+   ```
+… (18 more lines)
+
+## [pull_request:evoagentx/evoagentx#22] (pull_request) evoagentx/evoagentx#22
+https://github.com/evoagentx/evoagentx/issues/22
+License: NOASSERTION
+Add textgrad optimizer, a tutorial and an example.
+
+requested a review
+from fangjy6 last yearMay 10, 2025 10:03
+
+ww-6
+
+added 5 commits
+last yearMay 13, 2025 17:09
+
+`
+          Add textgrad optimizer
+`
+
+`
+          9dc3c86
+`
+
+`
+          Add support for CodingBenchmark
+`
+
+`
+          09871f2
+`
+
+`
+          Add benchmarking scripts for textgrad optimizer
+`
+
+`
+          347a943
+`
+
+`
+          Update type hints for check_solution method in CodingBenchmark class
+`
+… (127 more lines)
+
+## [doc:https://github.com/evoagentx/evoagentx/blob/d77fd6b9a3e76c8dd83bebe3374c53a3f5d16f54/docs/tutorial/textgrad_optimizer.md] (doc) TextGrad Optimizer Tutorial
+License: NOASSERTION
+# TextGrad Optimizer Tutorial
+## 1. TextGrad
+In EvoAgentX, we use TextGrad to optimize
+
+## 2. TextGrad Optimizer
+The TextGrad optimizer in EvoAgentX enables you to:
+
+## 3. Setting Up the Environment
+
+## 4. Configuring and Running the TextGrad Optimizer
+
+### Running the Optimization
+We can evaluate the workflow again to see the improvement after optimization.
+
+## [web:https://context7.com/nousresearch/hermes-agent-self-evolution] Hermes Agent Self-Evolution - Context7
+Evolutionary self-improvement system for Hermes Agent that automatically optimizes skills, tool descriptions, system prompts, and code using DSPy and GEPA.

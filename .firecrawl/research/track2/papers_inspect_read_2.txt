@@ -1,0 +1,979 @@
+=== INSPECT: arxiv:2606.15376 (CoAgent: Concurrency Control for MAS) ===
+# CoAgent: Concurrency Control for Multi-Agent Systems
+
+Paper ID: 5724813481057847275
+IDs: arxiv:2606.15376
+Authors: Hongtao Lyu; Dingyan Zhang; Mingyu Wu; Xingda Wei; Haibo Chen
+Categories: cs.DC, cs.AI, cs.MA
+Dates: created 2026-06-13; updated 2026-06-16
+
+## Abstract
+Multi-agent LLM systems -- coding agents, devops agents, document agents -- now routinely run several agents in parallel against the same git tree, Kubernetes cluster, or document. As soon as two of them mutate shared state, they enter the regime classical concurrency control has studied for decades, but classical mechanisms fit LLM agents poorly. A single agent transaction spans minutes of inference, read sets are broad and opaque rather than statically inferable, and the live state agents act on admits neither fork nor buffer, so writes take effect the moment they execute. Locks block long inference intervals; OCC abort-and-retry discards minutes of work on every conflict. This paper builds concurrency control on a capability classical transactions lack: the LLM inside each agent can judge whether a conflicting write invalidates its plan, and can repair exactly the operations that depended on it. Control therefore turns advisory: the runtime informs, the agent repairs. Our protocol, MTPO (Monotonic Trajectory Pre-Order), fixes a serialization order at launch, serves each read the order-filtered value, and applies writes speculatively in place; a one-way notification asks an affected reader to re-judge and patch its plan, while the framework mechanically undoes and reorders misplaced writes through the saga-style inverse each tool registers in advance. At quiescence the run is serializable in the pre-decided order. We realize MTPO as CoAgent, toolcall middleware whose privileged ToolSmith grows footprint-declared, undoable tools online. On ten contended workloads, CoAgent stays within 5% of serial correctness at a 1.4× speedup and near-serial token cost, where 2PL and OCC surrender nearly all concurrency gains; on a bash-only target system, it grows a 25-tool library online and lifts the task pass rate from 45/71 to 63/71 at 0.80× the time and 0.86× the cost.
+What enables a concurrency control beyond lock and abort is the agent itself: an LLM-powered
+agent has three capabilities that classical CC’s transaction model cannot exploit.
+(i) Faced with the broad read sets of
+§ [3.3](https://arxiv.org/html/2606.15376#S3.SS3 "3.3. Performance Gap ‣ 3. The Goal, and the Gap of Classic Concurrency Control ‣ CoAgent: Concurrency Control for Multi-Agent Systems"), the agent can judge whether a conflicting write actually invalidates
+the premises of its plan. Many such writes do not: a peer appending a one-line log entry to
+CLAUDE.md touches an object the agent read but disturbs no premise it relies on.
+Classical CC cannot make this distinction and blocks or aborts either way.
+(ii) On a real conflict, the agent does not need whole-task
+redo: of the operations it just generated, only the few that depended on the now-stale value
+need rewriting, and the LLM can pinpoint them. When Agent B of
+§ [2.2](https://arxiv.org/html/2606.15376#S2.SS2 "2.2. The Multi-Agent Consistency Problem ‣ 2. Background & Motivation ‣ CoAgent: Concurrency Control for Multi-Agent Systems") learns that the repair has replaced
+geo’s image, it need not redo the canary task: only the canary’s image
+field rests on the stale read, and one set\_image repairs it, keeping
+the rest of the deployment unchanged.
+(iii) Even on a live framework with no fork-and-merge
+semantics, the agent can produce an inverse action for almost every external write it
+issues—a saga-style undo generated from the same context as the original
+write (Chang and Geng, [2025](https://arxiv.org/html/2606.15376#bib.bib12 ""))—so writes that took effect immediately can be reconciled after
+the fact. On Kubernetes, a kubectl scale is inverted by scaling
+back to the prior replica count, and a kubectl apply by re-applying
+the manifest it displaced (§ [6.3](https://arxiv.org/html/2606.15376#S6.SS3 "6.3. Undoability: Three-Phase Toolcalls ‣ 6. The Framework ‣ CoAgent: Concurrency Control for Multi-Agent Systems")).
+Capabilities (i) and (ii) make the optimistic posture required by (R1) affordable,
+and capability (iii) makes the in-place writes required by (R2) recoverable.
+Insight. Classical CC, pessimistic or optimistic, is _mandatory_: the runtime
+imposes the remedy for every conflict, by blocking the conflicting operation (2PL) or by
+aborting and retrying the transaction (OCC). It has no alternative, because a classical
+transaction cannot heal itself: application code can neither judge whether a conflict matters
+nor repair its own effects, so the only remedies that work from outside are to delay it or to
+discard it. The three capabilities above are precisely what classical CC lacked: a limited
+but real form of _self-healing_. The agent can dismiss a conflict that invalidates no
+premise (i), regenerate the few operations that a real conflict taints (ii), and undo writes
+that should not have landed (iii). A concurrency control that exploits self-healing must
+therefore be _advisory_ rather than mandatory: the runtime only informs the affected
+agent that a conflict may exist, and the remedy is delegated to the agent itself. The
+mechanism that carries the advice is notification: it replaces the lock and the
+abort as the load-bearing primitive.
+### 4.2. Overview: Our Approach
+
+The insight translates into an optimistic execution discipline; § [5](https://arxiv.org/html/2606.15376#S5 "5. Detailed Design: the Protocol ‣ CoAgent: Concurrency Control for Multi-Agent Systems")
+develops it into a protocol with a serializability proof, and § [6](https://arxiv.org/html/2606.15376#S6 "6. The Framework ‣ CoAgent: Concurrency Control for Multi-Agent Systems") into a
+framework.
+The framework fixes a serial order over the
+agents at launch and tracks each toolcall’s declared read/write footprint.
+Every read is _filtered_ (§ [5.3](https://arxiv.org/html/2606.15376#S5.SS3 "5.3. Our Protocol: Monotonic Trajectory Pre-Order ‣ 5.
+---
+A failed validation triggers a full re-execution—all
+prior LLM inference, all prior tool calls, and all intermediate artifacts are thrown away. OCC
+was designed for cheap transactions where redo is cheap; neither premise holds for agents.
+Broad read sets. A third factor amplifies the previous two. LLM agents read aggressively:
+they grep entire repositories, list whole namespaces, fetch surrounding context, so the read set is
+broad. Under 2PL the locked-object set explodes; under OCC the validated-object set explodes; in
+both cases the failure probability rises with the read-set size.
+The three factors together turn the agent-CC trade-off sharply against classical protocols.
+In our benchmarks under contention, 2PL deadlocks fire at 0.81 per trial
+and its mean speedup over serial execution degrades to 1.04×\\times; OCC
+aborts at 0.95 per trial, falls below serial speed (0.93×\\times), and pays
+1.83×\\times token cost on retries (§ [7.2](https://arxiv.org/html/2606.15376#S7.SS2 "7.2. End-to-End Results ‣ 7. Evaluation ‣ CoAgent: Concurrency Control for Multi-Agent Systems")).
+### 3.4. Functionality Gap
+
+Live state cannot be forked and merged. Most classical concurrency-control protocols
+reach serializability by keeping an in-progress transaction’s writes separable from the
+published state—either by staging writes in a private buffer and installing them at
+commit (OCC, snapshot isolation, Spanner (Corbett et al., [2013](https://arxiv.org/html/2606.15376#bib.bib15 ""))), or by writing in place
+and rolling them back on abort (2PL during deadlock recovery). Both routes assume the
+framework offers fork-and-merge semantics: an uncommitted write can be installed into
+the shared state at commit, or rolled back out of it on abort. OCC’s commit path needs install
+(its abort path is cheap—the buffer was never published, so the framework merely discards
+it); 2PL’s abort path needs rollback (writes have already gone live, so the framework must
+undo them). Either way the framework must support at least one of these two state-manipulation
+operations.
+For many agentic workloads this precondition does not hold: the framework offers no
+fork-and-merge semantics, so neither OCC’s install nor 2PL’s rollback is implementable. Take
+the operations setting of § [2.2](https://arxiv.org/html/2606.15376#S2.SS2 "2.2. The Multi-Agent Consistency Problem ‣ 2. Background & Motivation ‣ CoAgent: Concurrency Control for Multi-Agent Systems"): a Kubernetes cluster under
+debugging is a single live system behind a unique URL—it cannot be meaningfully forked, and
+“installing a buffered deployment into a running cluster” or “rolling back a deployed
+process that has already had side effects” cannot even be defined: side effects are not
+reversible by the framework alone. The same applies to production databases with direct
+writes, third-party APIs with side effects, and any other live framework: each is a single
+live system whose fork and merge are not part of the contract.
+The two gaps push toward two requirements on any agentic CC protocol. (R1) Optimistic:
+neither pessimistic blocking nor whole-task retry is affordable (§ [3.3](https://arxiv.org/html/2606.15376#S3.SS3 "3.3. Performance Gap ‣ 3. The Goal, and the Gap of Classic Concurrency Control ‣ CoAgent: Concurrency Control for Multi-Agent Systems")).
+(R2) Writes take effect immediately: live state offers no private buffer or fork
+(§ [3.4](https://arxiv.org/html/2606.15376#S3.SS4 "3.4. Functionality Gap ‣ 3. The Goal, and the Gap of Classic Concurrency Control ‣ CoAgent: Concurrency Control for Multi-Agent Systems")). § [4](https://arxiv.org/html/2606.15376#S4 "4. Insights and Our Approach ‣ CoAgent: Concurrency Control for Multi-Agent Systems") shows how agent capabilities make both
+realizable, and what mechanism does the reconciliation.
+## 4\. Insights and Our Approach
+
+### 4.1. Notify, Do Not Lock or Abort
+---
+Five protocols on ten contended cells: correctness, speedup, token cost, and Pareto front, all normalized to serial.
+Figure [5](https://arxiv.org/html/2606.15376#S7.F5 "Figure 5 ‣ 7.2. End-to-End Results ‣ 7. Evaluation ‣ CoAgent: Concurrency Control for Multi-Agent Systems") reports the five protocols on the ten cells across four panels: correctness, speedup over serial, token cost over serial, and the cost-versus-speedup Pareto front.
+Serial and naive. Serial is the cost and correctness optimum: the model spends no attention on coordination and no tokens reasoning about other agents.
+Naive is the wall-clock floor; it ignores every dependency and runs the two tasks in parallel.
+The achieved speedup sits around 1.5×1.5\\times rather than 2×2\\times because per-task latency varies, and a pair’s wall-clock is bounded by the slower task.
+Naive’s token cost stays near serial (neither agent does extra reasoning), but on these contended cells its correctness collapses, as expected of a protocol with no coordination at all.
+2PL and OCC. Both lift correctness sharply but recover almost no speedup over serial, and add substantial token cost.
+Trace analysis shows why.
+Under 2PL, deadlocks fire at a rate of 0.810.81 per trial: the victim’s progress is reversed and re-driven, collapsing the run back to serial-like latency.
+The cause is structural: agents read broadly at start-up and take many shared read locks; the moment either tries to upgrade to a write lock the other holds, the cycle closes.
+OCC fares worse: abort rate 0.950.95 per trial, mean token cost 1.83×1.83\\times serial, peaking at 2.33×2.33\\times on the worst case, each abort billing the discarded work a second time.
+This is the classical heavy-contention regime where pessimistic locking edges optimistic out; agent workloads, with their read amplification (§ [3.3](https://arxiv.org/html/2606.15376#S3.SS3 "3.3. Performance Gap ‣ 3. The Goal, and the Gap of Classic Concurrency Control ‣ CoAgent: Concurrency Control for Multi-Agent Systems")), sit firmly in that regime.
+MTPO MTPO clears every cell at a correctness, wall-clock, and cost point materially better than 2PL and OCC.
+The pre-order rules out 2PL deadlock and OCC livelock by construction (§ [5.3](https://arxiv.org/html/2606.15376#S5.SS3 "5.3. Our Protocol: Monotonic Trajectory Pre-Order ‣ 5. Detailed Design: the Protocol ‣ CoAgent: Concurrency Control for Multi-Agent Systems")): notifications travel only low-to-high, the dependency graph is a σ\\sigma-monotone DAG, and no two agents can wait on each other.
+Notification then preserves work that the conflict does not actually invalidate: a notified reader rewrites only the affected fragment of its plan (§ [4.1](https://arxiv.org/html/2606.15376#S4.SS1 "4.1. Notify, Do Not Lock or Abort ‣ 4. Insights and Our Approach ‣ CoAgent: Concurrency Control for Multi-Agent Systems")), and semantically benign syntactic conflicts pass without disturbing the LLM (§ [4.1](https://arxiv.org/html/2606.15376#S4.SS1 "4.1. Notify, Do Not Lock or Abort ‣ 4. Insights and Our Approach ‣ CoAgent: Concurrency Control for Multi-Agent Systems")).
+Both effects show up in token cost, which sits within noise of serial.
+Correctness is ≈5%\\approx 5\\% below serial: in five of one hundred trials the notification was delivered but the receiver misjudged its relevance to its own task.
+This residual is an A3 (self-healing) gap (§ [5.1](https://arxiv.org/html/2606.15376#S5.SS1 "5.1. System Model and Correctness ‣ 5. Detailed Design: the Protocol ‣ CoAgent: Concurrency Control for Multi-Agent Systems")), independent of the protocol; we expect it to shrink with stronger frontier models or targeted finetuning, and leave that to future work.
+### 7.3. Case Study
+
+![Refer to caption](https://arxiv.org/html/2606.15376v1/x2.png)Figure 6. The same contended cell under four protocols.
+---
+Based on this insight, we propose CoAgent (CoAgent),
+an optimistic concurrency-control framework for multi-agent systems.
+CoAgent builds on optimism to unleash concurrent execution:
+agents execute without being blocked by concurrent agents.
+To detect and fix anomalies during execution,
+we propose a notification mechanism that
+notifies each agent of concurrent actions that may break its isolation.
+The notified agent judges whether the change invalidates its premises
+and patches only the affected actions;
+writes that landed in the wrong order are undone and reapplied by the framework itself,
+using the inverses those writes registered.
+CoAgent guarantees serializability as long as agents follow the protocol’s mechanical rules and,
+when notified, correctly judge which of their premises and pending actions the conflicting write affects;
+§ [5.1](https://arxiv.org/html/2606.15376#S5.SS1 "5.1. System Model and Correctness ‣ 5. Detailed Design: the Protocol ‣ CoAgent: Concurrency Control for Multi-Agent Systems") states both as explicit assumptions of our formal model.
+These tasks are simple for frontier LLMs:
+even on a budget-friendly model (DeepSeek v4 flash),
+our evaluation observed a notified agent misjudging a notification’s relevance in only 5% of trials (§ [7](https://arxiv.org/html/2606.15376#S7 "7. Evaluation ‣ CoAgent: Concurrency Control for Multi-Agent Systems")).
+By keeping execution concurrent and recovery selective,
+CoAgent also significantly improves both efficiency and functionality on multi-agent workloads
+compared with existing concurrency control approaches: it passes all ten
+contended workloads with correctness within 5% of serial execution, at a
+1.4×\\times speedup and near-serial token cost (1.15×\\times).
+Under the same contention, 2PL deadlocks 0.81 times per trial and recovers
+almost no speedup (1.04×\\times), while OCC aborts 0.95 times per trial, runs
+slower than serial (0.93×\\times), and pays 1.83×\\times token cost;
+uncoordinated execution is fast but passes only 13% of trials.
+Beyond the contended workloads, on a target system exposing only bash
+and no tool table, CoAgent grows a 25-tool library online and lifts the
+task pass rate from 45/71 to 63/71, at 0.80×\\times the time and
+0.86×\\times the cost of the bash baseline
+(§ [7.4](https://arxiv.org/html/2606.15376#S7.SS4 "7.4. Growing the Tool Table Online ‣ 7. Evaluation ‣ CoAgent: Concurrency Control for Multi-Agent Systems")).
+## 2\. Background & Motivation
+
+### 2.1. Background: LLM-powered Multi-Agent Systems
+
+The classical literature defines an agent as a software entity that perceives an environment through
+observations, deliberates over those observations against some goal, and acts back on the
+environment (Wooldridge, [2009](https://arxiv.org/html/2606.15376#bib.bib50 ""); Russell and Norvig, [2021](https://arxiv.org/html/2606.15376#bib.bib43 "")). Modern LLM-powered agent
+systems instantiate this abstraction by using a large language model (LLM) as the deliberation
+engine and explicit tool calls for observations and actions. This long-running, tool-centric
+architecture has emerged as the dominant implementation pattern for contemporary coding and workflow
+agents (Yao et al., [2023](https://arxiv.org/html/2606.15376#bib.bib53 ""); Yang et al., [2024](https://arxiv.org/html/2606.15376#bib.bib52 ""); Anthropic, [2025](https://arxiv.org/html/2606.15376#bib.bib3 "")). The execution model of such agents is characterized
+by three key properties:
+
+Append-only context. Each agent maintains a private _context_ for the current
+session—system prompts, user instructions, tool calls, execution results, and model outputs.
+The context is designed as an append-only structure, where
+every LLM inference step appends new contents to the existing history.
+=== INSPECT: arxiv:2510.10585 (D3MAS) ===
+# D3MAS: Decompose, Deduce, and Distribute for Enhanced Knowledge Sharing in Multi-Agent Systems
+
+Paper ID: 4633234187835375512
+IDs: arxiv:2510.10585
+Authors: Heng Zhang; Yuling Shi; Xiaodong Gu; Haochen You; Zijian Zhang; Lubin Gan; Yilei Yuan; Jin Huang
+Categories: cs.GR
+Dates: created Sun, 12 Oct 2025 13:01:41 GMT; updated 2026-02-27
+
+## Abstract
+Multi-agent systems powered by large language models exhibit strong capabilities in collaborative problem-solving. However, these systems suffer from substantial knowledge redundancy. Agents duplicate efforts in retrieval and reasoning processes. This inefficiency stems from a deeper issue: current architectures lack mechanisms to ensure agents share minimal sufficient information at each operational stage. Empirical analysis reveals an average knowledge duplication rate of 47.3% across agent communications. We propose D3MAS (Decompose, Deduce, and Distribute), a hierarchical coordination framework addressing redundancy through structural design rather than explicit optimization. The framework organizes collaboration across three coordinated layers. Task decomposition filters irrelevant sub-problems early. Collaborative reasoning captures complementary inference paths across agents. Distributed memory provides access to non-redundant knowledge. These layers coordinate through structured message passing in a unified heterogeneous graph. This cross-layer alignment ensures information remains aligned with actual task needs. Experiments on four challenging datasets show that D3MAS consistently improves reasoning accuracy by 8.7% to 15.6% and reduces knowledge redundancy by 46% on average.
+When operational layers function in isolation, task decomposition generates sub-problems without considering the reasoning context needed to solve them. Similarly, reasoning processes frequently revisit redundant inference paths due to a lack of visibility into task dependencies. Memory retrieval further exacerbates these inefficiencies by returning overlapping or irrelevant knowledge, as it lacks alignment with active reasoning requirements. Without mechanisms to systematically filter and align information, fragmented designs lead to duplication and misaligned operations, compounding inefficiencies throughout the system. These issues highlight the need for a unified framework that optimizes information flow between components, reducing redundancy while preserving coordination across all stages of collaborative reasoning.
+Report issue for preceding element
+
+The core challenge in overcoming these inefficiencies lies in achieving integration across task planning, reasoning, and memory retrieval. Effective multi-agent collaboration requires a systematic approach to align these layers so that information processing at one stage is informed by and supports the needs of others. From an information-theoretic perspective, this integration must aim to jointly optimize information utility and redundancy, ensuring that each layer exchanges only the essential knowledge necessary for task completion. Task planning should produce sub-problems that are context-aware and aligned with reasoning objectives. Reasoning processes must prioritize inference paths that avoid duplication while leveraging dependencies from task context. Memory retrieval should focus on filling knowledge gaps directly relevant to active problem-solving rather than returning overlapping or unrelated results. Existing architectures, which often treat these layers as disconnected modules, fail to establish such alignment, resulting in recurring inefficiencies. A unified framework that systematically connects these processes can reduce redundancy, promote efficient information flow, and enable agents to synchronize actions under complex and asynchronous conditions.
+Report issue for preceding element
+
+To address these challenges, we introduce D³MAS, a hierarchical coordination framework that integrates previously fragmented processes into a unified structure. The framework organizes agent interactions through a heterogeneous graph comprising three coordinated layers for task planning, reasoning execution, and memory retrieval. The task layer decomposes complex queries into minimal sub-problems aligned with reasoning objectives. The reasoning layer prioritizes complementary inference paths across agents to eliminate redundant operations. The memory layer provides access to task-relevant knowledge while filtering overlapping retrievals. These layers coordinate through structured message passing, enabling bidirectional information flow where task requirements guide reasoning and memory access while reasoning feedback refines task decomposition. This cross-layer alignment systematically reduces redundancy and ensures agents operate on information tailored to actual task needs. Instead of explicitly optimizing information-theoretic objectives, D³MAS realizes minimal sufficient information sharing through structural design. Our contributions are summarized as follows:
+
+Report issue for preceding element
+
+- •
+
+We identify a critical limitation in existing multi-agent systems caused by the lack of hierarchical coordination, which leads to severe knowledge redundancy in agent communications. Our analysis demonstrates a duplication rate of 47.3%, highlighting the urgent need for effective solutions.
+Report issue for preceding element
+
+- •
+
+We propose D³MAS, a novel unified framework for multi-agent collaboration based on a heterogeneous graph architecture with explicit dependency modeling.
+---
+\\setcopyright
+
+ifaamas
+\\acmConference\[AAMAS ’26\]Proc. of the 25th International Conference
+on Autonomous Agents and Multiagent Systems (AAMAS 2026)May 25 – 29, 2026
+Paphos, CyprusC. Amato, L. Dennis, V. Mascardi, J. Thangarajah (eds.)
+\\copyrightyear2026
+\\acmYear2026
+\\acmDOI\\acmPrice\\acmISBN\\affiliation\\institutionSouth China Normal University
+\\countryChina\\affiliation\\institutionShanghai Jiao Tong University
+\\countryChina\\affiliation\\institutionShanghai Jiao Tong University
+\\countryChina\\affiliation\\institutionColumbia University
+\\countryUSA\\affiliation\\institutionUniversity of Pennsylvania
+\\countryUSA\\affiliation\\institutionUniversity of Science and Technology of China
+\\countryChina\\affiliation\\institutionUniversity of Michigan
+\\countryUSA\\authornoteCorresponding author.
+\\affiliation\\institutionSouth China Normal University
+\\countryChina
+
+Report issue for preceding element
+
+# D3​MAS\\text{D}^{3}\\text{MAS}: Decompose, Deduce, and Distribute for Enhanced Knowledge Sharing in Multi-Agent Systems
+
+Report issue for preceding element
+
+Heng Zhang
+[2024025450@m.scnu.edu.cn](https://arxiv.org/html/2510.10585v3/mailto:2024025450@m.scnu.edu.cn), Yuling Shi
+[yuling.shi@sjtu.edu.cn](https://arxiv.org/html/2510.10585v3/mailto:yuling.shi@sjtu.edu.cn), Xiaodong Gu
+[xiaodong.gu@sjtu.edu.cn](https://arxiv.org/html/2510.10585v3/mailto:xiaodong.gu@sjtu.edu.cn), Haochen You
+[hy2854@columbia.edu](https://arxiv.org/html/2510.10585v3/mailto:hy2854@columbia.edu), Zijian Zhang
+[zzjharry@alumni.upenn.edu](https://arxiv.org/html/2510.10585v3/mailto:zzjharry@alumni.upenn.edu), Lubin Gan
+[ganlubin@mail.ustc.edu.cn](https://arxiv.org/html/2510.10585v3/mailto:ganlubin@mail.ustc.edu.cn), Yilei Yuan
+[yiliey@umich.edu](https://arxiv.org/html/2510.10585v3/mailto:yiliey@umich.edu) and Jin Huang
+[huangjin@m.scnu.edu.cn](https://arxiv.org/html/2510.10585v3/mailto:huangjin@m.scnu.edu.cn)
+
+Report issue for preceding element
+
+###### Abstract.
+Report issue for preceding element
+
+Multi-agent systems powered by large language models exhibit strong capabilities in collaborative problem-solving. However, these systems suffer from substantial knowledge redundancy. Agents duplicate efforts in retrieval and reasoning processes. This inefficiency stems from a deeper issue: current architectures lack mechanisms to ensure agents share minimal sufficient information at each operational stage. Empirical analysis reveals an average knowledge duplication rate of 47.3% across agent communications. We propose D³MAS (Decompose, Deduce, and Distribute), a hierarchical coordination framework addressing redundancy through structural design rather than explicit optimization. The framework organizes collaboration across three coordinated layers. Task decomposition filters irrelevant sub-problems early. Collaborative reasoning captures complementary inference paths across agents. Distributed memory provides access to non-redundant knowledge. These layers coordinate through structured message passing in a unified heterogeneous graph. This cross-layer alignment ensures information remains aligned with actual task needs. Experiments on four challenging datasets show that D³MAS consistently improves reasoning accuracy by 8.7% to 15.6% and reduces knowledge redundancy by 46% on average.
+Report issue for preceding element
+
+###### Key words and phrases:
+
+Report issue for preceding elementMulti-agent Systems, Multi-agent Reasoning, Graph-based Learning, Knowledge Sharing, Collaborative Inference
+
+## 1\. Introduction
+
+Report issue for preceding element
+
+Large language models (LLMs) have transformed artificial intelligence by integrating vast knowledge into coherent understanding and generationruan2024observational; kaplan2020scaling. These advancements are driven by scaling models, datasets, and computational resourceskaplan2020scaling; muennighoff2024scaling, leading to notable performance gainswei2022emergent; schaeffer2024emergent.
+---
+However, LLMs face difficulties in reasoning, particularly for complex tasks that go beyond textual comprehension aloneschick2023toolformer; valmeekam2022large. To address these limitations, recent efforts have equipped LLMs with external toolsschick2023toolformer; qin2024toolllm, memory systemspark2023generative; hua2023war, and planning capabilitieswang2023plan; zelikman2024star, allowing them to function as autonomous agentsshinn2024reflexion. Multi-agent systems emerge naturally from this approachchen2024agentverse, enabling multiple agents to collaboratively tackle intricate tasks in shared environments through joint reasoning. By combining the expertise of diverse agents, such systems enable iterative problem-solving and more refined decision-making. The effectiveness of such collaboration hinges on how information flows among agents.
+Report issue for preceding element
+
+![Refer to caption](https://arxiv.org/html/2510.10585v3/d3mas_intro.png)Figure 1. Redundancy Breakdown by Coordination Method.
+We measure three types of redundancy across coordination methods.
+Memory redundancy represents the percentage of knowledge items retrieved
+by multiple agents. Reasoning redundancy quantifies semantically similar
+inference steps with cosine similarity exceeding 0.85. Task redundancy
+captures the percentage of overlapping sub-task assignments among agents.
+Stacked bars display total redundancy rate on the left vertical axis.
+Separate bars indicate computational efficiency gains relative to MetaGPT
+baseline on the right vertical axis. D³MAS reduces redundancy by 46% on
+average through cross-layer coordination. Results are averaged over
+HotpotQA and MMLU datasets with 4 to 8 agents per query.Report issue for preceding element
+
+To enable effective information flow, researchers have proposed diverse strategies. Interaction-driven methodschan2024chateval; du2023improving guide structured discussions, helping agents refine their ideas through mutual critique and collaborative iterationliang2024encouraging. Conversation-based frameworkshong2024metagpt adaptively decompose complex tasks into manageable parts through ongoing dialogues, enabling agents to tackle problems incrementallyxie2024travelplanner. Role assignment strategieshong2024metagpt; wang2024promptagent improve efficiency by distributing focused responsibilities, allowing agents to specialize in specific aspects of a taskqiao2024autoact. Messaging frameworkswu2023autogen; gao2024agentscope facilitate direct information exchange during collaboration, while shared knowledge poolsgao2024memory provide a centralized resource to address information gaps among agents. Memory-augmented systemspark2023generative; zhong2024memorybank support reasoning by organizing collaborative histories and maintaining continuity across interactionspacker2023memgpt. Despite their contributions, these approaches often lead to inefficienciesdu2023improving; xiong2024examining. Agents frequently overlap in knowledge retrieval, duplicate reasoning, and misalign task divisions, leading to wasted resources and weaker collaborationli2024more; tran2025multiagent. Balancing redundancy reduction with maintaining shared knowledge depth is essential for enhancing accuracy and efficiencybo2024reflective; zhang2024survey.
+Report issue for preceding element
+
+The inefficiencies in existing multi-agent systems originate from their fragmented design, where task coordination, reasoning execution, and memory retrieval are treated as independent components. This separation disrupts the synchronization of actions across problem-solving stages, as decisions made by one layer often lack context from the others. Viewed through the lens of information theory, this fragmentation disrupts the efficient and purposeful flow of knowledge required for collaboration. Effective collaboration requires ensuring that the information exchanged between agents and across layers remains minimal yet sufficient to achieve the task objectives.
+---
+This robust framework provides detailed understanding of both answer quality and reasoning effectiveness.
+Report issue for preceding element
+
+![Refer to caption](https://arxiv.org/html/2510.10585v3/d3mas_hyp.png)Figure 4. Hyperparameter sensitivity analysis on MMLU and HumanEval. Optimal configurations: k=5 for top-k retrieval, (θ\\theta)=0.65 for similarity threshold, 6 agents for scalability, and d=512 for embedding dimension.Report issue for preceding element![Refer to caption](https://arxiv.org/html/2510.10585v3/d3mas_hyp1.png)Figure 5. Impact of message passing iterations on reasoning accuracy and knowledge redundancy. Optimal performance occurs at L=3-5, balancing information propagation with computational efficiency.Report issue for preceding element![Refer to caption](https://arxiv.org/html/2510.10585v3/d3mas_robust.png)Figure 6. Robustness under noisy memory and agent failures. D³MAS maintains 80% accuracy through distributed memory and dependency-aware reasoning, while baselines degrade to 45%.Report issue for preceding element
+
+### 5.4. Implementation Details
+
+Report issue for preceding element
+
+To ensure fairness, all models use GPT-4 as the language generator. Text embeddings for retrieval are computed using BGE-M3. Task decomposition in Layer 0 employs GPT-4 to break down complex queries into manageable sub-problems until they can be independently handled by agents. For reasoning, agents generate inference steps using their assigned models with contextual input from task definitions and retrieved memory. The memory layer stores distributed domain-specific knowledge graphs, with retrieval thresholds set to 0.65 and top-5 nodes selected for query responses. Hierarchical message passing runs for a maximum of 10 iterations or until convergence. Agent assignment relies on cosine similarity between task embeddings and agent profiles, with agent counts ranging from 4 to 8 based on task complexity. Experiments are performed five times for each configuration, with average performance and standard deviations reported. Hyperparameters include embedding dimension d=512d=512, message passing layers L=3L=3, and tuned attention coefficients. All model inferences utilize commercial APIs, ensuring consistency across methods while demonstrating effective hierarchical coordination in D³MAS.
+Report issue for preceding element
+
+### 5.5. Main Results
+
+Report issue for preceding element
+
+Table [1](https://arxiv.org/html/2510.10585#S4.T1 "Table 1 ‣ 4.5. Hierarchical Message Passing ‣ 4. Methodology ‣ \"D\"³⁢\"MAS\": Decompose, Deduce, and Distribute for Enhanced Knowledge Sharing in Multi-Agent Systems") shows D³MAS consistently outperforms all baselines across four benchmarks with 8.7% to 15.6% improvements over MACNET. D³MAS achieves 85.3% on MMLU versus 68.8%, 89.8% on HumanEval versus 72.6%, 86.2% on SRDD versus 80.5%, and 76.8% on CommonGen versus 68.9%. These gains over both single-agent methods like CoT and multi-agent approaches including AutoGen validate hierarchical coordination effectiveness. Figure [3](https://arxiv.org/html/2510.10585#S4.F3 "Figure 3 ‣ 4.5. Hierarchical Message Passing ‣ 4. Methodology ‣ \"D\"³⁢\"MAS\": Decompose, Deduce, and Distribute for Enhanced Knowledge Sharing in Multi-Agent Systems") demonstrates consistent improvements across eight LLMs with strongest gains in Judge, Reason, and Coord metrics.
+Report issue for preceding element
+
+### 5.6. Model Analysis
+
+Report issue for preceding element
+
+Figure [3](https://arxiv.org/html/2510.10585#S4.F3 "Figure 3 ‣ 4.5. Hierarchical Message Passing ‣ 4. Methodology ‣ \"D\"³⁢\"MAS\": Decompose, Deduce, and Distribute for Enhanced Knowledge Sharing in Multi-Agent Systems") shows D³MAS-enhanced agents outperform vanilla agents across all evaluation dimensions with 15% to 35% average improvements.
+=== INSPECT: arxiv:2508.04903 (RCR-Router) ===
+# RCR-Router: Efficient Role-Aware Context Routing for Multi-Agent LLM Systems with Structured Memory
+
+Paper ID: 5439996249877101968
+IDs: arxiv:2508.04903
+Authors: Jun Liu; Zhenglun Kong; Changdi Yang; Fan Yang; Tianqi Li; Peiyan Dong; Joannah Nanjekye; Hao Tang; Geng Yuan; Wei Niu; Wenbin Zhang; Pu Zhao; Xue Lin; Dong Huang; Yanzhi Wang
+Categories: cs.CL, cs.AI, cs.MA
+Dates: created 2026-10-12; updated 2026-10-14
+
+## Abstract
+Large language model (LLM) agents are increasingly organized into multi-agent systems for complex reasoning and decision-making tasks. However, scaling such systems can substantially increase inference cost, especially when multiple agents repeatedly process overlapping or role-irrelevant context. Many existing multi-agent frameworks focus on orchestration and role specialization, but still rely on full-context sharing or static context routing, leading to redundant token consumption, increased runtime, and inefficient memory utilization. We present Role-Conditioned Context Routing (RCR), an execution-time layer that allocates role-relevant shared-memory items to agents under token budgets. Given a structured shared memory and a set of role-specialized agents, RCR selectively routes task-relevant memory items to each agent according to its role, optional task-stage metadata, and token budget. RCR integrates role-conditioned relevance scoring, token-budgeted memory selection, and iterative memory updates to reduce redundant context exposure during multi-agent execution. Experiments on multi-hop QA, embodied reasoning (ALFWorld), and web-based decision-making (WebShop) show that RCR reduces token usage by 35% on average and runtime by 38% on average relative to Full-Context, while maintaining or improving task performance.
+‣ RCR-router: Role-Aware Context Routing with Semantic Abstraction ‣ The Proposed Method ‣ RCR-Router: Efficient Role-Aware Context Routing for Multi-Agent LLM Systems with Structured Memory") illustrates the overall architecture of RCR-router. The system operates on a Shared Memory Store MM, which encodes historical agent interactions, external knowledge, and task-relevant entities in structured formats such as YAML, graphs, or tables. This abstraction facilitates efficient memory indexing and semantic filtering.
+At each interaction round, the RCR-router Core processes the shared memory and computes agent-specific contexts through three key components:
+
+- •
+
+Token Budget Allocator assigns a token budget BiB\_{i} to each agent AiA\_{i} based on its role and task priority.
+- •
+
+Importance Scorer computes an importance score α⁡(m,Ri,St)\\alpha(m;R\_{i},S\_{t}) for each memory item mm given agent role RiR\_{i} and task stage StS\_{t}.
+- •
+
+Semantic Filter and Routing select a subset of memory items to construct the agent’s prompt context, subject to the token budget constraint.
+The filtered and role-relevant context is then routed to each agent’s input prompt. Agents subsequently issue LLM queries based on their received context, enabling collaborative reasoning and decision making.
+This architecture supports both heuristic-based and learned routing policies, allowing flexibility in balancing performance and efficiency. In Section Experiment, we empirically demonstrate that RCR-router substantially reduces token consumption while maintaining or improving multi-agent task success rates across several benchmarks.
+##### RCR-Router Core.
+Multi-agent LLM systems require role-specific access to shared memory under context constraints.
+RCR-router
+addresses this by routing token-efficient, role-aware subsets to each agent, formalized as the routing policy πroute\\pi\_{\\text{route}}:
+
+|     |     |     |     |     |
+| --- | --- | --- | --- | --- |
+|  | πroute​(Cti∣Ri,St,Mt)=\\displaystyle\\pi\_{\\text{route}}(C\_{t}^{i}\\mid R\_{i},S\_{t},M\_{t})= | arg⁡max⁡∑m∈C′C′⊆Mt⁡α⁡(m,Ri,St)\\displaystyle\\arg\\max\_{C^{\\prime}\\subseteq M\_{t}}\\sum\_{m\\in C^{\\prime}}\\alpha(m;R\_{i},S\_{t}) |  | (3) |
+|  |  | s.t.∑m∈C′TokenLength​(m)≤Bi\\displaystyle\\text{s.t.}\\quad\\sum\_{m\\in C^{\\prime}}\\text{TokenLength}(m)\\leq B\_{i} |  |
+
+where α⁡(m,Ri,St)\\alpha(m;R\_{i},S\_{t}) denotes an importance score assessing the relevance of memory item mm to agent AiA\_{i}’s role and the current task stage.
+The RCR-router introduces an importance-based structured context routing policy that assigns role-relevant and token-efficient memory context to each agent at each interaction round, without exceeding agent-specific context budgets. This mechanism consists of three modular components: Token Budget Allocator, Importance Scorer, and Semantic Filter with Routing Logic.
+Algorithm 1 RCR-router Context Routing Mechanism
+
+1:Input: Shared Memory Store MM, Agent Role RiR\_{i}, Task Stage StS\_{t}, Token Budget BiB\_{i}
+
+2:Output: Selected Context CtiC\_{t}^{i} for Agent AiA\_{i}
+
+3:Cti←∅C\_{t}^{i}\\leftarrow\\emptyset⊳\\triangleright Initialize empty context
+
+4:𝑡𝑜𝑡𝑎𝑙​\_​𝑡𝑜𝑘𝑒𝑛𝑠←0\\mathit{total\\\_tokens}\\leftarrow 0⊳\\triangleright Initialize token counter
+
+5:// Compute importance scores for all memory items
+
+6:for each memory item m∈Mm\\in Mdo
+
+7:α⁡(m,Ri,St)←ImportanceScore⁡(m,Ri,St)\\alpha(m;R\_{i},S\_{t})\\leftarrow\\mathrm{ImportanceScore}(m,R\_{i},S\_{t})
+
+8:endfor
+
+9:// Sort memory items by importance score
+
+10:M𝑠𝑜𝑟𝑡𝑒𝑑←Sort⁡(M,descending by ​α)M\_{\\mathit{sorted}}\\leftarrow\\mathrm{Sort}(M,\\text{descending by }\\alpha)
+
+11:// Select memory items within token budget
+
+12:for each m∈M𝑠𝑜𝑟𝑡𝑒𝑑m\\in M\_{\\mathit{sorted}}do
+---
+2022](https://arxiv.org/html/2508.04903#bib.bib45 "")), 2wikimultihop ( [Ho et al. 2020](https://arxiv.org/html/2508.04903#bib.bib14 ""))), demonstrating that RCR-router reduces token consumption by 25–47% across benchmarks without compromising performance.
+Our results highlight that efficient and adaptive context management is essential for scaling multi-agent LLM systems, and that semantic-aware routing offers a principled and practical solution to this emerging challenge.
+## The Proposed Method
+
+### Problem Formulation
+
+We consider a multi-agent LLM system composed of NN collaborative agents 𝒜={A1,A2,…,AN}\\mathcal{A}=\\{A\_{1},A\_{2},\\dots,A\_{N}\\} interacting over a shared task. Each agent AiA\_{i} operates with a specific roleRiR\_{i} (e.g., Planner, Searcher, Recommender) and interacts with other agents and external tools in discrete interaction roundst=1,2,…,Tt=1,2,\\dots,T.
+At each round tt, agents exchange messages and perform reasoning based on a Shared Memory Store MtM\_{t}, which contains:
+
+- •
+
+Agent interaction history: prior communication between agents;
+
+- •
+
+Task-relevant knowledge: external facts, retrieved documents, or tool outputs;
+
+- •
+
+Structured state representations: entities, plans, and tool traces encoded in structured formats (YAML, graphs, tables).
+Each agent AiA\_{i} receives as input a routed contextCti⊆MtC\_{t}^{i}\\subseteq M\_{t}, which is selected by a centralized RCR-router according to the agent’s role RiR\_{i}; the current task stage StS\_{t};
+and a token budget BiB\_{i} allocated to the agent.
+Our framework supports a broader set of roles to address various task requirements; see the detailed example in Appendix D. Each agent AiA\_{i} then performs an LLM Query based on its routed context CtiC\_{t}^{i}:
+
+|     |     |     |     |
+| --- | --- | --- | --- |
+|  | L​L​M​\_​o​u​t​p​u​tti=L​L​M​(Prompt​(Cti)),LLM\\\_output^{i}\_{t}=LLM(\\text{Prompt}(C\_{t}^{i})), |  | (1) |
+
+The global objective of the system is to maximize collaborative task success while minimizing cumulative token consumption across all agents and rounds:
+
+|     |     |     |     |
+| --- | --- | --- | --- |
+|  | maxπroute⁡E⁡\[TaskSuccess−λ⋅∑t=1T∑i=1NTokenCost​(Cti)\],\\max\_{\\pi\_{\\text{route}}}\ \\mathbb{E}\\left\[\\text{TaskSuccess}-\\lambda\\cdot\\sum\_{t=1}^{T}\\sum\_{i=1}^{N}\\text{TokenCost}(C\_{t}^{i})\\right\], |  | (2) |
+
+where λ\\lambda is a tunable hyperparameter balancing task performance and efficiency.
+This formulation enables RCR-router to perform adaptive, role-aware, and resource-efficient context routing, which we show in Section Experiments leads to significant improvements in multi-agent LLM system performance.
+### RCR-router: Role-Aware Context Routing with Semantic Abstraction
+
+##### Context Routing Framework.
+We name our architecture RCR-router to highlight its role-aware and modular context routing mechanism that governs how information is dynamically delivered to agents and how agent outputs contribute to shared memory. While we do not define a standalone protocol specification, RCR-router embodies a structured and extensible coordination mechanism that serves as an internal control layer within the multi-agent system.
+![Refer to caption](https://arxiv.org/html/2508.04903v3/mcp_router.png)Figure 1: Iterative RCR-router architecture with adaptive feedback loop. At each interaction round tt, RCR-router dynamically routes semantically filtered memory to each agent based on its role and task stage. Agent outputs are structured and integrated into an updated Shared Memory Mt+1M\_{t+1} via the Memory Update step, enabling progressive refinement of agent contexts and adaptive multi-agent coordination. This iterative loop supports efficient multi-round reasoning and enhances overall task performance.
+Figure [1](https://arxiv.org/html/2508.04903#Sx2.F1 "Figure 1 ‣ Context Routing Framework.
+---
+13:𝑡𝑜𝑘𝑒𝑛𝑠←TokenLength⁡(m)\\mathit{tokens}\\leftarrow\\mathrm{TokenLength}(m)
+
+14:if𝑡𝑜𝑡𝑎𝑙​\_​𝑡𝑜𝑘𝑒𝑛𝑠+𝑡𝑜𝑘𝑒𝑛𝑠≤Bi\\mathit{total\\\_tokens}+\\mathit{tokens}\\leq B\_{i}then
+
+15:Cti←Cti∪{m}C\_{t}^{i}\\leftarrow C\_{t}^{i}\\cup\\{m\\}
+
+16:𝑡𝑜𝑡𝑎𝑙​\_​𝑡𝑜𝑘𝑒𝑛𝑠←𝑡𝑜𝑡𝑎𝑙​\_​𝑡𝑜𝑘𝑒𝑛𝑠+𝑡𝑜𝑘𝑒𝑛𝑠\\mathit{total\\\_tokens}\\leftarrow\\mathit{total\\\_tokens}+\\mathit{tokens}
+
+17:else
+
+18:break⊳\\triangleright Stop if token budget exceeded
+
+19:endif
+
+20:endfor
+
+21:returnCtiC\_{t}^{i}
+
+1. 1.
+Token Budget Allocator.
+The Token Budget Allocator determines the maximum number of tokens BiB\_{i} allocated to each agent AiA\_{i} at each interaction round. This budget constrains the routed context, enabling a trade-off between richness and efficiency.
+In our current implementation, we adopt a simple role-aware fixed budget policy:
+
+|     |     |     |     |
+| --- | --- | --- | --- |
+|  | Bi=βbase+βrole​(Ri),B\_{i}=\\beta\_{\\text{base}}+\\beta\_{\\text{role}}(R\_{i}), |  | (4) |
+
+where βbase\\beta\_{\\text{base}} is a global base token budget and βrole​(Ri)\\beta\_{\\text{role}}(R\_{i}) is a role-specific offset that reflects the typical context needs of role RiR\_{i}. For instance, Planner agents may require larger budgets to handle structured plans, while Executor agents may operate effectively with less context.
+2. 2.
+Importance Scorer.
+To estimate the importance of each memory item mm for agent AiA\_{i} at task stage StS\_{t}, we use a lightweight heuristic-based scorer that combines multiple signals:
+
+   - •
+
+     Role Relevance: Importance increases when memory items contain role-specific keywords.
+   - •
+
+     Task Stage Priority: Items related to the current task phase (e.g., planning or execution) are prioritized.
+   - •
+
+     Recency: Recent memory entries are weighted higher to capture immediate relevance.
+For more detailed analysis, see Appendix E.
+3. 3.
+Semantic Filter and Routing
+
+The Semantic Filter selects the final subset of memory Cti⊆MtC\_{t}^{i}\\subseteq M\_{t} to be routed to each agent AiA\_{i} based on computed scores and the token budget BiB\_{i}.
+The process is implemented as a greedy top-kk selector:
+
+   - •
+
+     Sort memory items by descending importance α⁡(m,Ri,St)\\alpha(m;R\_{i},S\_{t}).
+   - •
+
+     Iteratively include memory items into CtiC\_{t}^{i} until token budget BiB\_{i} is exhausted.
+The resulting CtiC\_{t}^{i} is passed as input context for the next LLM query of agent AiA\_{i}. Our current policy is stateless and purely role- and stage-conditioned.
+Combined, these modules enable RCR-router to deliver adaptive, high-quality memory slices without exceeding agent-specific context budgets.
+Algorithm [1](https://arxiv.org/html/2508.04903#alg1 "Algorithm 1 ‣ RCR-Router Core. ‣ RCR-router: Role-Aware Context Routing with Semantic Abstraction ‣ The Proposed Method ‣ RCR-Router: Efficient Role-Aware Context Routing for Multi-Agent LLM Systems with Structured Memory") summarizes the routing policy.
+This process ensures that each agent receives a concise, relevant, and role-adaptive prompt context without exceeding token budget.
+### Iterative Routing with Feedback
+
+To support complex multi-agent reasoning tasks that evolve over multiple interaction rounds, RCR-router incorporates an iterative routing mechanism with feedback. Rather than performing static, one-shot context routing, our design enables the router to adaptively refine the routed contexts across iterations based on evolving agent outputs and updated memory.
+As illustrated in Figure [1](https://arxiv.org/html/2508.04903#Sx2.F1 "Figure 1 ‣ Context Routing Framework.
+---
+Searcher Input: Sub-goal type + prior memory state; queries environment for candidate object locations.
+- •
+
+Navigator Input: Sub-goal location + current agent position.
+- •
+
+Interactor Input: Goal object/location + interaction command (Pickup, Open, etc.).
+- •
+
+Memory Access: All agents interact with shared memory ℳt\\mathcal{M}\_{t} using read/write APIs, managed by RCR-router.
+#### Execution Flow
+
+1. 1.
+Planner interprets the instruction and generates sub-goals.
+2. 2.
+Searcher queries the environment (via Perception) to identify objects satisfying current sub-goal.
+3. 3.
+Navigator moves the agent toward target objects or locations.
+4. 4.
+Interactor performs the necessary environment interaction.
+5. 5.
+Evaluator verifies task completion and optionally signals Planner for replanning.
+#### Design Benefits
+
+- •
+
+Role Modularity and Separation of Concerns:
+Each agent is assigned a distinct functional role—such as planning, navigation, or interaction—enabling clean abstraction of responsibilities. This separation simplifies debugging, benchmarking, and targeted model improvements.
+- •
+
+Token-Efficient Context Routing:
+The integration of RCR-router ensures that each agent receives only task-relevant memory slices filtered by semantic importance, role identity, and token budget. This significantly reduces redundant communication and enhances inference efficiency.
+- •
+
+Structured Execution with Iterative Feedback:
+Agents operate in a recurrent loop, reading from and writing to a centralized memory store ℳt\\mathcal{M}\_{t}. This allows for dynamic plan revisions, success verification, and coordination between planning and execution modules.
+- •
+
+Perceptual Grounding and Semantic Sharing:
+Agents share a structured memory that encodes grounded observations (e.g., object types, spatial positions, interaction outcomes), facilitating semantic consistency and spatial reasoning across modules.
+- •
+
+Scalability and Extensibility:
+The architecture accommodates additional roles such as Reasoner, Memory Summarizer, or Language Explainer without changes to the routing pipeline. It generalizes across different task settings in embodied environments.
+- •
+
+Backend Compatibility and Reusability:
+Each agent can be instantiated using different backbone LLMs or decision models (e.g., DeepSeek, GPT-4, distilled variants), supporting plug-and-play experimentation without modifying upstream pipeline logic.
+##### Evaluation on ALFWorld.
+Table [8](https://arxiv.org/html/2508.04903#A6.T8 "Table 8 ‣ Evaluation on ALFWorld. ‣ Design Benefits ‣ Appendix F F  Modular Multi-Agent System Design for ALFWorld ‣ RCR-Router: Efficient Role-Aware Context Routing for Multi-Agent LLM Systems with Structured Memory") reports the overall performance comparison on the ALFWorld benchmark under a fixed per-agent token budget of Bi=2048B\_{i}=2048. We evaluate three routing strategies: Full-Context, Static Routing, and our proposed RCR-router. RCR-router achieves the best performance across all metrics. Specifically, it reduces the average runtime from 145.3s (Full-Context) and 122.8s (Static) to 96.4s, while also lowering token usage to 4.39K—representing a 35.6% reduction over Full-Context.
+In terms of answer quality, RCR-router attains a score of 4.42, significantly higher than both baselines (3.91 and 4.07). Standard QA metrics also improve: RCR-router achieves 66.7% precision, 67.9% recall, and 67.3% F1, compared to 58.2/60.1/59.1 for Full-Context and 61.5/63.0/62.2 for Static Routing. These results confirm that our method improves both efficiency and accuracy in multi-agent embodied environments.
+Table 8: Overall Performance Summary across Benchmarks (with per-agent token budget Bi=2048B\_{i}=2048). We report runtime, token usage, LLM-based Answer Quality, and standard QA metrics. RCR-router outperforms baselines in both efficiency and accuracy.
+=== INSPECT: arxiv:2604.19540 (Mesh Memory Protocol) ===
+# Mesh Memory Protocol: Semantic Infrastructure for Multi-Agent LLM Systems
+
+Paper ID: 3017770639889708410
+IDs: arxiv:2604.19540
+Authors: Hongwei Xu
+Categories: cs.MA, cs.AI
+Dates: created Tue, 21 Apr 2026 15:00:25 GMT; updated 2026-04-22
+
+## Abstract
+Teams of LLM agents increasingly collaborate on tasks spanning days or weeks: multi-day data-generation sprints where generator, reviewer, and auditor agents coordinate in real time on overlapping batches; specialists carrying findings forward across session restarts; product decisions compounding over many review rounds. This requires agents to share, evaluate, and combine each other's cognitive state in real time across sessions. We call this cross-session agent-to-agent cognitive collaboration, distinct from parallel agent execution. To enable it, three problems must be solved together. (P1) Each agent decides field by field what to accept from peers, not accept or reject whole messages. (P2) Every claim is traceable to source, so returning claims are recognised as echoes of the receiver's own prior thinking. (P3) Memory that survives session restarts is relevant because of how it was stored, not how it is retrieved. These are protocol-level properties at the semantic layer of agent communication, distinct from tool-access and task-delegation protocols at lower layers. We call this missing protocol layer "semantic infrastructure," and the Mesh Memory Protocol (MMP) specifies it. Four composable primitives work together: CAT7, a fixed seven-field schema for every Cognitive Memory Block (CMB); SVAF, which evaluates each field against the receiver's role-indexed anchors and realises P1; inter-agent lineage, carried as parents and ancestors of content-hash keys and realising P2; and remix, which stores only the receiver's own role-evaluated understanding of each accepted CMB, never the raw peer signal, realising P3. MMP is specified, shipped, and running in production across three reference deployments, where each session runs an autonomous agent as a mesh peer with its own identity and memory, collaborating with other agents across the network for collective intelligence.
+Title:
+
+Content selection saved. Describe the issue below:
+
+Description:
+
+![](https://arxiv.org/static/base/1.0.1/images/icons/smileybones-small.svg)arXiv is now an independent nonprofit! [Learn more](https://info.arxiv.org/about) ×
+
+[License: CC BY 4.0](https://info.arxiv.org/help/license/index.html#licenses-available)
+
+arXiv:2604.19540v1 \[cs.MA\] 21 Apr 2026
+
+# Mesh Memory Protocol:   Semantic Infrastructure for Multi-Agent LLM Systems
+
+Hongwei Xu
+
+(April 2026)
+
+###### Abstract
+
+Teams of LLM agents increasingly collaborate on tasks spanning days
+or weeks: multi-day data-generation sprints where generator, reviewer,
+and auditor agents coordinate in real time on overlapping batches;
+specialists carrying findings forward across session restarts; product
+decisions compounding over many review rounds. This requires agents
+to share, evaluate, and combine each other’s cognitive state in real
+time across sessions. We call this cross-session agent-to-agent
+cognitive collaboration, distinct from parallel agent execution. To
+enable it, three problems must be solved together. (P1) Each agent decides field
+by field what to accept from peers, not accept or reject whole
+messages. (P2) Every claim is traceable to source, so returning claims
+are recognised as echoes of the receiver’s own prior thinking. (P3)
+Memory that survives session restarts is relevant because of how it
+was stored, not how it is retrieved. These are protocol-level
+properties at the semantic layer of agent communication, distinct
+from tool-access and task-delegation protocols at lower layers. We
+call this missing protocol layer _semantic infrastructure_, and
+the Mesh Memory Protocol (MMP) specifies it. Four composable
+primitives work together: CAT7, a fixed seven-field schema for every
+Cognitive Memory Block (CMB); SVAF, which evaluates each field
+against the receiver’s role-indexed anchors and realises P1;
+inter-agent lineage, carried as parents and ancestors of content-hash
+keys and realising P2; and remix, which stores only the receiver’s
+own role-evaluated understanding of each accepted CMB, never the raw
+peer signal, realising P3. MMP is specified, shipped, and running in
+production across three reference deployments, where each session
+runs an autonomous agent as a mesh peer with its own identity and
+memory, collaborating with other agents across the network for
+collective intelligence.
+## 1 Introduction
+
+Multi-agent LLM systems in production coordinate cognitive work on long
+shared tasks spanning hours, days, and weeks. A corpus sprint runs for
+days as a generator agent produces while a quality agent audits in real
+time. A research investigation spans weeks, with specialist agents
+accumulating role-specific context across session restarts. A product
+decision compounds over rounds as agents surface concerns, trace how
+claims evolved, and hand state to fresh sessions without losing the
+thread. None of this is one-agent work; it requires a team of
+specialised agents operating as collective intelligence.
+Recent empirical work documents that these deployments are failing
+systematically. Cemri et al. (2025) catalogue 14 failure modes across
+1,600+ annotated multi-agent traces drawn from seven frameworks
+(inter-annotator κ = 0.88), clustered into three categories —
+_system design issues_, _inter-agent misalignment_, and
+_task verification_ — which larger models, better schedulers, and
+faster message buses cannot fix.
+Riedl (2025) shows from the opposite direction that prompt-level
+interventions (personas, metacognitive prompts) can steer multi-agent
+LLM systems from aggregates to higher-order coordination. The
+capability operates within a single session’s attention and succeeds
+under controlled conditions, while Cemri’s catalogue marks where that
+approach breaks down at production volume. The broader field has
+articulated the need to move multi-agent LLM systems beyond emergent
+collaboration toward _structured collective intelligence_.
+---
+The grounding case is symmetric: without signal
+provenance, contested claims cannot be resolved by tracing them to
+source.
+3. (P3)
+
+Filtering at acceptance time, not retrieval time.
+Agent-memory systems in common use — LangGraph checkpointer (Chase
+2024), RAG stores (Lewis et al. 2020), conversation-history replay —
+filter at _retrieval time_: raw peer signals are stored in bulk,
+and relevance is recovered heuristically at each read through semantic
+similarity or reranking. What cognitive collaboration requires is the
+inverse: filtering at _acceptance time_, so what enters memory is
+already the agent’s own domain-filtered understanding. Recall then
+returns relevance by construction, not by retrieval tuning.
+A smarter model does not solve these problems: a single LLM still cannot
+evaluate two instances of itself at field granularity, trace signal
+derivation without lineage metadata, or filter its own persisted state
+without evaluation at acceptance time. The binding constraint is not the
+model. It is the protocol layer — specifically, the layer that carries
+evaluated cognitive state between peer agents.
+This is the semantic infrastructure for multi-agent LLM systems,
+and it is unclaimed across the eight substrates surveyed in Table 1 (§2).
+The Mesh Memory Protocol (MMP v0.2.3; Xu 2026b) fills this
+layer.111MMP specification versioning is decoupled from SDK
+package versioning. MMP spec v0.2.3 is carried in production by
+@sym-bot/sym@0.3.81+ (Node.js SDK) and
+@sym-bot/mesh-channel@0.2.0 (Claude Code plugin). Spec
+version bumps track normative protocol changes; SDK minor/patch
+versions track implementation changes that preserve wire compatibility
+with a stated spec range. MMP is a published specification (CC BY
+4.0) with SYM Node.js and SYM Swift reference implementations (Apache
+2.0), defining an eight-layer architecture. Four of those layers —
+Coupling (Layer 4: per-field evaluation via Symbolic-Vector Attention Fusion, SVAF; Xu 2026b), Synthetic Memory (Layer
+5: LLM-derived knowledge encoded for continuous-time dynamics), xMesh
+(Layer 6: per-agent Liquid Neural Network), and Application (Layer 7:
+where agents reason on the remix subgraph) — jointly constitute
+_Mesh Cognition_ (MMP spec §2.1). The semantic-infrastructure
+contribution of this paper operates at Layers 3 and 4: the four
+primitives that carry evaluated cognitive state between peer agents and
+make it resumable across restarts. The CAT7 field schema, the SVAF
+evaluation gate, the lineage chain, and remix semantics jointly address
+the three problems.
+This paper presents MMP as the semantic infrastructure for multi-agent
+LLM systems. The protocol’s Claude-native deployment —
+sym-mesh-channel, an early non-Anthropic Channels implementation to pass
+Anthropic’s Claude Plugin Directory submission review — and a 14-wave
+production corpus-generation sprint are reported together as evidence in
+§4.
+Contribution. This paper contributes the Mesh Memory
+Protocol (MMP) — a specified, shipped production protocol for
+carrying evaluated cognitive state between agents and across sessions.
+Four composable primitives address P1, P2, and P3 jointly: CAT7
+per-field schema (§3.1), SVAF per-field evaluation (§3.2), inter-agent
+lineage DAG (§3.3), and write-time-filtered remix at acceptance
+(§3.4). MMP is realised across three production deployments (§4) and
+grounded in a live-captured on-wire artifact (Listing 1) from a
+Mac↔Windows mesh. §2 Table 1 audits eight memory substrates in the
+current literature against P1/P2/P3 and multi-agent first-class
+support; each is mechanism-differentiated from MMP on the
+retrieval-time-lookup vs acceptance-time-admission axis.
+## 2 Related Work
+
+The problem specified in §1 has gone unsolved for three reasons.
+Industrial demand was thin prior to LLMs.
+---
+survey for the persistence tier —
+MemGPT, Mem0, A-MEM, Agent Workflow Memory, Reflexion, plus the
+Hu et al. (2025) memory survey they cite — organise around
+storage-then-retrieval rather than acceptance-time admission; none
+provides the protocol-level inter-agent semantic-integration contract
+this coordination requires. Hu et al. themselves enumerate eight open
+memory frontiers,
+of which automated memory management, RL-driven memory, and trustworthy
+memory most directly align with this paper’s contribution.
+The four MMP primitives specified in §3 are the multi-agent
+semantic-infrastructure answer across all three open surfaces. CAT7
+receiver-side admission and SVAF per-field evaluation (§3.1, §3.2) give
+the experiential tier protocol-level structure so that accumulated
+playbooks remain interoperable across agents, not only private within
+one agent’s context window. The lineage DAG (§3.3) is the inter-agent
+provenance layer the surveyed stores do not carry. Remix as
+write-time-filtered shared state (§3.4) is the persistent substrate
+Liu et al. §12.2 asks for — realised at the mesh layer rather than
+within any single session’s memory hierarchy. No inter-agent semantic protocol
+appears in the literature Liu et al. canvass; the protocol-layer answer
+this paper contributes fills the joint gap they name.
+Substrate-by-property audit. Table 1 makes the gap concrete
+against the eight memory substrates cited above. Rows are the
+substrates; columns are the three properties P1–P3 that distinguish
+cross-session multi-agent cognitive collaboration (per-field receiver
+admission; inter-agent signal lineage; write-time filtering invariant,
+§3.1–§3.4) plus whether the substrate’s primary paper treats
+multi-agent coordination as first-class. ✗ marks the property
+absent; ○ marks partial coverage (mechanism present but with
+scope or semantics that does not match the property); ✓ marks
+first-class support.
+| Substrate | P1 | P2 | P3 | Multi-agent |
+| --- | --- | --- | --- | --- |
+| MemGPT (Packer et al. 2023) | ✗ | ✗ | ✗ | ✗ |
+| Mem0 (Chhikara et al. 2025) | ✗ | ✗ | ○ | ✗ |
+| A-MEM (Xu, W. et al. 2025) | ✗ | ○ | ○ | ✗ |
+| Agent Workflow Memory (Wang et al. 2024) | ✗ | ✗ | ○ | ✗ |
+| Reflexion (Shinn et al. 2023) | ✗ | ○ | ○ | ✗ |
+| CoALA (Sumers et al. 2024) | ✗ | ✗ | ✗ | ✗ |
+| Voyager (Wang et al. 2023) | ✗ | ○ | ○ | ✗ |
+| Collaborative Memory (Rezazadeh et al. 2025) | ○ | ○ | ○ | ✓ |
+
+Table 1. P1 per-field receiver admission; P2
+inter-agent signal lineage with O(1) echo detection; P3
+write-time filtering invariant (the receiver’s store contains only its
+own role-filtered remixes). _Justifications per cell._ MemGPT — block-level OS-style paging, no per-field
+evaluation; no inter-agent provenance; bulk archival, relevance
+recovered at retrieval. Mem0 — extraction pipeline curates
+content on write (P3 ○) but without role-indexed per-field admission;
+graph variant links facts within one user’s memory, not inter-agent
+lineage. A-MEM — always accepts (no admission gate);
+Zettelkasten links are within-store (P2 ○); note-generation at write is
+organisation, not admission. AWM — workflow induction filters
+what gets stored (P3 ○) but is LLM summarisation, not field-granular
+admission; workflows indexed by similarity, no lineage pointers.
+Reflexion — reflections are filtered trajectory summaries (P3
+○) with episode-to-reflection links (P2 ○), but remain within-agent;
+actor/evaluator/self-reflection are roles inside one loop, not peer
+agents. CoALA — defines memory types without admission
+mechanism or provenance primitive; explicitly scoped single-agent.
+Voyager — skill-library verification gates writes (P3 ○) and
+skills reference prior skills (P2 ○), but gating is task-success, not
+semantic per-field; solo agent.
+---
+The composition of
+drift bounds, per-field admission, and Sybil-insensitive aggregation
+handles common cases, but no formal analysis bounds worst-case
+behaviour under coordinated adversarial peers who are calibrated to
+pass per-field drift thresholds by construction. Formal red-team
+analysis of adaptive adversarial regimes is open.
+What the specification does not formalise.
+- •
+
+Sufficiency and minimality of the primitive set. §3.5
+conjectures that CAT7 + SVAF + lineage + remix jointly satisfy P1, P2,
+P3 for any assembly qualifying as semantic infrastructure. We do not
+prove this set is unique or minimal. An information-theoretic
+characterisation of the primitives as the minimum decomposition
+distinguishing evaluative cognition from message-passing is open
+analytical work.
+- •
+
+Learned or topic-dependent α\_f schedules. §19.3 specifies
+per-profile static α\_f weights and recommends implementations expose
+them as configuration; §11 specifies Closed-form Continuous-time (CfC;
+Hasani et al. 2022) hidden-state adaptation through feedback
+neuromodulation (fast- and slow-τ neurons). Learning the α\_f weights
+themselves — RL-driven schedules aligned with Hu et al. (2025)’s
+RL-driven-memory frontier, or topic-dependent dynamic weighting where
+an auditor shifts α\_f between commitment on scope
+discussions and motivation on risk discussions — is out of
+scope for the current spec.
+- •
+
+Hallucination-robustness beyond source-traceability. One of
+Hu et al. (2025)’s three trustworthy-memory pillars (alongside privacy
+preservation and explainability). MMP’s lineage DAG provides the
+precondition — per-claim provenance that supports post-hoc auditing
+— but does not itself detect or prevent hallucinated content.
+Hallucination-aware per-field admission, or lineage-based
+cross-validation across independent derivations, is open.
+What the integrated layer does not itself provide. The four
+primitives are the substrate on which adjacent capabilities can
+accumulate, but the substrate is not the capability.
+- •
+
+Experiential-tier playbook induction across the mesh. MMP
+supplies the substrate for playbooks (reusable strategy traces) to
+accumulate across agents via lineage + remix, rather than privately
+within one. MMP does not perform the _induction_ step —
+extracting a reusable playbook from past CMB chains, in the sense Wang
+et al. (2024) Agent Workflow Memory does within a single agent —
+which is downstream work MMP enables.
+- •
+
+Composition with existing memory substrates. MMP supplies
+the inter-agent coordination contract; existing memory stores
+(MemGPT, Mem0, A-MEM, Agent Workflow Memory, Reflexion) can sit
+inside each MMP node as that node’s local long-term memory layer.
+MMP does not prescribe the composition patterns — which substrate
+best fits which MMP-node role, and what cross-contamination or
+double-write issues arise when the local store and the mesh
+remix-store diverge — which remain open.
+These are the real bounds. What this paper does establish — a working
+and implemented protocol layer carrying evaluated cognitive state
+between cross-session multi-agent LLM peers, specified and running in
+production — holds within them. Each bound names concrete empirical,
+analytical, or spec-extension work that extends the layer, not work that
+should change before the layer is usable.
+## 6 Conclusion
+
+Teams of LLM agents now collaborate on tasks that span days, weeks,
+and many session restarts. What governs whether that collaboration
+compounds into collective intelligence, or decays into drift, is
+the layer at which agents share, evaluate, and combine each other’s
+cognitive state. That layer, _semantic infrastructure_, is the
+binding constraint on multi-agent LLM systems, and it has been
+missing from the stack.
+The Mesh Memory Protocol is that layer. Four composable primitives
+realise it. CAT7 fixes the seven-field schema that every exchanged
+thought must fit.
+=== INSPECT: arxiv:2608.10502 (Dependency-Guided Rollback Repair) ===
+# From Faulty Memories to Corrected Actions: Dependency-Guided Rollback Repair for Memory-Augmented Agents
+
+Paper ID: 5391957781460421285
+IDs: arxiv:2608.10502
+Authors: Caili Yu; Yiqi Wang; Jiaqi Zhang; Yiqun Duan; Mingkai Zheng; Zhangkai Wu; Kaize Shi; Taotao Cai
+Categories: cs.AI
+Dates: created 2026-08-11; updated 2026-08-12
+
+## Abstract
+Persistent memory lets language-model agents reuse information across sessions, but it also makes errors durable: a poisoned, stale, or misattributed record can alter reasoning, tool use, answers, and subsequent memory writes. Existing defenses mainly detect or delete suspicious memories, or revise the current response. Deleting the source leaves already propagated claims, actions, and derived memories active, whereas resetting the store or replaying the full trace destroys benign state and repeats unnecessary computation. We therefore formulate post-failure memory recovery: given a failed execution and diagnosed faulty memories, recover both the answer and persistent state while retaining unaffected work. Our dependency-guided rollback repair builds a typed memory-to-action graph from runtime provenance, traces explicit downstream dependencies, preserves candidates with independent trusted support, deactivates unsupported memory state, and selectively replays only answer-relevant affected computation. We evaluate this approach on a 150-case controlled benchmark spanning three tool-use domains and four memory failure types, and on a 50-case trajectory-derived stress test adapted from LongMemEval-V2. On the controlled benchmark, it achieves 85.3% recovery versus 77.3% for the best competing recovery method, removes all diagnosed faulty memories, preserves all benign memories, and requires only selective replay with modest LLM-call cost. On the adapted subset, it reaches 68.0% recovery versus 54.0% for the next best method, while also achieving the highest claim invalidation F1, 0.669 versus 0.603. Overall, the results do not imply uniformly better trace reconstruction, but show that dependency-guided rollback repair provides a strong recovery--cost trade-off while repairing faulty memory state and preserving benign memory.
+Title:
+
+Content selection saved. Describe the issue below:
+
+Description:
+
+![](https://arxiv.org/static/base/1.0.1/images/icons/smileybones-small.svg)arXiv is now an independent nonprofit! [Learn more](https://info.arxiv.org/about) ×
+
+[License: arXiv.org perpetual non-exclusive license](https://info.arxiv.org/help/license/index.html#licenses-available)
+
+arXiv:2608.10502v1 \[cs.AI\] 11 Aug 2026
+
+# From Faulty Memories to Corrected Actions: Dependency-Guided Rollback Repair for Memory-Augmented Agents
+
+Caili Yu,
+Yiqi Wang\*,
+Jiaqi Zhang,
+Yiqun Duan,
+Mingkai Zheng,
+Zhangkai Wu,
+Kaize Shi,
+Taotao Cai
+
+\* yiqi.wang.jennie@gmail.com
+
+###### Abstract
+
+Persistent memory lets language-model agents reuse information across sessions, but it also makes errors durable: a poisoned, stale, or misattributed record can alter reasoning, tool use, answers, and subsequent memory writes.
+Existing defenses mainly detect or delete suspicious memories, or revise the current response. Deleting the source leaves already propagated claims, actions, and derived memories active, whereas resetting the store or replaying the full trace destroys benign state and repeats unnecessary computation.
+We therefore formulate post-failure memory recovery: given a failed execution and diagnosed faulty memories, recover both the answer and persistent state while retaining unaffected work.
+Our dependency-guided rollback repair builds a typed memory-to-action graph from runtime provenance, traces explicit downstream dependencies, preserves candidates with independent trusted support, deactivates unsupported memory state, and selectively replays only answer-relevant affected computation.
+We evaluate this approach on a 150-case controlled benchmark spanning three tool-use domains and four memory failure types, and on a 50-case trajectory-derived stress test adapted from LongMemEval-V2.
+On the controlled benchmark, it achieves 85.3% recovery versus 77.3% for the best competing recovery method, removes all diagnosed faulty memories, preserves all benign memories, and requires only selective replay with modest LLM-call cost.
+On the adapted subset, it reaches 68.0% recovery versus 54.0% for the next best method, while also achieving the highest claim invalidation F1, 0.669 versus 0.603. Overall, the results do not imply uniformly better trace reconstruction, but show that dependency-guided rollback repair provides a strong recovery–cost trade-off while repairing faulty memory state and preserving benign memory.
+## 1 Introduction
+
+Persistent memory lets language model agents carry preferences, observations, and experience across sessions, enabling personalization and long-horizon behavior that a current prompt alone cannot support (Park et al. [2023](https://arxiv.org/html/2608.10502#bib.bib1 "Generative agents: interactive simulacra of human behavior"); Packer et al. [2023](https://arxiv.org/html/2608.10502#bib.bib2 "MemGPT: towards llms as operating systems."); Zhang et al. [2025](https://arxiv.org/html/2608.10502#bib.bib3 "A survey on the memory mechanism of large language model-based agents"); Zhong et al. [2024](https://arxiv.org/html/2608.10502#bib.bib4 "Memorybank: enhancing large language models with long-term memory"); Wang et al. [2023](https://arxiv.org/html/2608.10502#bib.bib5 "Voyager: an open-ended embodied agent with large language models")). The same persistence changes the scope of failure. A poisoned, stale, misattributed, or drifted record can be retrieved as context, support an incorrect claim, alter a tool plan and answer, and be consolidated into new memory (Xiong et al. [2026](https://arxiv.org/html/2608.10502#bib.bib6 "How memory management impacts llm agents: an empirical study of experience-following behavior"); Chao et al. [2026](https://arxiv.org/html/2608.10502#bib.bib7 "STALE: can llm agents know when their memories are no longer valid?"); Chen et al.
+---
+[2025](https://arxiv.org/html/2608.10502#bib.bib8 "Halumem: evaluating hallucinations in memory systems of agents")). A single local fault can therefore become a durable family of downstream errors and reappear after the original turn.
+This propagation creates the practical recovery problem illustrated in Figure [1](https://arxiv.org/html/2608.10502#S1.F1 "Figure 1 ‣ 1 Introduction ‣ From Faulty Memories to Corrected Actions: Dependency-Guided Rollback Repair for Memory-Augmented Agents"). Correcting only the answer leaves the faulty source and contaminated descendants available to influence future turns. Deleting only the source is also insufficient after its content has been copied into claims, observations, or derived memories. At the other extreme, clearing the memory store or replaying the full trace removes valid personalization and repeats model and tool calls. Useful recovery must therefore remove unsupported consequences, retain state that still has independent evidence, and recompute only what the corrected answer requires.
+![Refer to caption](https://arxiv.org/html/2608.10502v1/x1.png)Figure 1: A faulty memory creates downstream state. A poisoned preference changes the claim, tool plan, answer, and a derived memory. Repair must remove unsupported descendants, preserve unaffected state, and replay the answer-relevant path.
+Existing research largely acts at one of two boundaries. Memory defenses audit, filter, or delete suspicious records, while response-level reflection revises an unsuccessful output (Tan et al. [2026](https://arxiv.org/html/2608.10502#bib.bib10 "MemAudit: post-hoc auditing of poisoned agent memory via causal attribution and structural anomaly detection"); Zou et al. [2025](https://arxiv.org/html/2608.10502#bib.bib11 "{poisonedrag}: Knowledge corruption attacks to {retrieval-augmented} generation of large language models"); Shinn et al. [2023](https://arxiv.org/html/2608.10502#bib.bib9 "Reflexion: language agents with verbal reinforcement learning")). These interventions improve detection or local correction, but do not jointly repair the persistent store and the execution state already influenced by a fault. This gap motivates our central premise: _fault removal is not state recovery_.
+We therefore formulate post-failure memory recovery.
+The input is a user session, an active memory store, a failed execution trace, and diagnosed faulty memories supplied by an upstream detector;
+the output is a corrected answer, repaired trace, and repaired active store. Diagnosis itself is outside the scope of this work, and the runtime must record the provenance connecting memory reads, claims, plans, actions, observations, answers, and mutations. Under these assumptions, the research question is precise: _once a faulty memory has been consumed, which consequences should be invalidated, which remain independently justified, and which must be regenerated?_
+
+We propose a dependency-guided rollback repair. The method first constructs a typed memory-to-action graph and traces explicit downstream dataflow from each diagnosed fault. Because reachability alone would over-invalidate, it preserves candidates whose complete content or decision has independent trusted support. A deterministic planner then deletes diagnosed faults, quarantines unsupported derived state, invalidates unsupported trace outputs, and selects the answer-relevant affected computation. Finally, the executor reuses safe context and replays selected steps in trace order under the repaired store. The design directly couples the three requirements above: contamination tracing, evidence-aware preservation, and selective recomputation.
+We evaluate answer recovery, state repair, preservation, and cost on 150 controlled cases across shopping, travel, and customer-support tools, covering four memory fault types, and on 50 procedural trajectories adapted from LongMemEval-V2 as a multi-fault stress test (Wu et al.
+---
+During rollback, it invalidates the affected claim steps s\_046 and s\_049, replays the answer-relevant path, and reruns the evidence lookup needed to refresh the article-page observation. The repaired execution generates replacement memories m\_n010, m\_n011, and m\_n012. These replacements consistently record the corrected label Attach to Private Task: the repaired raw evidence memory stores the corrected article-page button, the repaired derived observation states that this label appears on the article page, and the repaired compact answer memory identifies it as the new header action. The corrected final answer is therefore Attach to Private Task.
+This case highlights why multi-level poisoned memories require both memory-state cleanup and trace-level replay. No repair keeps the poisoned memories active and repeats the faulty answer. Memory-centric baselines delete the poisoned memories but fail to recover the answer. MemAudit-style answers Subscribe, while full reset and delete retrieved memories answer Edit after losing useful context. LLM-judge repair also deletes all three poisoned memories but still regenerates Add to Private Task. AgentTrace-style recovers the final answer through trace-level replay, but without the same explicit cleanup account over all jointly poisoned memory levels. Our method recovers the answer while deleting all three poisoned memories, preserving all benign memories, and regenerating consistent replacement memories for the raw evidence, derived observation, and compact answer.
+## Appendix H Baseline Implementation Details
+
+We summarize the baseline implementations used in our evaluation. Since prior methods do not directly target post-failure repair for memory-augmented executions, we adapt each method to the same repair interface. Each method receives the failed trace, faulty memory store, diagnosed faulty memory ids, and final turn task input, then outputs either a memory edit decision or a rollback plan executed by the shared replay executor. Table [20](https://arxiv.org/html/2608.10502#A8.T20 "Table 20 ‣ Appendix H Baseline Implementation Details ‣ From Faulty Memories to Corrected Actions: Dependency-Guided Rollback Repair for Memory-Augmented Agents") summarizes the configurations.
+| Method | Repair level | Memory repair | Trace rollback | Dependency graph |
+| --- | --- | --- | --- | --- |
+| No repair | None | No | No | No |
+| Full memory reset | Memory | All memories | No | No |
+| Delete retrieved memories | Memory | Retrieved memories | No | No |
+| MemAudit-style | Memory | Ranked memories | No | Memory only |
+| LLM-judge repair | Trace | LLM-selected | LLM-selected | No |
+| AgentTrace-style | Trace | Indirect | Suspicious steps | Trace only |
+| Ours | Memory+trace | Selective | Selective | Memory+trace |
+
+Table 20: Comparison of repair baselines. Baselines differ in whether they repair memory state, roll back faulty trace state, or use dependency structure.
+##### No Repair.
+This lower-bound condition keeps the failed run unchanged, including the faulty memory store, faulty trace, and original final answer. It emits an empty repair plan and performs no cleanup, deletion, rollback, or replay.
+##### Full Memory Reset.
+This memory-centric baseline removes all active memories before replaying the final user turn under the same agent lifecycle. The trace prefix before the final turn is kept fixed, and the regenerated final turn trace is normalized to the same artifact schema as other methods. This strategy removes all potentially contaminated memory, but also deletes benign personalization state.
+##### Delete Retrieved Memories.
+This baseline deletes active memories that appear in the affected region of the failed execution before the final turn.
+---
+Forward dependency tracing and selective recomputation draw on program and dynamic slicing (Weiser [1984](https://arxiv.org/html/2608.10502#bib.bib37 "Program slicing"); Agrawal and Horgan [1990](https://arxiv.org/html/2608.10502#bib.bib38 "Dynamic program slicing")), database provenance (Cheney et al. [2009](https://arxiv.org/html/2608.10502#bib.bib39 "Provenance in databases: why, how, and where")), and transactional rollback (Mohan et al. [1992](https://arxiv.org/html/2608.10502#bib.bib40 "ARIES: a transaction recovery method supporting fine-granularity locking and partial rollbacks using write-ahead logging")). We do not claim graph reachability or logical undo as new. Our contribution is their adaptation to a typed memory–execution graph in which validity depends on independent evidentiary support and replay incurs model and tool cost. This scope is narrower than a new general recovery theory, but broader than repairing a memory record or final response alone.
+#### Trace debugging and response repair.
+ReAct exposes reasoning and tool-use structure, while Reflexion and Self-Refine revise unsuccessful behavior or outputs (Yao et al. [2022](https://arxiv.org/html/2608.10502#bib.bib20 "React: synergizing reasoning and acting in language models"); Shinn et al. [2023](https://arxiv.org/html/2608.10502#bib.bib9 "Reflexion: language agents with verbal reinforcement learning"); Madaan et al. [2023](https://arxiv.org/html/2608.10502#bib.bib33 "Self-refine: iterative refinement with self-feedback")). AgentTrace reconstructs causal graphs from logs for root-cause localization (Wang [2026](https://arxiv.org/html/2608.10502#bib.bib34 "AgentTrace: causal graph tracing for root cause analysis in deployed multi-agent systems")). These ideas motivate trace-aware recovery, but localization or answer revision alone need not deactivate contaminated persistent state. Our dependency graph therefore spans the memory lifecycle and execution trace, and its rollback plan couples memory disposition with selective replay.
+## 3 Dependency-Guided Rollback Repair
+
+![Refer to caption](https://arxiv.org/html/2608.10502v1/x2.png)Figure 2: Overview of dependency-guided rollback repair. Starting from a diagnosed faulty memory set, the method constructs a memory-to-action dependency graph, traces candidate downstream effects, filters candidates with independent trusted support, generates a rule-guided rollback plan, and selectively replays answer-relevant affected computation to produce a corrected final answer and a repaired active memory store.
+As Figure [2](https://arxiv.org/html/2608.10502#S3.F2 "Figure 2 ‣ 3 Dependency-Guided Rollback Repair ‣ From Faulty Memories to Corrected Actions: Dependency-Guided Rollback Repair for Memory-Augmented Agents") shows, we propose dependency-guided rollback repair as our method. It proceeds in five stages: graph construction, affected-subgraph tracing, independent-support checking, rule-guided rollback planning, and selective replay. Rollback here means repair of agent-maintained trace and memory state. It cannot undo an irreversible external side effect. Re-executing a side-effecting tool therefore requires a resettable interface or a domain-specific compensating action. Full schemas are in Appendix [A](https://arxiv.org/html/2608.10502#A1 "Appendix A Dependency-guided Rollback Repair Data Schema ‣ From Faulty Memories to Corrected Actions: Dependency-Guided Rollback Repair for Memory-Augmented Agents") and replay prompt contracts in Appendix [B](https://arxiv.org/html/2608.10502#A2 "Appendix B Prompt Contracts and Templates ‣ From Faulty Memories to Corrected Actions: Dependency-Guided Rollback Repair for Memory-Augmented Agents").
+### 3.1 Problem Setting
+
+Let 𝒰=(u1,…,uk)\\mathcal{U}=(u\_{1},\\ldots,u\_{k}) be a user session, ℳ\\mathcal{M} the active memory store, and 𝒯=(s1,…,sn)\\mathcal{T}=(s\_{1},\\ldots,s\_{n}) a failed execution trace.
+=== INSPECT: arxiv:2512.17914 (Q-KVComm) ===
+# Q-KVComm: Efficient Multi-Agent Communication Via Adaptive KV Cache Compression
+
+Paper ID: 6382395121053552403
+IDs: arxiv:2512.17914
+Authors: Boris Kriuk; Logic Ng
+Categories: cs.CL, cs.MA
+Dates: created Thu, 27 Nov 2025 10:45:41 GMT; updated 2025-12-23
+
+## Abstract
+Multi-agent Large Language Model (LLM) systems face a critical bottleneck: redundant transmission of contextual information between agents consumes excessive bandwidth and computational resources. Traditional approaches discard internal semantic representations and transmit raw text, forcing receiving agents to recompute similar representations from scratch. We introduce Q-KVComm, a new protocol that enables direct transmission of compressed key-value (KV) cache representations between LLM agents. Q-KVComm combines three key innovations: (1) adaptive layer-wise quantization that allocates variable bit-widths based on sensitivity profiling, (2) hybrid information extraction that preserves critical facts across content domains, and (3) heterogeneous model calibration establishing cross-architecture communication. Extensive experiments across three diverse question-answering datasets demonstrate that Q-KVComm achieves 5-6x compression ratios while maintaining semantic fidelity, with coherence quality scores above 0.77 across all scenarios. The protocol exhibits robust performance across model sizes (1.1B-1.5B parameters) and adapts to real-world applications including conversational QA and multi-hop reasoning. Our work establishes a new paradigm for LLM agent communication, shifting from text-based to representation-based information exchange.
+Title:
+
+Content selection saved. Describe the issue below:
+
+Description:
+
+![](https://arxiv.org/static/base/1.0.1/images/icons/smileybones-small.svg)arXiv is now an independent nonprofit! [Learn more](https://info.arxiv.org/about) ×
+
+[License: arXiv.org perpetual non-exclusive license](https://info.arxiv.org/help/license/index.html#licenses-available)
+
+arXiv:2512.17914v1 \[cs.CL\] 27 Nov 2025
+
+# Q-KVComm: Efficient Multi-Agent Communication Via Adaptive KV Cache Compression
+
+Boris Kriuk
+Logic Ng
+
+###### Abstract
+
+Multi-agent Large Language Model (LLM) systems face a critical bottleneck: redundant transmission of contextual information between agents consumes excessive bandwidth and computational resources. Traditional approaches discard internal semantic representations and transmit raw text, forcing receiving agents to recompute similar representations from scratch. We introduce Q-KVComm, a new protocol that enables direct transmission of compressed key-value (KV) cache representations between LLM agents. Q-KVComm combines three key innovations: (1) adaptive layer-wise quantization that allocates variable bit-widths based on sensitivity profiling, (2) hybrid information extraction that preserves critical facts across content domains, and (3) heterogeneous model calibration establishing cross-architecture communication. Extensive experiments across three diverse question-answering datasets demonstrate that Q-KVComm achieves 5-6x compression ratios while maintaining semantic fidelity, with coherence quality scores above 0.77 across all scenarios. The protocol exhibits robust performance across model sizes (1.1B-1.5B parameters) and adapts to real-world applications including conversational QA and multi-hop reasoning. Our work establishes a new paradigm for LLM agent communication, shifting from text-based to representation-based information exchange.
+## I Introduction
+
+The rapid advancement of Large Language Models has enabled increasingly complex multi-agent systems for collaborative problem-solving \[ [20](https://arxiv.org/html/2512.17914#bib.bib22 "Multi-agent collaboration mechanisms: a survey of llms")\]. However, a critical bottleneck has emerged: traditional approaches rely on exchanging complete textual representations between agents, resulting in substantial bandwidth consumption and computational overhead. When an agent processes a document or conversation history, it builds rich internal representations in the form of key-value (KV) caches that capture semantic understanding. Current methods discard these structured representations and transmit raw text instead, forcing receiving agents to recompute similar representations from scratch—a wasteful approach that introduces significant latency and makes distributed LLM systems impractical for bandwidth-constrained deployments \[ [14](https://arxiv.org/html/2512.17914#bib.bib18 "Edge ai inference in heterogeneous constrained computing: feasibility and opportunities"), [19](https://arxiv.org/html/2512.17914#bib.bib20 "TinyML—from efficient edge inference to on-device intelligence")\].
+Q-KVComm addresses this fundamental inefficiency by introducing a novel protocol for direct KV cache transmission between LLM agents. Rather than sending raw text, agents compress and transmit their internal KV cache representations, allowing receiving agents to directly leverage the semantic understanding already computed by the sender. This approach transforms inter-agent communication from a text-based paradigm to a representation-based paradigm, dramatically reducing both bandwidth requirements and computational redundancy.
+Q-KVComm introduces three key technical innovations. First, an adaptive layer-wise quantization mechanism uses sensitivity profiling to automatically allocate variable bit-widths across transformer layers, achieving optimal compression without manual tuning.
+---
+The consistent quality improvements from 4-bit to 8-bit suggest that applications requiring higher fidelity can leverage additional precision while still achieving over 5×\\times compression.
+## V Conclusion
+
+Multi-agent LLM systems have traditionally relied on inefficient text-based communication, forcing receiving agents to recompute semantic representations already available to senders. Q-KVComm addresses this fundamental inefficiency by enabling direct transmission of compressed KV cache representations between agents, transforming inter-agent communication from a text-based to a representation-based paradigm.
+Our protocol combines three complementary mechanisms to achieve efficient, high-fidelity knowledge transfer. Adaptive layer-wise quantization allocates variable bit-widths (4-8 bits) based on empirically measured layer sensitivity, achieving compression ratios of 5-6× while preserving semantic information. Hybrid information extraction ensures critical facts survive aggressive compression through combined keyword extraction, named entity recognition, and domain-specific pattern matching. Heterogeneous model calibration enables cross-architecture communication through distributional alignment, removing the requirement for identical sender-receiver models.
+Experimental evaluation across three diverse question-answering datasets demonstrates Q-KVComm’s practical viability. The protocol maintains contextual relevance scores above 0.70 for extractive QA and coherence scores exceeding 0.92 for narrative understanding, even under maximum compression. Bandwidth savings range from 1.86 GB for short contexts to 5.23 GB for multi-document reasoning tasks. Performance remains robust across model sizes (1.1B-1.5B parameters) and adapts automatically to heterogeneous deployments with less than 5% quality degradation.
+Q-KVComm’s production-ready implementation—including LRU caching, adaptive memory management, and bit-packed serialization—makes it immediately deployable in edge computing and mobile multi-agent systems. The protocol’s ability to reduce bandwidth consumption by 5-6× while maintaining semantic fidelity addresses a critical bottleneck in distributed LLM deployments.
+Several promising directions emerge for future work. First, extending Q-KVComm to larger language models (7B+ parameters) could reveal whether compression ratios scale favorably or encounter fundamental limits. Second, learned compression techniques such as variational autoencoders may outperform quantization-based approaches by exploiting statistical structure in KV cache representations. Third, streaming protocols for incremental KV cache updates would enable continuous communication in long-running multi-agent dialogues without retransmitting entire contexts. Fourth, the security implications of sharing internal representations deserve investigation, as KV caches may leak information about model internals or training data. Finally, Q-KVComm’s bandwidth efficiency makes it particularly promising for federated learning scenarios where communication costs dominate training time.
+By establishing representation-based communication as a viable alternative to text-based approaches, Q-KVComm opens new architectural possibilities for multi-agent LLM systems. Specialized agents can now efficiently share semantic understanding at scale, enabling collaborative intelligence in bandwidth-constrained environments previously unsuitable for multi-agent deployment.
+## References
+
+- \[1\]Anonymous (2024)LightCache: efficient inference for transformers via KV cache compression in feature dimension.
+In Submitted to ACL Rolling Review - June 2024,
+Note: under reviewExternal Links: [Link](https://openreview.net/forum?id=O65aiPtB1t "")Cited by: [§II-B](https://arxiv.org/html/2512.17914#S2.SS2.p1.1 "II-B KV Cache Management ‣ II Related Works ‣ Q-KVComm: Efficient Multi-Agent Communication Via Adaptive KV Cache Compression").
+- \[2\]R. Campos, V.
+---
+For models with different hidden dimensions where per-dimension statistics are incompatible, we compute scalar statistics by averaging across all dimensions, yielding dimension-agnostic calibration that works across arbitrary architectures. The calibration is performed once during system initialization and then applied efficiently to all subsequent transfers.
+LayerSensitivityBitsL08-bitL18-bitL28-bitL38-bitL46-bitL56-bitL66-bitL76-bitL86-bitL94-bitL104-bitL114-bit8-bit (Top 30%)6-bit (Mid 40%)4-bit (Low 30%)Figure 3: Adaptive layer-wise quantization based on sensitivity ElE\_{l}. Highly sensitive layers receive 8 bits, moderately sensitive layers receive 6 bits, and low sensitivity layers receive 4 bits, achieving an average 6-bit compression.
+### III-CMemory Management and Transmission
+
+Q-KVComm implements production-grade memory management to handle large-scale deployments where caching extracted facts and calibration statistics is essential for efficiency. The memory manager maintains an in-memory least-recently-used cache with configurable size limits. When memory usage exceeds eighty percent of the allocated budget, the system automatically evicts the least recently accessed entries, optionally persisting them to disk for later retrieval. Cache lookups use content-based hashing, assisting with rapid retrieval of previously extracted facts or processed KV caches without recomputation. The adaptive compression manager monitors memory pressure and dynamically adjusts quantization aggressiveness. Under low memory pressure, the system uses conservative compression to maximize quality. As memory usage increases, compression becomes more aggressive, gracefully degrading quality to maintain system stability. This adaptive behavior ensures robust operation across varying workloads and resource constraints.
+The complete transmission pipeline proceeds as follows. First, the sender extracts KV caches for the input context and selects important layers using the attention-Gaussian hybrid strategy. Simultaneously, the information extraction module identifies salient facts from the context. Selected KV caches undergo layer-wise quantization according to the pre-computed bit allocation, and quantized values are bit-packed into a compact binary representation. A header containing quantization parameters, tensor shapes, and metadata is prepended to the packed data. The serialized payload, along with extracted facts, is transmitted to the receiver. Upon reception, the receiver deserializes the payload, unpacks quantized values, and dequantizes them using the transmitted scale and zero-point parameters. If cross-model calibration is enabled, the dequantized KV caches are transformed using the pre-computed calibration statistics. Finally, the receiver integrates the calibrated sender KV caches into its own processing by concatenating them with receiver-generated caches along the sequence dimension during attention computation. Such integration provides the receiver with rich contextual understanding from the sender without requiring full context retransmission \[ [15](https://arxiv.org/html/2512.17914#bib.bib21 "Yarn: efficient context window extension of large language models")\]. The extracted facts are formatted into a compact text summary and prepended to the receiver’s input prompt, providing complementary explicit knowledge alongside implicit KV cache information \[ [6](https://arxiv.org/html/2512.17914#bib.bib19 "Retrieval-augmented generation for large language models: a survey")\]. Together, these mechanisms establish efficient, high-fidelity knowledge transfer between heterogeneous language model agents while minimizing bandwidth and computational overhead.
+## IV Experiments
+
+### IV-AExperimental Setup
+
+We evaluate Q-KVComm using TinyLlama-1.1B-Chat-v1.0 and Qwen2.5-1.5B-Instruct models, representing compact yet capable LLMs suitable for multi-agent deployments.
+---
+Unlike uniform quantization approaches, our method accounts for varying layer importance by assigning 4-8 bits based on measured reconstruction error \[ [8](https://arxiv.org/html/2512.17914#bib.bib5 "Adaptive quantization of neural networks"), [5](https://arxiv.org/html/2512.17914#bib.bib10 "Channel-wise mixed-precision quantization for large language models")\]. Second, a hybrid information extraction pipeline combines multiple strategies—from keyword extraction \[ [2](https://arxiv.org/html/2512.17914#bib.bib4 "YAKE! keyword extraction from single documents using multiple local features")\] to named entity recognition—with automatic content-type detection. The pipeline ensures critical information is preserved across diverse domains, from API documentation to narrative text. Third, a heterogeneous model calibration system enables KV cache translation between architectures with different dimensions through learned statistical mappings, removing the requirement for identical sender-receiver models \[ [11](https://arxiv.org/html/2512.17914#bib.bib6 "Zero-shot domain adaptation without domain semantic descriptors")\].
+Our experimental evaluation demonstrates that Q-KVComm achieves 5-6x compression ratios while maintaining semantic fidelity across diverse question-answering tasks. The protocol exhibits robust performance across model sizes (1.1B-1.5B parameters) and adapts automatically to heterogeneous deployments with less than 5% quality degradation. Production-ready features including memory management, LRU caching, and adaptive compression make the system suitable for real-world deployments in bandwidth-constrained environments such as edge computing and mobile applications \[ [14](https://arxiv.org/html/2512.17914#bib.bib18 "Edge ai inference in heterogeneous constrained computing: feasibility and opportunities"), [3](https://arxiv.org/html/2512.17914#bib.bib15 "Communication-efficient federated learning")\].
+## II Related Works
+
+![Refer to caption](https://arxiv.org/html/2512.17914v1/images/fig1.png)Figure 1: Overview of Q-KVComm Architecture.
+### II-AMulti-Agent LLM Systems
+
+The deployment of multi-agent LLM systems has gained significant traction for solving complex tasks requiring collaboration, specialization, and iterative refinement \[ [20](https://arxiv.org/html/2512.17914#bib.bib22 "Multi-agent collaboration mechanisms: a survey of llms")\]. Traditional architectures rely on full-text communication between agents, where each agent generates complete textual responses that are parsed and processed by downstream agents. While conceptually simple, this approach suffers from redundant computation as each agent must independently reconstruct semantic representations from raw text.
+### II-BKV Cache Management
+
+Key-value caches in transformer models \[ [21](https://arxiv.org/html/2512.17914#bib.bib1 "Attention is all you need")\] store attention keys and values from previous tokens, enabling efficient autoregressive generation by avoiding recomputation. Recent work has explored KV cache compression techniques including quantization \[ [25](https://arxiv.org/html/2512.17914#bib.bib13 "More tokens, lower precision: towards the optimal token-precision trade-off in kv cache compression")\], eviction policies \[ [10](https://arxiv.org/html/2512.17914#bib.bib8 "Preserving large activations: the key to kv cache pruning"), [7](https://arxiv.org/html/2512.17914#bib.bib9 "Attention score is not all you need for token importance indicator in kv cache reduction: value also matters")\], and sparse attention patterns \[ [24](https://arxiv.org/html/2512.17914#bib.bib12 "When linear attention meets autoregressive decoding: towards more effective and efficient linearized large language models")\].

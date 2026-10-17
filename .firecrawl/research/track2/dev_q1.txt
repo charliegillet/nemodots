@@ -1,0 +1,228 @@
+## [issue:plur-ai/plur#8] (issue) Benchmark and feature comparison against local-first memory competitors#8
+https://github.com/plur-ai/plur/issues/8
+License: Apache-2.0
+# Benchmark and feature comparison against local-first memory competitors#8
+## Competitors to benchmark
+### Adjacent (local, not fully MCP-native)
+- **Letta / MemGPT** (Apache 2.0) — self-managing agent memory, sleep-time compute. Has shared memory blocks for multi-agent but not team-oriented.
+- **Graphiti / Zep** (Apache 2.0) — temporal knowledge graph. Cloud version supports teams, OSS version is single-instance.
+
+## What this issue is for now
+Verify Letta (MemGPT) cells from [https://github.com/letta-ai/letta](https://github.com/letta-ai/letta)
+
+- Temporal: "?" → "No first-class temporal (timestamps only; no
+validity windows / 'what was true when')"\
+- Encryption: "?" → "Not in OSS (cloud tier: SOC 2)" — first-party
+at-rest encryption not stated in OSS or OpenMemory MCP docs
+
+Provisional finding #2 ("temporal reasoning is rare") refined with the
+Mem0 evidence: extract-resolve gives write-time conflict resolution but
+not temporal validity over time.
+
+Phase 1 incremental — next cells per the issue #8 checklist:
+Zep/Graphiti, Letta, Cognee.
+\
+
+- Temporal: "?" → "No first-class temporal (timestamps only; no
+validity windows / 'what was true when')"\
+- Encryption: "?" → "Not in OSS (cloud tier: SOC 2)" — first-party
+at-rest encryption not stated in OSS or OpenMemory MCP docs
+
+Provisional finding #2 ("temporal reasoning is rare") refined with the
+Mem0 evidence: extract-resolve gives write-time conflict resolution but
+not temporal validity over time.
+
+Phase 1 incremental — next cells per the issue #8 checklist:
+Zep/Graphiti, Letta, Cognee.
+\
+
+## Phase 1 Mem0 cells merged ✅
+- **Graphiti search is hybrid (semantic + BM25 + graph traversal)** — not just "graph + temporal". Same three-way hybrid as PLUR, plus graph traversal.
+- **Graphiti auto-invalidates contradicting facts** (temporal invalidation, not deletion) — that's the "feedback loop" equivalent, `?` resolved to `Yes`.
+… (9 more lines)
+
+## [readme:cxxz/awesome-agent-memory] (readme) cxxz/awesome-agent-memory
+https://github.com/cxxz/awesome-agent-memory
+License: MIT
+# Awesome Agent Memory
+## Standalone Libraries / Frameworks for Building Agent Memory Systems
+- **Letta** – Memory hierarchy with editable **memory blocks**, agentic context tools, **multi-agent shared memory**, and portable **Agent File (.af)** snapshots.
+- **Zep** – **Temporal knowledge graph** memory (Graphiti engine) with **bi-temporal facts** and **hybrid retrieval** (graph + semantic + keyword).
+Citation: https://raw.githubusercontent.com/cxxz/awesome-agent-memory/HEAD/README.md
+
+## [doc:https://github.com/memory-graph/memory-graph/blob/1adbd8bb527552e9f1510b5c1316a76ad58692d9/docs/planning/PRODUCT_ROADMAP.md] (doc) memory-graph Product Roadmap
+License: MIT
+# memory-graph Product Roadmap
+## ⚠️ COMPETITIVE LANDSCAPE
+### Competitor 2: Zep/Graphiti (Temporal Knowledge Graph Leader)
+Graphiti (by Zep AI, Y Combinator backed) is the state-of-the-art temporal knowledge graph framework with 20K+ GitHub stars.
+
+| Aspect | Graphiti | memory-graph |
+|-|-|-|
+| Temporal Model | Bi-temporal (advanced) ✅ | Basic → Phase 2 upgrade |
+
+- **Bi-temporal tracking**: Track both when a fact was true AND when we learned it
+- **Edge invalidation**: Mark outdated facts as invalid (don't delete), preserving history
+
+## Phase 2: Semantic Navigation & Temporal Model (ELEVATED PRIORITY)
+### 2.1 Study Graphiti Architecture
+Before implementing, study how Graphiti solved these problems.
+
+- **Bi-temporal model**: `t_valid` (when fact was true) vs. `t_invalid` (when superseded)
+- **Edge invalidation**: Contradicting facts invalidate old edges, don't delete them
+
+### 2.2 Implement Bi-Temporal Tracking
+Adopt Graphiti's temporal model for our schema.
+
+## [doc:https://github.com/memory-graph/memory-graph/blob/1adbd8bb527552e9f1510b5c1316a76ad58692d9/docs/archive/13-WORKPLAN.md] (doc) Workplan 13: Bi-Temporal Schema (v0.10.0)
+License: MIT
+## Success Criteria
+
+- [x] Bi-temporal schema implemented (valid_from, valid_until, recorded_at)
+- [x] Migration script for existing databases (002_add_bitemporal.py complete)
+- [x] Point-in-time queries working
+- [x] Edge invalidation mechanism functioning
+- [x] Zero breaking changes for existing queries (1337 tests pass)
+- [x] 25+ tests passing for temporal features (15 tests passing)
+- [x] Documentation with temporal query examples (temporal-memory.md complete)
+
+---
+
+## Section 1: Study Graphiti Architecture
+
+### 1.1 Research Graphiti Implementation
+
+**Reference**: Graphiti GitHub (Apache 2.0, can learn from)
+
+**Tasks**:
+- [x] Read Graphiti paper: "Zep: A Temporal Knowledge Graph Architecture"
+- [x] Review Graphiti architecture (focused on temporal model)
+- [x] Document key patterns in ADR-016
+- [x] Identify what applies to coding workflows vs general-purpose
+- [x] Note performance implications of temporal queries
+
+### 1.2 Create Technical Specification
+
+**File**: `/Users/gregorydickson/claude-code-memory/docs/adr/016-bi-temporal-tracking.md`
+
+**Content**:
+… (34 more lines)
+
+## [readme:lhl/agentic-memory] (readme) lhl/agentic-memory
+https://github.com/lhl/agentic-memory
+# Agentic Memory Research
+## Paper Reference Summaries (Academic / Industry)
+| Document | Author | Description |
+|-|-|-|
+| rasmussen-zep | Rasmussen et al. | **Zep**: production memory layer built on **Graphiti**, a **bi-temporal** knowledge graph (episodes → entities/facts → communities) with validity intervals and invalidation-based corrections; evaluated on DMR + LongMemEval. |
+Citation: https://raw.githubusercontent.com/lhl/agentic-memory/HEAD/README.md
+
+## [doc:https://github.com/lpalbou/abstractcore/blob/6ec5cedee7348ed34ee3a3b37cb62111d70fe49c/docs/research/memory/Agentic%20AI%20Persistent%20Memory%20Overview.md] (doc) **Persistent Memory Architectures for Agentic AI: A Comprehensive Technical Analysis (2025)**
+License: MIT
+# **Persistent Memory Architectures for Agentic AI: A Comprehensive Technical Analysis (2025)**
+## ---
+### **4.2 Zep: The Temporal Knowledge Graph**
+#### **4.2.1 Graphiti Engine**
+- **Temporal Edges**: Zep's graph schema includes valid_from and valid_until attributes on edges. This allows the system to distinguish between "current" facts and "historical" facts. A query for "What is the user's current address?" filters edges based on their temporal validity, solving the "stale data" problem inherent in standard RAG.22
+
+## **Table 3: Continuous Learning Technologies**
+#### **Works cited**
+23. getzep/graphiti: Build Real-Time Knowledge Graphs for AI Agents - GitHub, accessed December 12, 2025, [https://github.com/getzep/graphiti](https://github.com/getzep/graphiti)
+
+## [doc:https://github.com/vectorize-io/hindsight/blob/e00ca6d3ba53dea6124156881d78e21bdbbda87d/hindsight-docs/blog/2026-08-11-open-source-agent-memory-systems.md] (doc) Best Open-Source Agent Memory Systems (Self-Hosted, 2026)
+License: MIT
+### Graphiti / Zep — the temporal specialist
+
+This is the one to reach for when *when a fact was true* is the whole job. Graphiti, the open-source engine under Zep, models time natively: every edge in its knowledge graph carries validity metadata, so it answers "what was the customer's plan before the Q2 change?" cleanly. For compliance timelines and audit trails, that temporal depth is hard to match, and it's the axis where Graphiti genuinely leads.
+
+Two caveats for self-hosters. **Zep Community Edition was deprecated in 2025**, so the free, open-source path to "self-host Zep with full features" is gone — what you self-host is Graphiti, the engine, not the whole product (enterprise BYOC aside). And Graphiti typically stores its graph in an external database (Neo4j or FalkorDB, though an embedded FalkorDB lite mode exists), so in most deployments you're running and operating that alongside your app.
+
+### Letta — the agent runtime
+
+Letta (formerly MemGPT) is the odd one out here, in a useful way: it's not really a drop-in memory *layer*, it's an **agent runtime** with memory built in. If you want the whole framework — the agent loop, tool use, and memory as one opinionated system — Letta is a strong, self-hostable choice with a real research lineage. Its memory model is worth knowing: agents hold editable **memory blocks** (a small, always-in-context core the agent rewrites itself) plus **archival memory** for the long tail, an idea straight from the MemGPT paper. If you already have an agent and just want to bolt on memory, it's heavier than you need, because you're adopting a runtime to get a memory feature.
+
+### Cognee — the graph-pipeline option
+
+Cognee's angle is an ECL (extract-cognify-load) graph pipeline with pluggable, embedded-by-default storage (SQLite, LanceDB, Kuzu), which makes for a genuinely low-friction local start with no mandatory cloud. If you like the idea of a configurable graph-construction pipeline over your data, it's worth a look.
+
+The thing to bring your own skepticism to is the ranking. Several of the "best open-source memory" roundups at the top of Google are Cognee's own, and they place Cognee first without independent benchmark numbers. That's the gap this whole post is about: prefer a system that publishes a score on a benchmark you can reproduce over one that ranks itself in a blog it controls.
+
+## [web:https://docs.letta.com/v1-sdk/memory/shared-memory] Shared memory | Letta Docs
+Shared memory blocks let multiple agents access and update the same memory. When one agent updates the block, all others see the change immediately.
+
+## [doc:https://vectorize.io/articles/langchain-memory-alternatives] (doc) langchain memory alternatives
+### 4\. Zep / Graphiti — Temporal Knowledge Graph
+
+Zep is a memory service with Graphiti, its open-source temporal knowledge graph engine, at its core. The standout feature is how it handles time — something most memory systems ignore.
+
+**What it is:** An agent memory platform built around a temporal knowledge graph. Graphiti models entities, relationships, and how they change over time. Facts have timestamps, relationships have validity windows, and queries can be scoped to specific time ranges.
+
+**Strengths vs LangMem:**
+
+- **Temporal knowledge graph** — first-class time modeling. Track when facts became true, when they changed, and query by time range.
+- **Multi-language SDKs** — Python, TypeScript, and Go support.
+- **Open-source engine** — Graphiti is open-source, so you can self-host the KG layer.
+- **Entity and relationship modeling** — structured knowledge representation beyond flat key-value storage.
+
+**Limitations:**
+
+- Requires Neo4j for the knowledge graph, adding infrastructure complexity.
+- The managed Zep service and open-source Graphiti have different feature sets — some capabilities are only in the managed version.
+- Community is smaller than Mem0's, though still active.
+- Retrieval strategies beyond graph traversal are less developed.
+
+**Best for:** Teams whose agents need to reason about how information changes over time — compliance, audit trails, evolving policies, project timelines.
+
+**Pricing:** Graphiti is open-source. Zep managed service on paid plans.
+
+* * *
+
+## LangChain Memory Alternatives: Quick Comparison
+
+| Alternative | Framework Lock-in | Retrieval Strategies | Knowledge Graph | SDKs | Open Source | Best For |
+| --- | --- | --- | --- | --- | --- | --- |
+| **Hindsight** | None | 4 + reranking | Yes (entity resolution, reflect) | Python, TS, Go | MIT | Overall best alternative |
+| **Mem0** | None | Vector (+ graph in Pro) | Pro only | Python, TS | Apache 2.0 | Large community, basic needs |
+| **Letta** | Letta runtime | Tiered | Basic | Python | Apache 2.0 | Self-editing memory |
+| **Zep / Graphiti** | None | Graph + temporal | Yes (temporal) | Python, TS, Go | Graphiti: open | Time-aware reasoning |
+
+## [doc:https://github.com/sswconsulting/ssw.rules.content/blob/764eb43f1c6474c8a8bb9eb72ff34e5b1c44bb58/public/uploads/rules/ai-agent-memory-systems/rule.mdx] (doc) AI Agents - Do you know the types of AI agent memory?
+License: CC0-1.0
+#### Zep / Graphiti
+
+Zep (and its open-source core, Graphiti) is the most prominent temporal knowledge graph for agent memory. Relationships have validity windows, so it can answer queries like "what was the policy as of last March," which vector search just can't.
+
+Cognee is in the same space, a more recent open-source competitor.
+
+#### ⭐️ Beads
+
+Beads (Steve Yegge, October 2025) is a different flavour of graph: a distributed graph *issue tracker* for coding agents, backed by Dolt. The primary unit is an issue with typed dependencies (`blocks`, `related`, `parent-child`, `supersedes`, `duplicates`). Free-form project knowledge is stored via `bd remember "insight"` and re-injected by `bd prime` at session start.
+
+Good fit for engineering work with real dependencies and conventions worth pinning ("we resolve recipe alternates depth-first," "throughput rounds half-to-even at 6 decimals"). The hooks make `bd remember` fire automatically at decision points. `bd prime` then makes retrieval rock-solid for everything that did get saved.
+
+### Agent-managed paging (the MemGPT model)
+
+This is the only pattern where the agent is in charge of its own memory rather than memory being managed for it. There's "core memory" always visible in the context window (like RAM) and "archival memory" sitting in a vector store the agent queries with explicit tool calls. The agent itself decides what to page in and out.
+
+The upside is long-horizon autonomy: agents that run for days. The cost is complexity and latency, because every decision about what to remember costs an LLM call.
+
+#### Letta (formerly MemGPT)
+
+Letta is the canonical implementation. The agent queries archival memory with `archival_memory_search` and rewrites core memory with `core_memory_replace`. Best fit for long-horizon autonomous agents that run for days. The cost is committing to Letta as your harness instead of Claude Code.
+
+## [web:https://nomadx.ae/blog/advanced-agent-memory-knowledge-graphs-zep-graphiti-2026/] Advanced AI Agent Memory: Temporal Knowledge Graphs - NomadX
+A temporal knowledge graph models how facts change over time using bi-temporal edges (valid time plus transaction time), so a superseded fact is
+
+## [web:https://www.getzep.com/ai-agents/temporal-knowledge-graph/] What Is a Temporal Knowledge Graph? Definition - Zep
+A temporal knowledge graph for agents is purpose-built: bi-temporal edges, automatic fact invalidation, episode-level provenance, and a
+
+## [web:https://neo4j.com/blog/developer/graphiti-knowledge-graph-memory/] Graphiti: Knowledge graph memory for an agentic world - Neo4j
+Zep AI's Graphiti framework introduces a flexible, real-time memory layer built on temporally aware knowledge graphs and stored in Neo4j.
+
+## [doc:https://github.com/panaversity/learn-agentic-ai/blob/dd7426f65b2452062fdb6d27661c018eaf751baa/04_building_effective_agents/04_augumentation_memory/05_mcp_temporal_memory/readme.md] (doc) Step 5: From Temporal KG Theory to Practice with [Graphiti](https://help.getzep.com/graphiti/getting-started/overview)
+# Step 5: From Temporal KG Theory to Practice with Graphiti
+## The Challenge: Theory vs. Implementation
+You now understand that temporal knowledge graphs are powerful for agent memory.
+
+## [web:https://medium.com/@bijit211987/agents-that-remember-temporal-knowledge-graphs-as-long-term-memory-2405377f4d51] Agents That Remember, Temporal Knowledge Graphs as Long-Term ...
+A temporal knowledge graph externalizes memory. It creates a shared memory substrate that agents can: Read from: to recall user preferences,
