@@ -128,6 +128,8 @@ export function createOutbox(
   let running = false;
   let stopped = true;
   let wake: (() => void) | null = null;
+  /** A notification arrived since the current cycle began (it may have raced the drain). */
+  let dirty = false;
   let loop: Promise<void> | null = null;
 
   const report = (error: unknown, message?: OutboxMessage) => {
@@ -272,6 +274,7 @@ export function createOutbox(
       });
       client.on('error', (error) => report(error));
       client.on('notification', () => {
+        dirty = true;
         wake?.();
       });
       await client.connect();
@@ -279,7 +282,10 @@ export function createOutbox(
       listener = client;
       loop = (async () => {
         while (!stopped) {
+          dirty = false;
           await tick();
+          // A wakeup that raced the tick must not wait for the next poll.
+          if (dirty) continue;
           await new Promise<void>((resolve) => {
             const t = setTimeout(resolve, pollMs);
             wake = () => {

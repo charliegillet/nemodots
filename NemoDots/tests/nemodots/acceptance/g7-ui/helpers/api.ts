@@ -116,6 +116,35 @@ export class NemoApi {
     );
   }
 
+  /** Raw event-stream text (for leak scanning), replayed from `lastEventId`. */
+  async rawEventText(
+    id: string,
+    options: { lastEventId?: number; maxMs?: number } = {},
+  ): Promise<string> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), options.maxMs ?? 4000);
+    let text = '';
+    try {
+      const res = await this.raw(`/missions/${id}/events`, {
+        signal: controller.signal,
+        headers: { 'Last-Event-ID': String(options.lastEventId ?? 0) },
+      });
+      if (!res.ok || !res.body) throw new Error(`events -> ${res.status}`);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        text += decoder.decode(value, { stream: true });
+      }
+    } catch (error) {
+      if ((error as Error).name !== 'AbortError') throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+    return text;
+  }
+
   /** Reads the durable SSE stream until `stopWhen` or the idle/timeout budget. */
   async events(
     id: string,

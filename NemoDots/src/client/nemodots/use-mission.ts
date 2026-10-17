@@ -54,7 +54,7 @@ export function useMission(missionId: string): UseMissionResult {
   const [stream, setStream] = useState<StreamStatus>('connecting');
   const [streamDetail, setStreamDetail] = useState<string | null>(null);
   const streamRef = useRef<StreamStatus>('connecting');
-  const loadRef = useRef<(() => Promise<boolean>) | null>(null);
+  const loadRef = useRef<(() => Promise<void>) | null>(null);
 
   useEffect(() => {
     dispatch({ type: 'reset', missionId });
@@ -68,32 +68,37 @@ export function useMission(missionId: string): UseMissionResult {
     const controller = new AbortController();
     let handle: ReturnType<typeof openMissionStream> | null = null;
 
-    const load = async (): Promise<boolean> => {
+    /** Merges a snapshot; resolves to its lastEventId, null when unreadable, -1 when gone. */
+    const loadSnapshot = async (): Promise<number | null> => {
       try {
         const snapshot = await getMissionSnapshot(missionId, controller.signal);
-        if (!active) return false;
+        if (!active) return null;
         dispatch({ type: 'snapshot', snapshot });
         setLoaded(true);
         setError(null);
         setMissing(false);
-        return true;
+        return snapshot.lastEventId;
       } catch (failure) {
-        if (!active || controller.signal.aborted) return false;
+        if (!active || controller.signal.aborted) return null;
         const gone =
           failure instanceof ApiError &&
           (failure.status === 404 || failure.status === 403);
         if (gone) setMissing(true);
         setError(failureText(failure, 'Could not load the mission.'));
-        return !gone;
+        return gone ? -1 : 0;
       }
+    };
+    const load = async () => {
+      await loadSnapshot();
     };
     loadRef.current = load;
 
     const start = async () => {
-      const readable = await load();
-      if (!active || !readable) return;
+      const resumeFrom = await loadSnapshot();
+      if (!active || resumeFrom === null || resumeFrom < 0) return;
       handle = openMissionStream({
         missionId,
+        lastEventId: resumeFrom,
         onEvent: (event) => {
           if (active) dispatch({ type: 'event', event });
         },

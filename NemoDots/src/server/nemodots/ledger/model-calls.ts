@@ -31,8 +31,7 @@ import type { LedgerOptions } from './options.js';
 import { getReceiptRows } from './receipt-store.js';
 import { assertCurrent } from './support.js';
 
-const UUID =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface RecordModelCallInput {
   record: ModelCallRecord;
@@ -137,7 +136,8 @@ function modelCallEdges(
   }
   // Inheritance: outputs/handoffs injected into the context.
   for (const artifact of snapshot.injected.inheritedArtifacts) {
-    if (artifact.kind !== 'task_output' && artifact.kind !== 'handoff') continue;
+    if (artifact.kind !== 'task_output' && artifact.kind !== 'handoff')
+      continue;
     if (!UUID.test(artifact.id)) continue;
     const output: NodeRef = { kind: 'task_output', id: artifact.id };
     edges.push({ kind: 'inheritance', from: output, to: modelCall });
@@ -197,7 +197,9 @@ export async function recordModelCall(
 
   // Currency first: locks the controlled rows and observed registry rows FOR
   // SHARE, so the edges inserted below cannot be missed by a closure.
-  const receiptIds = record.outputDependencyVector.map((entry) => entry.receiptId);
+  const receiptIds = record.outputDependencyVector.map(
+    (entry) => entry.receiptId,
+  );
   await assertCurrent(client, receiptIds, { lockMode: 'share' }, options);
   const stored = await getReceiptRows(client, receiptIds);
   for (const entry of record.outputDependencyVector) {
@@ -347,7 +349,9 @@ export async function recordOrphanedAttempt(
       throw new ModelCallRecordError(
         'model_call_invalid',
         `inference attempt ${attempt.n} is invalid: ${parsed.error.issues
-          .map((issue) => `${issue.path.join('.') || '<root>'}: ${issue.message}`)
+          .map(
+            (issue) => `${issue.path.join('.') || '<root>'}: ${issue.message}`,
+          )
           .join('; ')}`,
       );
     return parsed.data;

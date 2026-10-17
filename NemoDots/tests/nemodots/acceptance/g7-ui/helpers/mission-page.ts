@@ -11,11 +11,14 @@
 //   - the run mode as role=group named "Run mode: <Live|Fixture|Blocked>. ..."
 //   - the Intelligence status as a role=group named "Intelligence <state>. ..."
 //   - status pills carry data-status and the status as visible text
+//   - the MISSION-level status is a pill inside a region named "Mission" (or an
+//     element with data-testid="mission-status"); it is the only element the
+//     lifecycle assertions read, so a task pill can never stand in for it
 //   - loading panels use role=status, failed panels role=alert
 import type { Locator, Page } from 'playwright';
 import { expect } from 'playwright/test';
 import type { MissionSnapshot } from '../../../../../src/server/nemodots/contracts/index.js';
-import { humanize } from './ui.js';
+import { escapeRe, humanize, statusText } from './ui.js';
 
 export class MissionPage {
   constructor(readonly page: Page) {}
@@ -85,14 +88,46 @@ export class MissionPage {
     return (await this.main.innerText()).replace(/\s+/g, ' ');
   }
 
+  /** The mission-level status pill (never a task, action or receipt pill). */
+  get missionStatus(): Locator {
+    return this.page
+      .getByRole('region', {
+        name: /^Mission(?: (?:header|summary|status|overview))?$/i,
+      })
+      .locator('[data-status]')
+      .first()
+      .or(this.page.getByTestId('mission-status'))
+      .first();
+  }
+
+  /** Asserts the mission-level status equals `status` in data-status and in text. */
   async expectStatus(status: string, timeout = 30_000) {
     await expect(
-      this.main
-        .locator('[data-status]')
-        .filter({ hasText: new RegExp(humanize(status), 'i') })
-        .first(),
-      `mission page shows status text "${humanize(status)}"`,
-    ).toBeVisible({ timeout });
+      this.missionStatus,
+      `mission-level status is exactly "${status}"`,
+    ).toHaveAttribute('data-status', status, { timeout });
+    await expect(this.missionStatus).toContainText(statusText(status));
+  }
+
+  /** The row element of one task (its own row, not its nested children). */
+  taskRow(title: string): Locator {
+    return this.taskTree
+      .getByRole('listitem')
+      .filter({ hasText: title })
+      .last()
+      .locator(':scope > *')
+      .first();
+  }
+
+  /** Main-area text with every button label removed (for claim scans). */
+  async textWithoutButtons(): Promise<string> {
+    return this.main.evaluate((el) => {
+      const clone = el.cloneNode(true) as HTMLElement;
+      clone
+        .querySelectorAll('button, [role="button"], input, select, textarea')
+        .forEach((node) => node.remove());
+      return (clone.innerText || clone.textContent || '').replace(/\s+/g, ' ');
+    });
   }
 
   async tabTo(target: Locator, maxTabs = 200): Promise<number> {
@@ -128,3 +163,35 @@ export function receiptFacts(snapshot: MissionSnapshot) {
     supersedes: r.supersedes,
   }));
 }
+
+/**
+ * Text of a table row keyed by lower-cased column header, so a cell can be
+ * asserted as "the Revision cell is exactly 32" instead of "32 appears
+ * somewhere in the row".
+ */
+export async function rowCells(row: Locator): Promise<Record<string, string>> {
+  return row.evaluate((el) => {
+    const table = el.closest('table');
+    const heads = Array.from(
+      table?.querySelectorAll('thead th') ?? [],
+    ).map((th) => (th.textContent ?? '').trim().toLowerCase());
+    const cells = Array.from(el.children).map((c) =>
+      (c.textContent ?? '').replace(/\s+/g, ' ').trim(),
+    );
+    return Object.fromEntries(heads.map((h, i) => [h, cells[i] ?? '']));
+  });
+}
+
+/** `label` followed by `value` (labels may be dt/dd, th/td or "Label: value"). */
+export function labelled(label: string | RegExp, value: string | RegExp) {
+  const l = typeof label === 'string' ? escapeRe(label) : label.source;
+  const v = typeof value === 'string' ? escapeRe(value) : value.source;
+  return new RegExp(`(?:${l})\\s*:?\\s*(?:${v})`, 'i');
+}
+
+/** A test whose live precondition was not produced FAILS with this error. */
+export function precondition(ok: unknown, message: string): asserts ok {
+  if (!ok) throw new Error(`PRECONDITION NOT PRODUCED: ${message}`);
+}
+
+export { humanize };

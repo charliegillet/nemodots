@@ -31,6 +31,7 @@ import {
   liveCredentials,
   readLocalSecrets,
   redact,
+  registerPrintOnlySecret,
   registerSecret,
   sleep,
   until,
@@ -149,7 +150,7 @@ export class Acc7Stack {
     this.ownerToken = options.ownerToken
       ? randomBytes(18).toString('hex')
       : null;
-    registerSecret(this.ownerToken ?? undefined);
+    registerPrintOnlySecret(this.ownerToken ?? undefined);
   }
 
   static async start(options: StartOptions): Promise<Acc7Stack> {
@@ -374,6 +375,29 @@ export class Acc7Stack {
       },
       { timeoutMs: 60_000 },
     );
+  }
+
+  /** The probe secret given to the checkout child (a leak needle; never printed). */
+  get probeSecretValue(): string {
+    return this.probeSecret;
+  }
+
+  /** Role database URLs and Redis URL given to the stack (leak needles; never printed). */
+  get credentialValues(): string[] {
+    return [...Object.values(this.db.urls), this.redisUrl()];
+  }
+
+  /** Stops one child the stack started, to test how the UI reports it down. */
+  async stopChild(name: 'checkout' | 'app') {
+    const child = this.managed.find((m) => m.name === name);
+    if (!child) throw new Error(`no managed child named ${name}`);
+    if (child.proc.exitCode !== null) return;
+    child.proc.kill('SIGTERM');
+    const exited = await Promise.race([
+      new Promise<boolean>((done) => child.proc.once('exit', () => done(true))),
+      sleep(5000).then(() => false),
+    ]);
+    if (!exited) child.proc.kill('SIGKILL');
   }
 
   get authHeaders(): Record<string, string> {

@@ -235,7 +235,9 @@ export const emptyMarkSummary = (): MarkSummary => ({
  * transition_version), task_outputs(id, usable, unusable_reason),
  * action_intents(id, status, status_version, block_reason, block_detail).
  */
-export function createCoordinatorMarker(options?: LedgerOptions): ClosureMarker {
+export function createCoordinatorMarker(
+  options?: LedgerOptions,
+): ClosureMarker {
   return {
     async mark(client, { eventId, affected }) {
       const schema = coordinatorSchema(options);
@@ -348,9 +350,10 @@ export async function insertInvalidationEvent(
   const { rows } = await client.query<{
     resolved_at: Date | null;
     created_at: Date;
-  }>('SELECT resolved_at, created_at FROM ledger.invalidation_events WHERE id = $1', [
-    id,
-  ]);
+  }>(
+    'SELECT resolved_at, created_at FROM ledger.invalidation_events WHERE id = $1',
+    [id],
+  );
   return {
     id,
     missionIds: missionIds as InvalidationEvent['missionIds'],
@@ -392,7 +395,8 @@ export interface SupersedeResult {
 }
 
 const isLiveHead = (prior: ReceiptRow | null): prior is ReceiptRow =>
-  prior !== null && (prior.status === 'supported' || prior.status === 'contested');
+  prior !== null &&
+  (prior.status === 'supported' || prior.status === 'contested');
 
 /**
  * Registers `draft` as the new head and, when the prior head was supported or
@@ -438,7 +442,13 @@ export async function supersedeAndInvalidate(
   else
     // A contested head cannot become superseded (transition table); the new
     // observation resolves the contest by retracting it.
-    await transitionRow(client, prior, 'retracted', input.transitionReason, eventId);
+    await transitionRow(
+      client,
+      prior,
+      'retracted',
+      input.transitionReason,
+      eventId,
+    );
 
   const marker =
     input.marker === undefined
@@ -456,7 +466,8 @@ export async function supersedeAndInvalidate(
     selfWrite: receipt.provenance.selfWrite,
     graphVersion: closure.graphVersion,
     affected: closure.affected,
-    perMission: closure.perMission as unknown as InvalidationEvent['perMission'],
+    perMission:
+      closure.perMission as unknown as InvalidationEvent['perMission'],
     closure: { depth: closure.depth, nodes: closure.nodes, capped: false },
   });
   return { receipt, supersededReceiptId: prior.id, event, marks };
@@ -505,7 +516,13 @@ export async function supersedeWithoutClosure(
       receipt.id,
     );
   else
-    await transitionRow(client, prior, 'retracted', input.transitionReason, eventId);
+    await transitionRow(
+      client,
+      prior,
+      'retracted',
+      input.transitionReason,
+      eventId,
+    );
   const perMission = input.coarse?.perMission ?? [];
   const affected = unionAffected(perMission.map((entry) => entry.affected));
   const event = await insertInvalidationEvent(client, {
@@ -571,7 +588,8 @@ export async function invalidateRetired(
     selfWrite: 'none',
     graphVersion: closure.graphVersion,
     affected: closure.affected,
-    perMission: closure.perMission as unknown as InvalidationEvent['perMission'],
+    perMission:
+      closure.perMission as unknown as InvalidationEvent['perMission'],
     closure: { depth: closure.depth, nodes: closure.nodes, capped: false },
   });
   return { event, marks };

@@ -77,7 +77,10 @@ export async function ensureSource(
     [ref.scope.ownerId, ref.scope.environment, ref.scope.resource, ref.key],
   );
   const source = toSourceRow(rows[0]);
-  if (source.sourceType !== ref.sourceType || source.authority !== ref.authority)
+  if (
+    source.sourceType !== ref.sourceType ||
+    source.authority !== ref.authority
+  )
     throw new SourceConflictError(
       `source ${ref.key} is registered as ${source.sourceType}/${source.authority}, not ${ref.sourceType}/${ref.authority}`,
     );
@@ -93,7 +96,8 @@ export async function lockSource(
     `SELECT ${SOURCE_COLUMNS} FROM ledger.sources WHERE id = $1 FOR UPDATE`,
     [sourceId],
   );
-  if (!rows[0]) throw new SourceConflictError(`source ${sourceId} does not exist`);
+  if (!rows[0])
+    throw new SourceConflictError(`source ${sourceId} does not exist`);
   return toSourceRow(rows[0]);
 }
 
@@ -116,7 +120,12 @@ export async function lockSourcesShared(
 
 export async function findSourceByKey(
   client: PgClient,
-  identity: { ownerId: string; environment: Environment; resource: string; key: string },
+  identity: {
+    ownerId: string;
+    environment: Environment;
+    resource: string;
+    key: string;
+  },
 ): Promise<SourceRow | null> {
   const { rows } = await client.query<SourceDbRow>(
     `SELECT ${SOURCE_COLUMNS} FROM ledger.sources

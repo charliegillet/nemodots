@@ -33,13 +33,29 @@ export const modelCall = owned('model_call');
 export const output = owned('task_output');
 export const intent = owned('action_intent');
 
-export const ev = (from: string, to: string) => ({ kind: 'evidence' as const, from, to });
-export const inh = (from: string, to: string) => ({ kind: 'inheritance' as const, from, to });
-export const sch = (from: string, to: string) => ({ kind: 'scheduling' as const, from, to });
+export const ev = (from: string, to: string) => ({
+  kind: 'evidence' as const,
+  from,
+  to,
+});
+export const inh = (from: string, to: string) => ({
+  kind: 'inheritance' as const,
+  from,
+  to,
+});
+export const sch = (from: string, to: string) => ({
+  kind: 'scheduling' as const,
+  from,
+  to,
+});
 
 export function buildGraph(
   nodes: readonly DslNode[],
-  edges: readonly { kind: 'evidence' | 'inheritance' | 'scheduling'; from: string; to: string }[],
+  edges: readonly {
+    kind: 'evidence' | 'inheritance' | 'scheduling';
+    from: string;
+    to: string;
+  }[],
 ) {
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const need = (id: string) => {

@@ -44,15 +44,41 @@ export type G7Case = keyof typeof G7_CASES;
 // ---------------------------------------------------------------- secrets
 
 const secretValues = new Set<string>();
+// Values that are redacted from anything printed but are not leak needles (the
+// owner token legitimately travels in an Authorization header).
+const printOnlyValues = new Set<string>();
+
+export function registerPrintOnlySecret(value: string | undefined) {
+  if (value && value.length >= 6) printOnlyValues.add(value);
+}
 
 /** Registers a value so every log line this suite prints has it replaced. */
 export function registerSecret(value: string | undefined) {
-  if (value && value.length >= 6) secretValues.add(value);
+  if (!value || value.length < 6) return;
+  secretValues.add(value);
+  try {
+    const { password } = new URL(value);
+    if (password.length >= 6) {
+      secretValues.add(password);
+      secretValues.add(decodeURIComponent(password));
+    }
+  } catch {
+    // not a URL
+  }
+}
+
+/**
+ * Raw values for leak scanning. They must never be printed, logged or put in
+ * an assertion message; callers report only the name of the haystack.
+ */
+export function rawSecretValues(): string[] {
+  return [...secretValues];
 }
 
 export function redact(text: string): string {
   let out = text;
-  for (const value of secretValues) out = out.split(value).join('[redacted]');
+  for (const value of [...secretValues, ...printOnlyValues])
+    out = out.split(value).join('[redacted]');
   return out
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}/g, '$1[redacted]')
     .replace(/(postgres(?:ql)?:\/\/[^:\s/]+:)[^@\s]+@/g, '$1[redacted]@');

@@ -116,7 +116,7 @@ function ManualEdit({
 
   return (
     <form
-      className="nd-console-form"
+      className="nd-scenario-form"
       aria-label="Manual source edit"
       onSubmit={(event) => void submit(event)}
     >
@@ -211,7 +211,7 @@ function InjectorRun({ onStarted }: { onStarted: () => void }) {
 
   return (
     <form
-      className="nd-console-form"
+      className="nd-scenario-form"
       aria-label="Injector run"
       onSubmit={(event) => void submit(event)}
     >

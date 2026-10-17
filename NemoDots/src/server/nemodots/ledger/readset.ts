@@ -81,7 +81,11 @@ export async function staleReads(
     const row = rows.get(id);
     if (!row) continue;
     if (row.status === 'superseded')
-      stale.push({ receiptId: id, sourceKey: row.sourceKey, reason: 'stale_version' });
+      stale.push({
+        receiptId: id,
+        sourceKey: row.sourceKey,
+        reason: 'stale_version',
+      });
     else if (row.status !== 'supported')
       stale.push({
         receiptId: id,

@@ -85,7 +85,11 @@ async function registerMember(scope: ReturnType<typeof newScope>, key: string) {
 describe('immutability (trigger, holds for every role including the owner)', () => {
   it('rejects updates to value, digest and revision, deletion, and illegal status transitions', async () => {
     const scope = newScope();
-    const { receipt } = await registerObserved(scope, 'checkout.health', HEALTH_OK);
+    const { receipt } = await registerObserved(
+      scope,
+      'checkout.health',
+      HEALTH_OK,
+    );
     expect(ObservationReceiptSchema.safeParse(receipt).success).toBe(true);
     const { app, admin } = getDb();
     for (const pool of [app, admin]) {
@@ -93,7 +97,7 @@ describe('immutability (trigger, holds for every role including the owner)', () 
         "UPDATE ledger.observation_receipts SET normalized_value = '{}'::jsonb WHERE id = $1",
         "UPDATE ledger.observation_receipts SET content_digest = repeat('0', 64) WHERE id = $1",
         'UPDATE ledger.observation_receipts SET source_revision = source_revision + 1 WHERE id = $1',
-        'UPDATE ledger.observation_receipts SET observed_at = observed_at - interval \'1 day\' WHERE id = $1',
+        "UPDATE ledger.observation_receipts SET observed_at = observed_at - interval '1 day' WHERE id = $1",
         'DELETE FROM ledger.observation_receipts WHERE id = $1',
         "UPDATE ledger.observation_receipts SET status = 'supported' WHERE id = $1", // no-op status but...
         "UPDATE ledger.observation_receipts SET status = 'superseded' WHERE id = $1", // missing version bump
@@ -104,7 +108,9 @@ describe('immutability (trigger, holds for every role including the owner)', () 
           await pool.query(sql, [receipt.id]);
           continue;
         }
-        await expect(pool.query(sql, [receipt.id])).rejects.toThrow(/immutable/i);
+        await expect(pool.query(sql, [receipt.id])).rejects.toThrow(
+          /immutable/i,
+        );
       }
     }
     const after = await currentReceipt(app, {
@@ -140,12 +146,20 @@ describe('immutability (trigger, holds for every role including the owner)', () 
       'receipt_transitions',
       'source_revisions',
     ]) {
-      await expect(app.query(`DELETE FROM ledger.${table}`)).rejects.toThrow(/append-only/);
+      await expect(app.query(`DELETE FROM ledger.${table}`)).rejects.toThrow(
+        /append-only/,
+      );
       await expect(
         app.query(`UPDATE ledger.${table} SET receipt_id = receipt_id`),
       ).rejects.toThrow(/append-only/);
     }
-    expect(await count(app, 'SELECT count(*) AS n FROM ledger.receipt_confirmations WHERE receipt_id = $1', [first.receipt.id])).toBe(1);
+    expect(
+      await count(
+        app,
+        'SELECT count(*) AS n FROM ledger.receipt_confirmations WHERE receipt_id = $1',
+        [first.receipt.id],
+      ),
+    ).toBe(1);
   });
 });
 
@@ -153,7 +167,10 @@ describe('malformed and oversized observations fail safely', () => {
   it('writes nothing for a bad key, a digest/revision claim that disagrees, or an oversize value', async () => {
     const scope = newScope();
     const { app } = getDb();
-    const before = await count(app, 'SELECT count(*) AS n FROM ledger.observation_receipts');
+    const before = await count(
+      app,
+      'SELECT count(*) AS n FROM ledger.observation_receipts',
+    );
     await expect(
       registerObserved(scope, 'billing.ledger', HEALTH_OK),
     ).rejects.toBeInstanceOf(InvalidSourceKeyError);
@@ -177,9 +194,15 @@ describe('malformed and oversized observations fail safely', () => {
 
   it('accepts a value of exactly 16 KiB canonical and refuses one byte more', async () => {
     const scope = newScope();
-    const filler = (bytes: number) => ({ blob: 'x'.repeat(bytes - '{"blob":""}'.length) });
+    const filler = (bytes: number) => ({
+      blob: 'x'.repeat(bytes - '{"blob":""}'.length),
+    });
     expect(Buffer.byteLength(JSON.stringify(filler(16_384)))).toBe(16_384);
-    const ok = await registerObserved(scope, 'checkout.metrics', filler(16_384));
+    const ok = await registerObserved(
+      scope,
+      'checkout.metrics',
+      filler(16_384),
+    );
     expect(ok.receipt.sourceRevision).toBe(1);
     await expect(
       registerObserved(scope, 'checkout.metrics', filler(16_385)),
@@ -195,10 +218,21 @@ describe('sources are scoped by owner, environment, resource and key', () => {
     const t1 = await registerObserved(testScope, 'checkout.health', HEALTH_OK);
     const e1 = await registerObserved(evalScope, 'checkout.health', HEALTH_OK);
     const o1 = await registerObserved(otherOwner, 'checkout.health', HEALTH_OK);
-    const t2 = await registerObserved(testScope, 'checkout.health', HEALTH_DEGRADED);
-    expect([t1.receipt.sourceRevision, e1.receipt.sourceRevision, o1.receipt.sourceRevision]).toEqual([1, 1, 1]);
+    const t2 = await registerObserved(
+      testScope,
+      'checkout.health',
+      HEALTH_DEGRADED,
+    );
+    expect([
+      t1.receipt.sourceRevision,
+      e1.receipt.sourceRevision,
+      o1.receipt.sourceRevision,
+    ]).toEqual([1, 1, 1]);
     expect(t2.receipt.sourceRevision).toBe(2);
-    const { rows: statusRows } = await getDb().app.query<{ id: string; status: string }>(
+    const { rows: statusRows } = await getDb().app.query<{
+      id: string;
+      status: string;
+    }>(
       'SELECT id, status FROM ledger.observation_receipts WHERE id = ANY($1::uuid[])',
       [[t1.receipt.id, e1.receipt.id, o1.receipt.id, t2.receipt.id]],
     );
@@ -223,24 +257,41 @@ describe('observed sources', () => {
   it('a different digest mints revision current+1, supersedes with a transition row and links both ways', async () => {
     const scope = newScope();
     const r1 = await registerObserved(scope, 'checkout.health', HEALTH_OK);
-    const r2 = await registerObserved(scope, 'checkout.health', HEALTH_DEGRADED);
+    const r2 = await registerObserved(
+      scope,
+      'checkout.health',
+      HEALTH_DEGRADED,
+    );
     expect(r1.newRevision && r2.newRevision).toBe(true);
     expect(r2.receipt.sourceRevision).toBe(2);
     expect(r2.receipt.supersedes).toBe(r1.receipt.id);
     expect(r2.supersededReceiptId).toBe(r1.receipt.id);
     const old = await currentReceipt(getDb().app, {
-      ownerId: scope.ownerId, environment: scope.environment, resource: scope.resource, key: 'checkout.health',
+      ownerId: scope.ownerId,
+      environment: scope.environment,
+      resource: scope.resource,
+      key: 'checkout.health',
     });
     expect(old!.id).toBe(r2.receipt.id);
     const transitions = await listTransitions(getDb().app, r1.receipt.id);
     expect(transitions).toHaveLength(1);
-    expect(transitions[0]).toMatchObject({ from: 'supported', to: 'superseded', reason: 'newer_observation' });
-    expect(ReceiptTransitionSchema.safeParse(transitions[0]).success).toBe(true);
+    expect(transitions[0]).toMatchObject({
+      from: 'supported',
+      to: 'superseded',
+      reason: 'newer_observation',
+    });
+    expect(ReceiptTransitionSchema.safeParse(transitions[0]).success).toBe(
+      true,
+    );
     const { rows } = await getDb().app.query(
       'SELECT status, status_version, superseded_by FROM ledger.observation_receipts WHERE id = $1',
       [r1.receipt.id],
     );
-    expect(rows[0]).toEqual({ status: 'superseded', status_version: 1, superseded_by: r2.receipt.id });
+    expect(rows[0]).toEqual({
+      status: 'superseded',
+      status_version: 1,
+      superseded_by: r2.receipt.id,
+    });
     expect(r2.invalidation).not.toBeNull();
     expect(r2.invalidation!.reason).toBe('newer_observation');
   });
@@ -248,19 +299,34 @@ describe('observed sources', () => {
   it('same-digest re-observation mints no revision, appends a confirmation and advances lastConfirmedAt', async () => {
     const scope = newScope();
     const old = new Date(Date.now() - 10 * 60_000);
-    const first = await registerObserved(scope, 'checkout.health', HEALTH_OK, { observedAt: old });
+    const first = await registerObserved(scope, 'checkout.health', HEALTH_OK, {
+      observedAt: old,
+    });
     expect(first.receipt.lastConfirmedAt).toBe(first.receipt.observedAt);
     const again = await registerObserved(scope, 'checkout.health', HEALTH_OK);
     expect(again.newRevision).toBe(false);
     expect(again.confirmation).not.toBeNull();
     expect(again.receipt.id).toBe(first.receipt.id);
     expect(again.receipt.sourceRevision).toBe(1);
-    expect(Date.parse(again.receipt.lastConfirmedAt)).toBeGreaterThan(Date.parse(first.receipt.lastConfirmedAt));
+    expect(Date.parse(again.receipt.lastConfirmedAt)).toBeGreaterThan(
+      Date.parse(first.receipt.lastConfirmedAt),
+    );
     expect(again.receipt.observedAt).toBe(first.receipt.observedAt);
-    const confirmations = await listConfirmations(getDb().app, first.receipt.id);
+    const confirmations = await listConfirmations(
+      getDb().app,
+      first.receipt.id,
+    );
     expect(confirmations).toHaveLength(1);
-    expect(ReceiptConfirmationSchema.safeParse(confirmations[0]).success).toBe(true);
-    expect(await count(getDb().app, 'SELECT count(*) AS n FROM ledger.observation_receipts WHERE id = $1 OR supersedes = $1', [first.receipt.id])).toBe(1);
+    expect(ReceiptConfirmationSchema.safeParse(confirmations[0]).success).toBe(
+      true,
+    );
+    expect(
+      await count(
+        getDb().app,
+        'SELECT count(*) AS n FROM ledger.observation_receipts WHERE id = $1 OR supersedes = $1',
+        [first.receipt.id],
+      ),
+    ).toBe(1);
   });
 
   it('the very same value, five more times: one receipt, five confirmations', async () => {
@@ -270,8 +336,16 @@ describe('observed sources', () => {
       const again = await registerObserved(scope, 'checkout.health', HEALTH_OK);
       expect(again.receipt.sourceRevision).toBe(1);
     }
-    expect(await listConfirmations(getDb().app, first.receipt.id)).toHaveLength(5);
-    expect(await count(getDb().app, 'SELECT count(*) AS n FROM ledger.source_revisions WHERE receipt_id = $1', [first.receipt.id])).toBe(1);
+    expect(await listConfirmations(getDb().app, first.receipt.id)).toHaveLength(
+      5,
+    );
+    expect(
+      await count(
+        getDb().app,
+        'SELECT count(*) AS n FROM ledger.source_revisions WHERE receipt_id = $1',
+        [first.receipt.id],
+      ),
+    ).toBe(1);
   });
 
   it('a claimed revision older than the one assignable is a stale observation', async () => {
@@ -279,7 +353,9 @@ describe('observed sources', () => {
     await registerObserved(scope, 'checkout.health', HEALTH_OK);
     await registerObserved(scope, 'checkout.health', HEALTH_DEGRADED);
     await expect(
-      registerObserved(scope, 'checkout.health', HEALTH_OK, { claimed: { sourceRevision: 1 } }),
+      registerObserved(scope, 'checkout.health', HEALTH_OK, {
+        claimed: { sourceRevision: 1 },
+      }),
     ).rejects.toBeInstanceOf(StaleObservationRejectedError);
   });
 
@@ -287,12 +363,27 @@ describe('observed sources', () => {
     const scope = newScope();
     const first = await registerObserved(scope, 'checkout.health', HEALTH_OK);
     await inTx(getDb().app, (client) =>
-      transitionReceipt(client, { receiptId: first.receipt.id, to: 'contested', reason: 'conflicting_observation' }, opts),
+      transitionReceipt(
+        client,
+        {
+          receiptId: first.receipt.id,
+          to: 'contested',
+          reason: 'conflicting_observation',
+        },
+        opts,
+      ),
     );
-    const second = await registerObserved(scope, 'checkout.health', HEALTH_DEGRADED);
+    const second = await registerObserved(
+      scope,
+      'checkout.health',
+      HEALTH_DEGRADED,
+    );
     expect(second.receipt.supersedes).toBe(first.receipt.id);
     const transitions = await listTransitions(getDb().app, first.receipt.id);
-    expect(transitions.map((t) => `${t.from}>${t.to}`)).toEqual(['supported>contested', 'contested>retracted']);
+    expect(transitions.map((t) => `${t.from}>${t.to}`)).toEqual([
+      'supported>contested',
+      'contested>retracted',
+    ]);
     // re-observing the contested value mints a new revision instead of reviving it
     const third = await registerObserved(scope, 'checkout.health', HEALTH_OK);
     expect(third.receipt.sourceRevision).toBe(3);
@@ -323,7 +414,10 @@ describe('controlled sources take their revision from the authority', () => {
     const r1 = await registerMember(scope, 'db.pool_max');
     await inTx(getDb().app, (client) => updateConfig(client, 'db.pool_max', 6));
     const r2 = await registerMember(scope, 'db.pool_max');
-    const before = await count(getDb().app, 'SELECT count(*) AS n FROM ledger.observation_receipts');
+    const before = await count(
+      getDb().app,
+      'SELECT count(*) AS n FROM ledger.observation_receipts',
+    );
     const attempt = (claimed: number) =>
       inTx(getDb().app, (client) =>
         registerObservation(
@@ -337,11 +431,21 @@ describe('controlled sources take their revision from the authority', () => {
           opts,
         ),
       );
-    await expect(attempt(r1.receipt.sourceRevision)).rejects.toBeInstanceOf(StaleObservationRejectedError);
+    await expect(attempt(r1.receipt.sourceRevision)).rejects.toBeInstanceOf(
+      StaleObservationRejectedError,
+    );
     await expect(attempt(999)).rejects.toBeInstanceOf(RevisionMismatchError);
-    expect(await count(getDb().app, 'SELECT count(*) AS n FROM ledger.observation_receipts')).toBe(before);
+    expect(
+      await count(
+        getDb().app,
+        'SELECT count(*) AS n FROM ledger.observation_receipts',
+      ),
+    ).toBe(before);
     const head = await currentReceipt(getDb().app, {
-      ownerId: scope.ownerId, environment: scope.environment, resource: scope.resource, key: 'checkout.config/db.pool_max',
+      ownerId: scope.ownerId,
+      environment: scope.environment,
+      resource: scope.resource,
+      key: 'checkout.config/db.pool_max',
     });
     expect(head!.id).toBe(r2.receipt.id);
     expect(head!.status).toBe('supported');
@@ -380,7 +484,11 @@ describe('controlled sources take their revision from the authority', () => {
       'SELECT status FROM ledger.observation_receipts WHERE id = ANY($1::uuid[]) ORDER BY source_revision',
       [[a1.receipt.id, b.receipt.id, a2.receipt.id]],
     );
-    expect(rows.map((r) => r.status)).toEqual(['superseded', 'superseded', 'supported']);
+    expect(rows.map((r) => r.status)).toEqual([
+      'superseded',
+      'superseded',
+      'supported',
+    ]);
   });
 
   it('registers a controlled key that is not in the authority as a missing source', async () => {
@@ -411,20 +519,34 @@ describe('controlled sources take their revision from the authority', () => {
         {
           source: sourceRef(scope, 'checkout.config/db.pool_max'),
           normalizedValue: read.normalizedValue,
-          provenance: { kind: 'commit_postcondition', causedByActionId: actionId as never, selfWrite: 'verified' },
+          provenance: {
+            kind: 'commit_postcondition',
+            causedByActionId: actionId as never,
+            selfWrite: 'verified',
+          },
         },
         opts,
       );
     });
-    expect(result.receipt.provenance).toMatchObject({ causedByActionId: actionId, selfWrite: 'verified' });
+    expect(result.receipt.provenance).toMatchObject({
+      causedByActionId: actionId,
+      selfWrite: 'verified',
+    });
     const { rows } = await getDb().app.query<{ caused_by_action_id: string }>(
       'SELECT caused_by_action_id FROM ledger.source_revisions WHERE receipt_id = $1',
       [result.receipt.id],
     );
     expect(rows[0].caused_by_action_id).toBe(actionId);
     // the plain registration right after carries none
-    const plain = await registerObserved(newScope(), 'checkout.health', HEALTH_OK);
-    expect(plain.receipt.provenance).toMatchObject({ causedByActionId: null, selfWrite: 'none' });
+    const plain = await registerObserved(
+      newScope(),
+      'checkout.health',
+      HEALTH_OK,
+    );
+    expect(plain.receipt.provenance).toMatchObject({
+      causedByActionId: null,
+      selfWrite: 'none',
+    });
   });
 });
 
@@ -434,9 +556,19 @@ describe('ReceiptNotRegistrable', () => {
     await seedConfig(getDb().app, { 'db.pool_max': 3 });
     const r1 = await registerMember(scope, 'db.pool_max');
     await inTx(getDb().app, (client) =>
-      transitionReceipt(client, { receiptId: r1.receipt.id, to: 'retracted', reason: 'owner_retraction' }, opts),
+      transitionReceipt(
+        client,
+        {
+          receiptId: r1.receipt.id,
+          to: 'retracted',
+          reason: 'owner_retraction',
+        },
+        opts,
+      ),
     );
-    await expect(registerMember(scope, 'db.pool_max')).rejects.toBeInstanceOf(ReceiptNotRegistrableError);
+    await expect(registerMember(scope, 'db.pool_max')).rejects.toBeInstanceOf(
+      ReceiptNotRegistrableError,
+    );
     await inTx(getDb().app, (client) => updateConfig(client, 'db.pool_max', 4));
     const r2 = await registerMember(scope, 'db.pool_max');
     expect(r2.receipt.sourceRevision).toBe(2);

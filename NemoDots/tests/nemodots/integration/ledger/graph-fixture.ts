@@ -11,9 +11,10 @@ import {
   addEdges,
   registerObservation,
   type NodeRef,
+  type RegisterOptions,
   type RegisterResult,
 } from '../../../../src/server/nemodots/ledger/index.js';
-import type { DslNode } from '../ledger/graph-dsl.js';
+import type { DslNode } from '../../ledger/graph-dsl.js';
 import {
   FX,
   collectionState,
@@ -58,7 +59,11 @@ function scopeFor(base: TestScope, spec: ReceiptSpec): TestScope {
 export async function loadGraph(
   app: pg.Pool,
   nodes: readonly DslNode[],
-  edges: readonly { kind: 'evidence' | 'inheritance' | 'scheduling'; from: string; to: string }[],
+  edges: readonly {
+    kind: 'evidence' | 'inheritance' | 'scheduling';
+    from: string;
+    to: string;
+  }[],
   options: GraphOptions,
 ): Promise<LoadedGraph> {
   const scope = newScope();
@@ -87,21 +92,36 @@ export async function loadGraph(
         const state = await collectionState(client);
         return registerObservation(
           client,
-          { source: sourceRef(receiptScope, spec.key), normalizedValue: state, ...common },
+          {
+            source: sourceRef(receiptScope, spec.key),
+            normalizedValue: state,
+            ...common,
+          },
           { ledger: FX },
         );
       }
       if (spec.key.startsWith('checkout.config/')) {
-        const read = await readMember(client, spec.key.slice('checkout.config/'.length));
+        const read = await readMember(
+          client,
+          spec.key.slice('checkout.config/'.length),
+        );
         return registerObservation(
           client,
-          { source: sourceRef(receiptScope, spec.key), normalizedValue: read.normalizedValue, ...common },
+          {
+            source: sourceRef(receiptScope, spec.key),
+            normalizedValue: read.normalizedValue,
+            ...common,
+          },
           { ledger: FX },
         );
       }
       return registerObservation(
         client,
-        { source: sourceRef(receiptScope, spec.key), normalizedValue: HEALTH(1), ...common },
+        {
+          source: sourceRef(receiptScope, spec.key),
+          normalizedValue: HEALTH(1),
+          ...common,
+        },
         { ledger: FX },
       );
     });
@@ -115,8 +135,10 @@ export async function loadGraph(
     if (node.kind === 'task') taskUuid.set(node.id, id);
   }
 
-  const mission = (node: DslNode) => (node.missionId ? missionOf(node.missionId) : null);
-  const taskOf = (node: DslNode) => (node.taskId ? ids.get(node.taskId)! : null);
+  const mission = (node: DslNode) =>
+    node.missionId ? missionOf(node.missionId) : null;
+  const taskOf = (node: DslNode) =>
+    node.taskId ? ids.get(node.taskId)! : null;
   const byId = new Map(nodes.map((n) => [n.id, n]));
 
   // coordinator rows
@@ -133,7 +155,12 @@ export async function loadGraph(
         case 'attempt':
           await client.query(
             'INSERT INTO fx_coordinator.task_attempts (id, task_id, mission_id, status) VALUES ($1, $2, $3, $4)',
-            [id, taskOf(node), mission(node), options.attemptStatus?.[node.id] ?? 'published'],
+            [
+              id,
+              taskOf(node),
+              mission(node),
+              options.attemptStatus?.[node.id] ?? 'published',
+            ],
           );
           break;
         case 'task_output':
@@ -145,7 +172,12 @@ export async function loadGraph(
         case 'action_intent':
           await client.query(
             'INSERT INTO fx_coordinator.action_intents (id, mission_id, task_id, status) VALUES ($1, $2, $3, $4)',
-            [id, mission(node), taskOf(node), options.intentStatus?.[node.id] ?? 'proposed'],
+            [
+              id,
+              mission(node),
+              taskOf(node),
+              options.intentStatus?.[node.id] ?? 'proposed',
+            ],
           );
           break;
         default:
@@ -166,7 +198,11 @@ export async function loadGraph(
   await inTx(app, (client) =>
     addEdges(
       client,
-      edges.map((edge) => ({ kind: edge.kind, from: ref(edge.from), to: ref(edge.to) })),
+      edges.map((edge) => ({
+        kind: edge.kind,
+        from: ref(edge.from),
+        to: ref(edge.to),
+      })),
     ),
   );
 
@@ -189,8 +225,12 @@ export async function changeReceipt(
   app: pg.Pool,
   graph: LoadedGraph,
   symbol: string,
-  how: 'member_value_change' | 'collection_insert' | 'collection_delete' | 'observed_digest_change',
-  hooks?: Parameters<typeof registerObservation>[2] extends infer O ? (O extends { hooks?: infer H } ? H : never) : never,
+  how:
+    | 'member_value_change'
+    | 'collection_insert'
+    | 'collection_delete'
+    | 'observed_digest_change',
+  hooks?: RegisterOptions['hooks'],
 ): Promise<RegisterResult> {
   const spec = graph.receiptSpec(symbol);
   const scope = graph.scopeOf(symbol);
@@ -200,7 +240,11 @@ export async function changeReceipt(
     if (how === 'observed_digest_change')
       return registerObservation(
         client,
-        { source: sourceRef(scope, spec.key), normalizedValue: HEALTH(2), ...common },
+        {
+          source: sourceRef(scope, spec.key),
+          normalizedValue: HEALTH(2),
+          ...common,
+        },
         options,
       );
     if (how === 'member_value_change') {
@@ -209,23 +253,36 @@ export async function changeReceipt(
       const read = await readMember(client, key);
       return registerObservation(
         client,
-        { source: sourceRef(scope, spec.key), normalizedValue: read.normalizedValue, claimed: { sourceRevision: read.version }, ...common },
+        {
+          source: sourceRef(scope, spec.key),
+          normalizedValue: read.normalizedValue,
+          claimed: { sourceRevision: read.version },
+          ...common,
+        },
         options,
       );
     }
     if (how === 'collection_insert') {
-      await client.query('SELECT version FROM fx_checkout.config_collection FOR UPDATE');
+      await client.query(
+        'SELECT version FROM fx_checkout.config_collection FOR UPDATE',
+      );
       await client.query(
         "INSERT INTO fx_checkout.config_entries (key, value, version) VALUES ($1, 'true'::jsonb, 1)",
         [`checkout.restrict_${randomUUID().slice(0, 8)}`],
       );
-      await client.query('UPDATE fx_checkout.config_collection SET version = version + 1');
+      await client.query(
+        'UPDATE fx_checkout.config_collection SET version = version + 1',
+      );
     } else {
-      await client.query('SELECT version FROM fx_checkout.config_collection FOR UPDATE');
+      await client.query(
+        'SELECT version FROM fx_checkout.config_collection FOR UPDATE',
+      );
       await client.query(
         'DELETE FROM fx_checkout.config_entries WHERE key = (SELECT key FROM fx_checkout.config_entries ORDER BY key LIMIT 1)',
       );
-      await client.query('UPDATE fx_checkout.config_collection SET version = version + 1');
+      await client.query(
+        'UPDATE fx_checkout.config_collection SET version = version + 1',
+      );
     }
     const state = await collectionState(client);
     return registerObservation(
@@ -237,7 +294,8 @@ export async function changeReceipt(
 }
 
 export function symbolic(graph: LoadedGraph, affected: Affected) {
-  const map = (ids: readonly string[]) => ids.map((id) => graph.symbol(id)).sort();
+  const map = (ids: readonly string[]) =>
+    ids.map((id) => graph.symbol(id)).sort();
   return {
     modelCallIds: map(affected.modelCallIds),
     attemptIds: map(affected.attemptIds),
@@ -247,12 +305,15 @@ export function symbolic(graph: LoadedGraph, affected: Affected) {
   };
 }
 
-export function symbolicPerMission(graph: LoadedGraph, event: InvalidationEvent) {
+export function symbolicPerMission(
+  graph: LoadedGraph,
+  event: InvalidationEvent,
+) {
   return event.perMission
     .map((entry) => ({
       missionId: graph.symbol(entry.missionId),
       affected: symbolic(graph, entry.affected),
-      preserved: graph.symbol === undefined ? [] : entry.preserved.taskIds.map((id) => graph.symbol(id)).sort(),
+      preserved: entry.preserved.taskIds.map((id) => graph.symbol(id)).sort(),
     }))
     .sort((a, b) => (a.missionId < b.missionId ? -1 : 1));
 }
@@ -260,15 +321,26 @@ export function symbolicPerMission(graph: LoadedGraph, event: InvalidationEvent)
 export async function coordinatorState(app: pg.Pool, graph: LoadedGraph) {
   const state: Record<string, string> = {};
   const rows = await Promise.all([
-    app.query<{ id: string; status: string; abort_reason: string | null }>('SELECT id, status, abort_reason FROM fx_coordinator.task_attempts'),
-    app.query<{ id: string; status: string }>('SELECT id, status FROM fx_coordinator.tasks'),
-    app.query<{ id: string; usable: boolean; unusable_reason: string | null }>('SELECT id, usable, unusable_reason FROM fx_coordinator.task_outputs'),
-    app.query<{ id: string; status: string; block_reason: string | null }>('SELECT id, status, block_reason FROM fx_coordinator.action_intents'),
+    app.query<{ id: string; status: string; abort_reason: string | null }>(
+      'SELECT id, status, abort_reason FROM fx_coordinator.task_attempts',
+    ),
+    app.query<{ id: string; status: string }>(
+      'SELECT id, status FROM fx_coordinator.tasks',
+    ),
+    app.query<{ id: string; usable: boolean; unusable_reason: string | null }>(
+      'SELECT id, usable, unusable_reason FROM fx_coordinator.task_outputs',
+    ),
+    app.query<{ id: string; status: string; block_reason: string | null }>(
+      'SELECT id, status, block_reason FROM fx_coordinator.action_intents',
+    ),
   ]);
   for (const row of rows[0].rows) state[graph.symbol(row.id)] = row.status;
   for (const row of rows[1].rows) state[graph.symbol(row.id)] = row.status;
-  for (const row of rows[2].rows) state[graph.symbol(row.id)] = row.usable ? 'usable' : 'unusable';
+  for (const row of rows[2].rows)
+    state[graph.symbol(row.id)] = row.usable ? 'usable' : 'unusable';
   for (const row of rows[3].rows)
-    state[graph.symbol(row.id)] = row.block_reason ? `${row.status}(${row.block_reason})` : row.status;
+    state[graph.symbol(row.id)] = row.block_reason
+      ? `${row.status}(${row.block_reason})`
+      : row.status;
   return state;
 }

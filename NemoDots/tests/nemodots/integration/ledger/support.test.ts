@@ -6,9 +6,7 @@ import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { ReceiptId } from '../../../../src/server/nemodots/contracts/index.js';
-import {
-  CheckedVectorSchema,
-} from '../../../../src/server/nemodots/contracts/index.js';
+import { CheckedVectorSchema } from '../../../../src/server/nemodots/contracts/index.js';
 import {
   SupportError,
   assertCurrent,
@@ -90,7 +88,12 @@ const observeCollection = (scope: Scope, negative?: { predicate: string }) =>
         normalizedValue: state,
         provenance: { kind: 'watcher' },
         ...(negative
-          ? { negative: { predicate: negative.predicate, collectionRevision: state.collectionVersion } }
+          ? {
+              negative: {
+                predicate: negative.predicate,
+                collectionRevision: state.collectionVersion,
+              },
+            }
           : {}),
       },
       opts,
@@ -123,11 +126,26 @@ describe('receipt status', () => {
     const member = await observeMember(scope, 'db.pool_max');
     const health = await observe(scope, 'checkout.health', HEALTH_OK);
     for (const lockMode of ['share', 'update'] as const) {
-      const vector = await check([member.receipt.id, health.receipt.id], lockMode);
+      const vector = await check(
+        [member.receipt.id, health.receipt.id],
+        lockMode,
+      );
       expect(CheckedVectorSchema.safeParse(vector).success).toBe(true);
       expect(vector).toEqual([
-        expect.objectContaining({ sourceKey: 'checkout.config/db.pool_max', recordedRevision: 1, liveRevision: 1, receiptStatus: 'supported', freshnessOk: true }),
-        expect.objectContaining({ sourceKey: 'checkout.health', recordedRevision: 1, liveRevision: 1, receiptStatus: 'supported', freshnessOk: true }),
+        expect.objectContaining({
+          sourceKey: 'checkout.config/db.pool_max',
+          recordedRevision: 1,
+          liveRevision: 1,
+          receiptStatus: 'supported',
+          freshnessOk: true,
+        }),
+        expect.objectContaining({
+          sourceKey: 'checkout.health',
+          recordedRevision: 1,
+          liveRevision: 1,
+          receiptStatus: 'supported',
+          freshnessOk: true,
+        }),
       ]);
     }
     expect(await check([], 'share')).toEqual([]);
@@ -138,12 +156,22 @@ describe('receipt status', () => {
     const health = await observe(scope, 'checkout.health', HEALTH_OK);
     const metrics = await observe(scope, 'checkout.metrics', HEALTH_OK);
     const redis = await observe(scope, 'redis.stats', HEALTH_OK);
-    const transition = (id: string, to: 'contested' | 'retracted' | 'expired', reason: 'conflicting_observation' | 'owner_retraction' | 'ttl_elapsed') =>
-      inTx(getDb().app, (client) => transitionReceipt(client, { receiptId: id, to, reason }, opts));
+    const transition = (
+      id: string,
+      to: 'contested' | 'retracted' | 'expired',
+      reason: 'conflicting_observation' | 'owner_retraction' | 'ttl_elapsed',
+    ) =>
+      inTx(getDb().app, (client) =>
+        transitionReceipt(client, { receiptId: id, to, reason }, opts),
+      );
     await transition(health.receipt.id, 'contested', 'conflicting_observation');
     await transition(metrics.receipt.id, 'retracted', 'owner_retraction');
     await transition(redis.receipt.id, 'expired', 'ttl_elapsed');
-    for (const [receipt, status] of [[health, 'contested'], [metrics, 'retracted'], [redis, 'expired']] as const) {
+    for (const [receipt, status] of [
+      [health, 'contested'],
+      [metrics, 'retracted'],
+      [redis, 'expired'],
+    ] as const) {
       for (const lockMode of ['share', 'update'] as const) {
         const error = await rejection(check([receipt.receipt.id], lockMode));
         expect(error.reason).toBe('receipt_not_supported');
@@ -151,7 +179,11 @@ describe('receipt status', () => {
       }
     }
     await inTx(getDb().app, (client) =>
-      transitionReceipt(client, { receiptId: health.receipt.id, to: 'supported', reason: 'resolved' }, opts),
+      transitionReceipt(
+        client,
+        { receiptId: health.receipt.id, to: 'supported', reason: 'resolved' },
+        opts,
+      ),
     );
     await expect(check([health.receipt.id], 'share')).resolves.toHaveLength(1);
   });
@@ -160,8 +192,12 @@ describe('receipt status', () => {
     const scope = newScope();
     const first = await observe(scope, 'checkout.health', HEALTH_OK);
     await observe(scope, 'checkout.health', HEALTH_BAD);
-    expect((await rejection(check([first.receipt.id], 'share'))).reason).toBe('stale_version');
-    expect((await rejection(check([randomUUID()], 'share'))).reason).toBe('receipt_not_supported');
+    expect((await rejection(check([first.receipt.id], 'share'))).reason).toBe(
+      'stale_version',
+    );
+    expect((await rejection(check([randomUUID()], 'share'))).reason).toBe(
+      'receipt_not_supported',
+    );
   });
 
   it('a receipt past its expiry fails as expired', async () => {
@@ -169,7 +205,9 @@ describe('receipt status', () => {
     const receipt = await observe(scope, 'checkout.health', HEALTH_OK, {
       expiresAt: new Date(Date.now() - 1_000),
     });
-    expect((await rejection(check([receipt.receipt.id], 'share'))).reason).toBe('expired');
+    expect((await rejection(check([receipt.receipt.id], 'share'))).reason).toBe(
+      'expired',
+    );
   });
 
   it('reports every examined entry on failure, and the first failing receipt in input order', async () => {
@@ -177,7 +215,9 @@ describe('receipt status', () => {
     const ok = await observe(scope, 'checkout.health', HEALTH_OK);
     const old = await observe(scope, 'checkout.metrics', HEALTH_OK);
     await observe(scope, 'checkout.metrics', HEALTH_BAD);
-    const error = await rejection(check([ok.receipt.id, old.receipt.id], 'update'));
+    const error = await rejection(
+      check([ok.receipt.id, old.receipt.id], 'update'),
+    );
     expect(error.reason).toBe('stale_version');
     expect(error.receiptId).toBe(old.receipt.id);
     expect(error.checkedVector).toHaveLength(2);
@@ -195,11 +235,17 @@ describe('controlled versions (G3: stale immediately, before any watcher runs)',
     for (const lockMode of ['share', 'update'] as const) {
       const error = await rejection(check([r1.receipt.id], lockMode));
       expect(error.reason).toBe('stale_pending_observation');
-      expect(error.checkedVector[0]).toMatchObject({ recordedRevision: 1, liveRevision: 2, receiptStatus: 'supported' });
+      expect(error.checkedVector[0]).toMatchObject({
+        recordedRevision: 1,
+        liveRevision: 2,
+        receiptStatus: 'supported',
+      });
     }
     await observeMember(scope, 'db.pool_max');
     // the pending replacement was never permission; once registered the old one is simply stale
-    expect((await rejection(check([r1.receipt.id], 'update'))).reason).toBe('stale_version');
+    expect((await rejection(check([r1.receipt.id], 'update'))).reason).toBe(
+      'stale_version',
+    );
   });
 
   it('A -> B -> A: the first A stays non-current and the second A is current', async () => {
@@ -210,7 +256,9 @@ describe('controlled versions (G3: stale immediately, before any watcher runs)',
     await observeMember(scope, 'db.pool_max');
     await inTx(getDb().app, (client) => updateConfig(client, 'db.pool_max', 3));
     const a2 = await observeMember(scope, 'db.pool_max');
-    expect((await rejection(check([a1.receipt.id], 'update'))).reason).toBe('stale_version');
+    expect((await rejection(check([a1.receipt.id], 'update'))).reason).toBe(
+      'stale_version',
+    );
     await expect(check([a2.receipt.id], 'update')).resolves.toHaveLength(1);
   });
 
@@ -218,39 +266,61 @@ describe('controlled versions (G3: stale immediately, before any watcher runs)',
     const scope = newScope();
     await seedConfig(getDb().app, { 'checkout.restrict_orders': true });
     const r1 = await observeMember(scope, 'checkout.restrict_orders');
-    await inTx(getDb().app, (client) => deleteConfig(client, 'checkout.restrict_orders'));
-    expect((await rejection(check([r1.receipt.id], 'share'))).reason).toBe('stale_pending_observation');
+    await inTx(getDb().app, (client) =>
+      deleteConfig(client, 'checkout.restrict_orders'),
+    );
+    expect((await rejection(check([r1.receipt.id], 'share'))).reason).toBe(
+      'stale_pending_observation',
+    );
   });
 });
 
 describe('membership-only collection (C1/D1)', () => {
   it('a member value change leaves the collection receipt current; only a key insert or delete supersedes it', async () => {
     const scope = newScope();
-    await seedConfig(getDb().app, { 'db.pool_max': 3, 'ui.banner_text': 'one' });
+    await seedConfig(getDb().app, {
+      'db.pool_max': 3,
+      'ui.banner_text': 'one',
+    });
     const c1 = await observeCollection(scope);
-    expect(c1.receipt.normalizedValue).toEqual({ keys: ['db.pool_max', 'ui.banner_text'], collectionVersion: 3 });
+    expect(c1.receipt.normalizedValue).toEqual({
+      keys: ['db.pool_max', 'ui.banner_text'],
+      collectionVersion: 3,
+    });
     const member = await observeMember(scope, 'ui.banner_text');
 
     // B1: the benign banner change
-    await inTx(getDb().app, (client) => updateConfig(client, 'ui.banner_text', 'two'));
+    await inTx(getDb().app, (client) =>
+      updateConfig(client, 'ui.banner_text', 'two'),
+    );
     await expect(check([c1.receipt.id], 'share')).resolves.toHaveLength(1);
     await expect(check([c1.receipt.id], 'update')).resolves.toHaveLength(1);
-    expect((await rejection(check([member.receipt.id], 'share'))).reason).toBe('stale_pending_observation');
+    expect((await rejection(check([member.receipt.id], 'share'))).reason).toBe(
+      'stale_pending_observation',
+    );
     const sameCollection = await observeCollection(scope);
     expect(sameCollection.newRevision).toBe(false);
     expect(sameCollection.receipt.id).toBe(c1.receipt.id);
 
     // insert: the collection moves, the other members do not
-    await inTx(getDb().app, (client) => insertConfig(client, 'checkout.restrict_orders', true));
-    expect((await rejection(check([c1.receipt.id], 'share'))).reason).toBe('stale_pending_observation');
+    await inTx(getDb().app, (client) =>
+      insertConfig(client, 'checkout.restrict_orders', true),
+    );
+    expect((await rejection(check([c1.receipt.id], 'share'))).reason).toBe(
+      'stale_pending_observation',
+    );
     const c2 = await observeCollection(scope);
     expect(c2.newRevision).toBe(true);
     expect(c2.receipt.sourceRevision).toBe(4);
     expect(c2.invalidation!.reason).toBe('collection_changed');
-    expect((await rejection(check([c1.receipt.id], 'update'))).reason).toBe('stale_version');
+    expect((await rejection(check([c1.receipt.id], 'update'))).reason).toBe(
+      'stale_version',
+    );
 
     // delete
-    await inTx(getDb().app, (client) => deleteConfig(client, 'checkout.restrict_orders'));
+    await inTx(getDb().app, (client) =>
+      deleteConfig(client, 'checkout.restrict_orders'),
+    );
     const c3 = await observeCollection(scope);
     expect(c3.receipt.sourceRevision).toBe(5);
     await expect(check([c3.receipt.id], 'share')).resolves.toHaveLength(1);
@@ -260,34 +330,60 @@ describe('membership-only collection (C1/D1)', () => {
     const scope = newScope();
     await seedConfig(getDb().app, { 'db.pool_max': 3 });
     await expect(
-      observe(scope, 'checkout.config', { keys: ['db.pool_max', 'ghost'], collectionVersion: 2 }),
+      observe(scope, 'checkout.config', {
+        keys: ['db.pool_max', 'ghost'],
+        collectionVersion: 2,
+      }),
     ).rejects.toThrow(/disagree with the authority/);
     await expect(
-      observe(scope, 'checkout.config', { keys: ['db.pool_max'], collectionVersion: 1 }),
+      observe(scope, 'checkout.config', {
+        keys: ['db.pool_max'],
+        collectionVersion: 1,
+      }),
     ).rejects.toThrow(/older than current revision 2/);
     await expect(
-      observe(scope, 'checkout.config', { keys: ['db.pool_max'], collectionVersion: 9 }),
+      observe(scope, 'checkout.config', {
+        keys: ['db.pool_max'],
+        collectionVersion: 9,
+      }),
     ).rejects.toThrow(/claimed revision 9/);
   });
 
   it('a negative membership predicate goes stale when a key is inserted', async () => {
     const scope = newScope();
     await seedConfig(getDb().app, { 'db.pool_max': 3 });
-    const absence = await observeCollection(scope, { predicate: "key 'checkout.restrict_orders' does not exist" });
-    expect(absence.receipt.negative).toEqual({ predicate: "key 'checkout.restrict_orders' does not exist", collectionRevision: 2 });
+    const absence = await observeCollection(scope, {
+      predicate: "key 'checkout.restrict_orders' does not exist",
+    });
+    expect(absence.receipt.negative).toEqual({
+      predicate: "key 'checkout.restrict_orders' does not exist",
+      collectionRevision: 2,
+    });
     await expect(check([absence.receipt.id], 'share')).resolves.toHaveLength(1);
-    await inTx(getDb().app, (client) => insertConfig(client, 'checkout.restrict_orders', true));
+    await inTx(getDb().app, (client) =>
+      insertConfig(client, 'checkout.restrict_orders', true),
+    );
     for (const lockMode of ['share', 'update'] as const)
-      expect((await rejection(check([absence.receipt.id], lockMode))).reason).toBe('stale_pending_observation');
+      expect(
+        (await rejection(check([absence.receipt.id], lockMode))).reason,
+      ).toBe('stale_pending_observation');
   });
 
   it('refuses a negative predicate claiming a collection revision other than the live one', async () => {
     const scope = newScope();
     await seedConfig(getDb().app, { 'db.pool_max': 3 });
     await expect(
-      observe(scope, 'checkout.config', { keys: ['db.pool_max'], collectionVersion: 2 }, {
-        negative: { predicate: "key 'x' does not exist", collectionRevision: 1 },
-      }),
+      observe(
+        scope,
+        'checkout.config',
+        { keys: ['db.pool_max'], collectionVersion: 2 },
+        {
+          negative: {
+            predicate: "key 'x' does not exist",
+            collectionRevision: 1,
+          },
+        },
+      ),
     ).rejects.toThrow(/older than current revision 2/);
   });
 });
@@ -303,21 +399,29 @@ describe('freshness from confirmations (I2/D3)', () => {
     expect(error.reason).toBe('evidence_too_old');
     expect(error.checkedVector[0].freshnessOk).toBe(false);
     // no policy entry for the key: age does not matter
-    await expect(check([aged.receipt.id], 'share', { 'redis.stats': 1 })).resolves.toHaveLength(1);
+    await expect(
+      check([aged.receipt.id], 'share', { 'redis.stats': 1 }),
+    ).resolves.toHaveLength(1);
 
     const confirmed = await observe(scope, 'checkout.health', HEALTH_OK);
     expect(confirmed.newRevision).toBe(false);
     expect(confirmed.receipt.id).toBe(aged.receipt.id);
     const vector = await check([aged.receipt.id], 'share', freshness);
     expect(vector[0]).toMatchObject({ freshnessOk: true, recordedRevision: 1 });
-    expect(Date.parse(vector[0].lastConfirmedAt)).toBeGreaterThan(Date.now() - 60_000);
+    expect(Date.parse(vector[0].lastConfirmedAt)).toBeGreaterThan(
+      Date.now() - 60_000,
+    );
   });
 
   it('freshness is judged on max(observed_at, last confirmation), not the oldest', async () => {
     const scope = newScope();
     const fresh = await observe(scope, 'redis.stats', HEALTH_OK);
-    await expect(check([fresh.receipt.id], 'update', { 'redis.stats': 120_000 })).resolves.toHaveLength(1);
-    await expect(check([fresh.receipt.id], 'update', { 'redis.stats': 0 })).rejects.toBeInstanceOf(SupportError);
+    await expect(
+      check([fresh.receipt.id], 'update', { 'redis.stats': 120_000 }),
+    ).resolves.toHaveLength(1);
+    await expect(
+      check([fresh.receipt.id], 'update', { 'redis.stats': 0 }),
+    ).rejects.toBeInstanceOf(SupportError);
   });
 });
 
@@ -327,7 +431,9 @@ describe('the validator port', () => {
     const receipt = await observe(scope, 'checkout.health', HEALTH_OK);
     const validator = createSupportValidator(FX);
     const vector = await inTx(getDb().app, (client) =>
-      validator.assertCurrent(client, [receipt.receipt.id], { lockMode: 'share' }),
+      validator.assertCurrent(client, [receipt.receipt.id], {
+        lockMode: 'share',
+      }),
     );
     expect(vector).toHaveLength(1);
   });
@@ -355,7 +461,12 @@ describe('locks (C9)', () => {
     const outcome = (async () => {
       await checker.query('BEGIN');
       try {
-        return await assertCurrent(checker, [r1.receipt.id], { lockMode: 'update' }, FX);
+        return await assertCurrent(
+          checker,
+          [r1.receipt.id],
+          { lockMode: 'update' },
+          FX,
+        );
       } finally {
         await checker.query('ROLLBACK');
         settled = true;
@@ -383,7 +494,11 @@ describe('locks (C9)', () => {
     await writer.client.query('COMMIT');
     writer.client.release();
 
-    const result = await withTimeout(outcomeResult, 5_000, 'assertCurrent after the writer commits');
+    const result = await withTimeout(
+      outcomeResult,
+      5_000,
+      'assertCurrent after the writer commits',
+    );
     checker.release();
     expect(result).toBeInstanceOf(SupportError);
     expect((result as SupportError).reason).toBe('stale_version');
@@ -396,7 +511,12 @@ describe('locks (C9)', () => {
     const { app, admin } = getDb();
 
     const publication = await openTx(app);
-    await assertCurrent(publication.client, [r1.receipt.id], { lockMode: 'share' }, FX);
+    await assertCurrent(
+      publication.client,
+      [r1.receipt.id],
+      { lockMode: 'share' },
+      FX,
+    );
 
     const writer = await app.connect();
     const writerPid = await backendPid(writer);
@@ -404,7 +524,9 @@ describe('locks (C9)', () => {
     const write = (async () => {
       await writer.query('BEGIN');
       // advanceConfig's statement: the member row FOR UPDATE, then the bump
-      await writer.query("SELECT version FROM fx_checkout.config_entries WHERE key = 'db.pool_max' FOR UPDATE");
+      await writer.query(
+        "SELECT version FROM fx_checkout.config_entries WHERE key = 'db.pool_max' FOR UPDATE",
+      );
       await updateConfig(writer, 'db.pool_max', 11);
       await writer.query('COMMIT');
       advanced = true;
@@ -418,7 +540,9 @@ describe('locks (C9)', () => {
     writer.release();
     expect(advanced).toBe(true);
     // and the receipt the publication relied on is now stale
-    expect((await rejection(check([r1.receipt.id], 'share'))).reason).toBe('stale_pending_observation');
+    expect((await rejection(check([r1.receipt.id], 'share'))).reason).toBe(
+      'stale_pending_observation',
+    );
   });
 
   it('a share-locked observed source makes a concurrent registration of that source wait (C13)', async () => {
@@ -426,7 +550,12 @@ describe('locks (C9)', () => {
     const first = await observe(scope, 'checkout.health', HEALTH_OK);
     const { app, admin } = getDb();
     const publication = await openTx(app);
-    await assertCurrent(publication.client, [first.receipt.id], { lockMode: 'share' }, FX);
+    await assertCurrent(
+      publication.client,
+      [first.receipt.id],
+      { lockMode: 'share' },
+      FX,
+    );
 
     const registrar = await app.connect();
     const registrarPid = await backendPid(registrar);
@@ -434,7 +563,11 @@ describe('locks (C9)', () => {
       await registrar.query('BEGIN');
       const result = await registerObservation(
         registrar,
-        { source: sourceRef(scope, 'checkout.health'), normalizedValue: HEALTH_BAD, provenance: { kind: 'watcher' } },
+        {
+          source: sourceRef(scope, 'checkout.health'),
+          normalizedValue: HEALTH_BAD,
+          provenance: { kind: 'watcher' },
+        },
         opts,
       );
       await registrar.query('COMMIT');
@@ -443,13 +576,24 @@ describe('locks (C9)', () => {
     expect(await waitsOnLock(admin, registrarPid)).toBe(true);
     await publication.client.query('COMMIT');
     publication.client.release();
-    const result = await withTimeout(registered, 5_000, 'registration after the publication commits');
+    const result = await withTimeout(
+      registered,
+      5_000,
+      'registration after the publication commits',
+    );
     registrar.release();
     expect(result.receipt.sourceRevision).toBe(2);
 
     // the same two statements in the opposite order: registration first, publication rejected
     const retry = await openTx(app);
-    await expect(assertCurrent(retry.client, [first.receipt.id], { lockMode: 'share' }, FX)).rejects.toBeInstanceOf(SupportError);
+    await expect(
+      assertCurrent(
+        retry.client,
+        [first.receipt.id],
+        { lockMode: 'share' },
+        FX,
+      ),
+    ).rejects.toBeInstanceOf(SupportError);
     await retry.client.query('ROLLBACK');
     retry.client.release();
   });
@@ -461,8 +605,17 @@ describe('locks (C9)', () => {
     const both = barrier(2);
     const run = () =>
       inTx(getDb().app, async (client) => {
-        const vector = await assertCurrent(client, [r1.receipt.id], { lockMode: 'share' }, FX);
-        await withTimeout(both.arrive(), 5_000, 'second share locker never arrived');
+        const vector = await assertCurrent(
+          client,
+          [r1.receipt.id],
+          { lockMode: 'share' },
+          FX,
+        );
+        await withTimeout(
+          both.arrive(),
+          5_000,
+          'second share locker never arrived',
+        );
         return vector;
       });
     const [a, b] = await Promise.all([run(), run()]);

@@ -151,7 +151,10 @@ export class ClosureCapExceeded extends LedgerError {
 }
 
 export class EdgeError extends LedgerError {
-  constructor(message: string, code: 'edge_invalid' | 'edge_cycle' = 'edge_invalid') {
+  constructor(
+    message: string,
+    code: 'edge_invalid' | 'edge_cycle' = 'edge_invalid',
+  ) {
     super(code, message);
   }
 }

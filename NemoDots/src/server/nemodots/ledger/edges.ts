@@ -32,8 +32,7 @@ export interface AddEdgesResult {
   existing: number;
 }
 
-const UUID =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const EDGE_LOCK_NAME = 'nemodots_ledger_edges';
 const SAVEPOINT = 'ledger_add_edges';
 
@@ -46,10 +45,14 @@ function validateRef(ref: NodeRef, side: 'from' | 'to') {
   if (!UUID.test(ref.id))
     throw new EdgeError(`${side} node id of kind ${ref.kind} is not a uuid`);
   if (ref.kind === 'receipt' && (ref.missionId || ref.taskId))
-    throw new EdgeError('receipt nodes are shared and carry no mission or task');
+    throw new EdgeError(
+      'receipt nodes are shared and carry no mission or task',
+    );
   for (const value of [ref.missionId, ref.taskId])
     if (value && !UUID.test(value))
-      throw new EdgeError(`${side} node ${ref.kind} has a malformed mission or task id`);
+      throw new EdgeError(
+        `${side} node ${ref.kind} has a malformed mission or task id`,
+      );
 }
 
 /** Registers a graph node; mission/task are filled once and never changed. */
@@ -122,7 +125,10 @@ export async function addEdges(
       throw new EdgeError('an edge cannot point at a receipt');
     if (edge.from.kind === edge.to.kind && edge.from.id === edge.to.id)
       throw new EdgeError('an edge cannot connect a node to itself');
-    if (edge.kind === 'scheduling' && (edge.from.kind !== 'task' || edge.to.kind !== 'task'))
+    if (
+      edge.kind === 'scheduling' &&
+      (edge.from.kind !== 'task' || edge.to.kind !== 'task')
+    )
       throw new EdgeError('scheduling edges connect tasks');
   }
   await client.query(`SAVEPOINT ${SAVEPOINT}`);
@@ -258,18 +264,20 @@ export async function linkInheritance(
       missionId: link.missionId,
       taskId: link.taskId,
     },
-    ...(link.modelCallIds ?? []).map(
-      (id): NodeRef => ({
-        kind: 'model_call',
-        id,
-        missionId: link.missionId,
-        taskId: link.taskId,
-      }),
-    ),
+    ...(link.modelCallIds ?? []).map((id): NodeRef => ({
+      kind: 'model_call',
+      id,
+      missionId: link.missionId,
+      taskId: link.taskId,
+    })),
   ];
   return addEdges(
     client,
-    to.map((node) => ({ kind: 'inheritance' as const, from: output, to: node })),
+    to.map((node) => ({
+      kind: 'inheritance' as const,
+      from: output,
+      to: node,
+    })),
   );
 }
 

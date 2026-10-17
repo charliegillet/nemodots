@@ -14,10 +14,7 @@ import { afterAll, beforeAll } from 'vitest';
 import type { SourceRef } from '../../../../src/server/nemodots/contracts/index.js';
 import { createRolePool } from '../../../../src/server/nemodots/db/pool.js';
 import type { LedgerOptions } from '../../../../src/server/nemodots/ledger/options.js';
-import {
-  withTestDatabase,
-  type TestDatabase,
-} from '../../helpers/test-db.js';
+import { withTestDatabase, type TestDatabase } from '../../helpers/test-db.js';
 
 export const FX: Required<LedgerOptions> = {
   checkoutSchema: 'fx_checkout',
@@ -142,18 +139,22 @@ export function newScope(
 }
 
 export function sourceRef(scope: TestScope, key: string): SourceRef {
-  const sourceType = key === 'checkout.config'
-    ? 'controlled_collection'
-    : key.startsWith('checkout.config/')
-      ? 'controlled_config'
-      : key === 'redis.stats' || key === 'checkout.health' || key === 'checkout.metrics'
-        ? 'observed_endpoint'
-        : 'observed_store';
+  const sourceType =
+    key === 'checkout.config'
+      ? 'controlled_collection'
+      : key.startsWith('checkout.config/')
+        ? 'controlled_config'
+        : key === 'redis.stats' ||
+            key === 'checkout.health' ||
+            key === 'checkout.metrics'
+          ? 'observed_endpoint'
+          : 'observed_store';
   return {
     key,
     sourceType,
     authority:
-      sourceType === 'controlled_config' || sourceType === 'controlled_collection'
+      sourceType === 'controlled_config' ||
+      sourceType === 'controlled_collection'
         ? 'controlled'
         : 'observed',
     scope: {
@@ -185,18 +186,28 @@ export async function insertConfig(
   key: string,
   value: unknown,
 ) {
-  await client.query('SELECT version FROM fx_checkout.config_collection FOR UPDATE');
+  await client.query(
+    'SELECT version FROM fx_checkout.config_collection FOR UPDATE',
+  );
   await client.query(
     'INSERT INTO fx_checkout.config_entries (key, value, version) VALUES ($1, $2::jsonb, 1)',
     [key, JSON.stringify(value)],
   );
-  await client.query('UPDATE fx_checkout.config_collection SET version = version + 1');
+  await client.query(
+    'UPDATE fx_checkout.config_collection SET version = version + 1',
+  );
 }
 
 export async function deleteConfig(client: pg.PoolClient, key: string) {
-  await client.query('SELECT version FROM fx_checkout.config_collection FOR UPDATE');
-  await client.query('DELETE FROM fx_checkout.config_entries WHERE key = $1', [key]);
-  await client.query('UPDATE fx_checkout.config_collection SET version = version + 1');
+  await client.query(
+    'SELECT version FROM fx_checkout.config_collection FOR UPDATE',
+  );
+  await client.query('DELETE FROM fx_checkout.config_entries WHERE key = $1', [
+    key,
+  ]);
+  await client.query(
+    'UPDATE fx_checkout.config_collection SET version = version + 1',
+  );
 }
 
 /** Value update: member version +1, collection untouched (rev2 C1/D1). */
@@ -213,14 +224,20 @@ export async function updateConfig(
   return rows[0].version;
 }
 
-export async function seedConfig(app: pg.Pool, entries: Record<string, unknown>) {
+export async function seedConfig(
+  app: pg.Pool,
+  entries: Record<string, unknown>,
+) {
   await inTx(app, async (client) => {
     for (const [key, value] of Object.entries(entries))
       await insertConfig(client, key, value);
   });
 }
 
-export async function memberState(client: pg.PoolClient | pg.Pool, key: string) {
+export async function memberState(
+  client: pg.PoolClient | pg.Pool,
+  key: string,
+) {
   const { rows } = await client.query<{ value: unknown; version: number }>(
     'SELECT value, version FROM fx_checkout.config_entries WHERE key = $1',
     [key],
@@ -282,6 +299,8 @@ export async function waitsOnLock(
 }
 
 export async function backendPid(client: pg.PoolClient): Promise<number> {
-  const { rows } = await client.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+  const { rows } = await client.query<{ pid: number }>(
+    'SELECT pg_backend_pid() AS pid',
+  );
   return rows[0].pid;
 }

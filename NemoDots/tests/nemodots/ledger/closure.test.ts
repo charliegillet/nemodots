@@ -26,7 +26,11 @@ function closureOf(
   rootId: string,
   limits?: { maxDepth: number; maxNodes: number },
 ): { reached: string[]; result: ClosureResult; depth: number } {
-  const traversal = traverseClosure(graph.records, { kind: 'receipt', id: rootId }, limits);
+  const traversal = traverseClosure(
+    graph.records,
+    { kind: 'receipt', id: rootId },
+    limits,
+  );
   expect(traversal.exceeded).toBeNull();
   const result = buildClosure(
     traversal.nodes.map((node) => graph.meta(node.id)),
@@ -79,7 +83,10 @@ describe('linear chain with an inherited child', () => {
   ];
 
   it('reaches exactly the hand-enumerated nodes and preserves the scheduled sibling', () => {
-    const { reached, result, depth } = closureOf(buildGraph(nodes, edges), 'R1');
+    const { reached, result, depth } = closureOf(
+      buildGraph(nodes, edges),
+      'R1',
+    );
     expect(reached).toEqual(['A1', 'A2', 'I2', 'M1', 'M2', 'O1', 'O2']);
     expect(result.affected).toEqual({
       modelCallIds: ['M1', 'M2'],
@@ -106,7 +113,11 @@ describe('linear chain with an inherited child', () => {
   });
 
   it('scheduling edges never propagate', () => {
-    const graph = buildGraph(nodes, [sch('T1', 'T3'), sch('T3', 'T2'), ev('R1', 'A1')]);
+    const graph = buildGraph(nodes, [
+      sch('T1', 'T3'),
+      sch('T3', 'T2'),
+      ev('R1', 'A1'),
+    ]);
     const { reached } = closureOf(graph, 'R1');
     expect(reached).toEqual(['A1']);
   });
@@ -183,7 +194,16 @@ describe('diamond', () => {
   it('changing the shared root affects both arms and the join once (no duplicates)', () => {
     const { result, reached } = closureOf(buildGraph(nodes, edges), 'Rs');
     expect(reached).toEqual([
-      'AJ', 'AL', 'AR', 'IJ', 'MJ', 'ML', 'MR', 'OJ', 'OL', 'OR',
+      'AJ',
+      'AL',
+      'AR',
+      'IJ',
+      'MJ',
+      'ML',
+      'MR',
+      'OJ',
+      'OL',
+      'OR',
     ]);
     expect(result.affected.taskIds).toEqual(['TJ', 'TL', 'TR']);
     expect(result.affected.modelCallIds).toEqual(['MJ', 'ML', 'MR']);
@@ -206,9 +226,16 @@ describe('multiple parents (conservative, R6)', () => {
     output('OQ', 'm1', 'TQ'),
   ];
   const edges = [
-    ev('Ra', 'AP'), ev('Rb', 'AP'), ev('Ra', 'MP'), ev('Rb', 'MP'),
-    ev('MP', 'OP'), ev('AP', 'OP'),
-    inh('OP', 'AQ'), inh('OP', 'MQ'), ev('MQ', 'OQ'), ev('AQ', 'OQ'),
+    ev('Ra', 'AP'),
+    ev('Rb', 'AP'),
+    ev('Ra', 'MP'),
+    ev('Rb', 'MP'),
+    ev('MP', 'OP'),
+    ev('AP', 'OP'),
+    inh('OP', 'AQ'),
+    inh('OP', 'MQ'),
+    ev('MQ', 'OQ'),
+    ev('AQ', 'OQ'),
   ];
 
   it('either parent changing invalidates the node and everything downstream', () => {
@@ -247,9 +274,18 @@ describe('per-mission partition (I10)', () => {
     output('Om3', 'm3', 'Tm3'),
   ];
   const edges = [
-    ev('Rsh', 'Am1'), ev('Rsh', 'Mm1'), ev('Mm1', 'Om1'), ev('Am1', 'Om1'),
-    ev('Rsh', 'Am2'), ev('Rsh', 'Mm2'), ev('Mm2', 'Om2'), ev('Am2', 'Om2'),
-    ev('Ro', 'Am2b'), ev('Am2b', 'Om2b'), ev('Ro', 'Am3'), ev('Am3', 'Om3'),
+    ev('Rsh', 'Am1'),
+    ev('Rsh', 'Mm1'),
+    ev('Mm1', 'Om1'),
+    ev('Am1', 'Om1'),
+    ev('Rsh', 'Am2'),
+    ev('Rsh', 'Mm2'),
+    ev('Mm2', 'Om2'),
+    ev('Am2', 'Om2'),
+    ev('Ro', 'Am2b'),
+    ev('Am2b', 'Om2b'),
+    ev('Ro', 'Am3'),
+    ev('Am3', 'Om3'),
   ];
 
   it('each mission receives only its own subset; a mission with no affected node gets no entry', () => {
@@ -259,16 +295,22 @@ describe('per-mission partition (I10)', () => {
       {
         missionId: 'm1',
         affected: {
-          modelCallIds: ['Mm1'], attemptIds: ['Am1'], outputIds: ['Om1'],
-          actionIds: [], taskIds: ['Tm1'],
+          modelCallIds: ['Mm1'],
+          attemptIds: ['Am1'],
+          outputIds: ['Om1'],
+          actionIds: [],
+          taskIds: ['Tm1'],
         },
         preserved: { taskIds: [] },
       },
       {
         missionId: 'm2',
         affected: {
-          modelCallIds: ['Mm2'], attemptIds: ['Am2'], outputIds: ['Om2'],
-          actionIds: [], taskIds: ['Tm2'],
+          modelCallIds: ['Mm2'],
+          attemptIds: ['Am2'],
+          outputIds: ['Om2'],
+          actionIds: [],
+          taskIds: ['Tm2'],
         },
         preserved: { taskIds: ['Tm2b'] },
       },
@@ -301,22 +343,39 @@ describe('caps', () => {
 
   it('accepts a closure exactly at the depth cap and rejects one deeper', () => {
     const limits = { maxDepth: 64, maxNodes: 10_000 };
-    const atCap = traverseClosure(chain(64).records, { kind: 'receipt', id: 'R0' }, limits);
+    const atCap = traverseClosure(
+      chain(64).records,
+      { kind: 'receipt', id: 'R0' },
+      limits,
+    );
     expect(atCap.exceeded).toBeNull();
     expect(atCap.depth).toBe(64);
-    const over = traverseClosure(chain(70).records, { kind: 'receipt', id: 'R0' }, limits);
+    const over = traverseClosure(
+      chain(70).records,
+      { kind: 'receipt', id: 'R0' },
+      limits,
+    );
     expect(over.exceeded).toBe('depth');
   });
 
   it('accepts exactly maxNodes reached nodes and rejects one more', () => {
     const fan = (n: number) =>
       buildGraph(
-        [receipt('R0'), ...Array.from({ length: n }, (_, i) => attempt(`A${i}`, 'm1', 'T1'))],
+        [
+          receipt('R0'),
+          ...Array.from({ length: n }, (_, i) => attempt(`A${i}`, 'm1', 'T1')),
+        ],
         Array.from({ length: n }, (_, i) => ev('R0', `A${i}`)),
       );
     const limits = { maxDepth: 64, maxNodes: 50 };
-    expect(traverseClosure(fan(50).records, { kind: 'receipt', id: 'R0' }, limits).exceeded).toBeNull();
-    expect(traverseClosure(fan(51).records, { kind: 'receipt', id: 'R0' }, limits).exceeded).toBe('nodes');
+    expect(
+      traverseClosure(fan(50).records, { kind: 'receipt', id: 'R0' }, limits)
+        .exceeded,
+    ).toBeNull();
+    expect(
+      traverseClosure(fan(51).records, { kind: 'receipt', id: 'R0' }, limits)
+        .exceeded,
+    ).toBe('nodes');
   });
 
   it('a cycle that slipped past the edge checks hits the depth cap instead of looping', () => {
@@ -325,8 +384,11 @@ describe('caps', () => {
       [ev('R0', 'A1'), ev('A1', 'O1'), ev('O1', 'A1')],
     );
     expect(
-      traverseClosure(graph.records, { kind: 'receipt', id: 'R0' }, { maxDepth: 64, maxNodes: 10_000 })
-        .exceeded,
+      traverseClosure(
+        graph.records,
+        { kind: 'receipt', id: 'R0' },
+        { maxDepth: 64, maxNodes: 10_000 },
+      ).exceeded,
     ).toBe('depth');
   });
 });
@@ -341,7 +403,10 @@ describe('buildClosure edge cases', () => {
 
   it('nodes without a mission count globally but belong to no mission partition', () => {
     const graph = buildGraph(
-      [receipt('R'), { id: 'A', kind: 'attempt', missionId: null, taskId: null }],
+      [
+        receipt('R'),
+        { id: 'A', kind: 'attempt', missionId: null, taskId: null },
+      ],
       [ev('R', 'A')],
     );
     const { result } = closureOf(graph, 'R');

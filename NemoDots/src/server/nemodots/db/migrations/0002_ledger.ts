@@ -308,7 +308,10 @@ const migration: Migration = {
          kind text NOT NULL ${enumCheck('kind', ['evidence', 'inheritance', 'scheduling'])},
          from_kind text NOT NULL ${enumCheck('from_kind', NODE_KINDS)},
          from_id uuid NOT NULL,
-         to_kind text NOT NULL ${enumCheck('to_kind', NODE_KINDS.filter((kind) => kind !== 'receipt'))},
+         to_kind text NOT NULL ${enumCheck(
+           'to_kind',
+           NODE_KINDS.filter((kind) => kind !== 'receipt'),
+         )},
          to_id uuid NOT NULL,
          created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
          CONSTRAINT dependency_edges_unique UNIQUE (kind, from_kind, from_id, to_kind, to_id),

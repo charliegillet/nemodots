@@ -2,7 +2,10 @@
 // fails the test on any query, which also proves "writes nothing".
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import type { PgClient, SourceRef } from '../../../src/server/nemodots/contracts/index.js';
+import type {
+  PgClient,
+  SourceRef,
+} from '../../../src/server/nemodots/contracts/index.js';
 import { digest } from '../../../src/server/nemodots/contracts/index.js';
 import { addEdges } from '../../../src/server/nemodots/ledger/edges.js';
 import {
@@ -33,12 +36,16 @@ const untouched: PgClient & { calls: number } = {
 };
 
 const mission = randomUUID();
-const source = (key: string, sourceType: SourceRef['sourceType'] = 'observed_endpoint') =>
+const source = (
+  key: string,
+  sourceType: SourceRef['sourceType'] = 'observed_endpoint',
+) =>
   ({
     key,
     sourceType,
     authority:
-      sourceType === 'controlled_config' || sourceType === 'controlled_collection'
+      sourceType === 'controlled_config' ||
+      sourceType === 'controlled_collection'
         ? 'controlled'
         : 'observed',
     scope: {
@@ -50,7 +57,9 @@ const source = (key: string, sourceType: SourceRef['sourceType'] = 'observed_end
     },
   }) as unknown as SourceRef;
 
-const base = (overrides: Partial<RegisterObservationInput> = {}): RegisterObservationInput => ({
+const base = (
+  overrides: Partial<RegisterObservationInput> = {},
+): RegisterObservationInput => ({
   source: source('checkout.health'),
   normalizedValue: { status: 'ok' },
   provenance: { kind: 'watcher' },
@@ -80,7 +89,9 @@ describe('registerObservation refuses malformed input without a query', () => {
   });
 
   it('a normalized value over 16 KiB canonical', async () => {
-    const error = await refused(base({ normalizedValue: { blob: 'x'.repeat(16_384) } }));
+    const error = await refused(
+      base({ normalizedValue: { blob: 'x'.repeat(16_384) } }),
+    );
     expect(error).toBeInstanceOf(ObservationTooLargeError);
     expect((error as LedgerError).code).toBe('too_large');
   });
@@ -95,7 +106,12 @@ describe('registerObservation refuses malformed input without a query', () => {
   it('non-canonical JSON (undefined array element, cycles, NaN, NUL)', async () => {
     const cyclic: Record<string, unknown> = {};
     cyclic.self = cyclic;
-    for (const value of [[undefined], cyclic, { n: Number.NaN }, { s: 'a\u0000b' }]) {
+    for (const value of [
+      [undefined],
+      cyclic,
+      { n: Number.NaN },
+      { s: 'a\u0000b' },
+    ]) {
       const error = await refused(base({ normalizedValue: value }));
       expect(error).toBeInstanceOf(InvalidObservationError);
     }
@@ -109,9 +125,9 @@ describe('registerObservation refuses malformed input without a query', () => {
   });
 
   it('trust that contradicts the authority', async () => {
-    expect(await refused(base({ trust: 'controlled_authority' }))).toBeInstanceOf(
-      InvalidObservationError,
-    );
+    expect(
+      await refused(base({ trust: 'controlled_authority' })),
+    ).toBeInstanceOf(InvalidObservationError);
     expect(
       await refused(
         base({
@@ -134,14 +150,21 @@ describe('registerObservation refuses malformed input without a query', () => {
     ).toBeInstanceOf(InvalidObservationError);
     expect(
       await refused(
-        base({ negative: { predicate: "key 'x' does not exist", collectionRevision: 1 } }),
+        base({
+          negative: {
+            predicate: "key 'x' does not exist",
+            collectionRevision: 1,
+          },
+        }),
       ),
     ).toBeInstanceOf(InvalidObservationError);
   });
 
   it('a source whose type contradicts its key family', async () => {
     expect(
-      await refused(base({ source: source('checkout.config', 'controlled_config') })),
+      await refused(
+        base({ source: source('checkout.config', 'controlled_config') }),
+      ),
     ).toBeInstanceOf(InvalidObservationError);
   });
 
@@ -151,7 +174,10 @@ describe('registerObservation refuses malformed input without a query', () => {
 });
 
 describe('addEdges refuses invalid edges without a query', () => {
-  const node = (kind: 'attempt' | 'task' | 'receipt' | 'task_output', extra = {}) => ({
+  const node = (
+    kind: 'attempt' | 'task' | 'receipt' | 'task_output',
+    extra = {},
+  ) => ({
     kind,
     id: randomUUID(),
     ...extra,
@@ -162,12 +188,26 @@ describe('addEdges refuses invalid edges without a query', () => {
     const cases = [
       { kind: 'evidence' as const, from: attempt, to: node('receipt') },
       { kind: 'evidence' as const, from: attempt, to: attempt },
-      { kind: 'scheduling' as const, from: attempt, to: node('attempt', { missionId: mission }) },
-      { kind: 'evidence' as const, from: { kind: 'attempt' as const, id: 'not-a-uuid' }, to: attempt },
-      { kind: 'evidence' as const, from: node('receipt', { missionId: mission }), to: attempt },
+      {
+        kind: 'scheduling' as const,
+        from: attempt,
+        to: node('attempt', { missionId: mission }),
+      },
+      {
+        kind: 'evidence' as const,
+        from: { kind: 'attempt' as const, id: 'not-a-uuid' },
+        to: attempt,
+      },
+      {
+        kind: 'evidence' as const,
+        from: node('receipt', { missionId: mission }),
+        to: attempt,
+      },
     ];
     for (const edge of cases) {
-      await expect(addEdges(untouched, [edge])).rejects.toBeInstanceOf(EdgeError);
+      await expect(addEdges(untouched, [edge])).rejects.toBeInstanceOf(
+        EdgeError,
+      );
     }
     expect(untouched.calls).toBe(0);
   });
@@ -176,12 +216,21 @@ describe('addEdges refuses invalid edges without a query', () => {
 describe('model call records refuse invalid input without a query', () => {
   it('an invalid record shape and an orphan without attempts', async () => {
     await expect(
-      recordModelCall(untouched, { record: {} as never, snapshot: {} as never }),
+      recordModelCall(untouched, {
+        record: {} as never,
+        snapshot: {} as never,
+      }),
     ).rejects.toBeInstanceOf(ModelCallRecordError);
     await expect(
       recordOrphanedAttempt(untouched, {
         modelCallId: randomUUID() as never,
-        scope: { ownerId: 'o', missionId: mission, spaceId: null, environment: 'test', resource: 'checkout' } as never,
+        scope: {
+          ownerId: 'o',
+          missionId: mission,
+          spaceId: null,
+          environment: 'test',
+          resource: 'checkout',
+        } as never,
         taskId: randomUUID(),
         attemptId: randomUUID(),
         role: 'worker',

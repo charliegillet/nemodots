@@ -45,10 +45,7 @@ import type {
   TaskRole,
 } from '../../../../src/server/nemodots/contracts/index.js';
 import { createRolePool } from '../../../../src/server/nemodots/db/pool.js';
-import {
-  withTestDatabase,
-  type TestDatabase,
-} from '../../helpers/test-db.js';
+import { withTestDatabase, type TestDatabase } from '../../helpers/test-db.js';
 
 export const sleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -62,7 +59,8 @@ export async function until<T>(
   for (;;) {
     const value = await probe();
     if (value) return value;
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
+    if (Date.now() > deadline)
+      throw new Error(`timed out waiting for ${label}`);
     await sleep(25);
   }
 }
@@ -198,7 +196,10 @@ export interface Harness {
   intents: FakeIntents;
   orphans: OrphanedAttemptInfo[];
   admits: AdmitCall[];
-  cancelQueued: { ids: ActionId[]; calls: { missionId: string; generation: number }[] };
+  cancelQueued: {
+    ids: ActionId[];
+    calls: { missionId: string; generation: number }[];
+  };
   health: { healthy: boolean };
   probe: { receipt: ObservationReceipt | null };
   config: CoordinatorConfig;
@@ -332,7 +333,11 @@ export async function withHarness<T>(
 export const receipt = (): ReceiptId => randomUUID() as ReceiptId;
 
 export function vectorOf(
-  entries: { sourceKey: string; sourceRevision: number; receiptId?: ReceiptId }[],
+  entries: {
+    sourceKey: string;
+    sourceRevision: number;
+    receiptId?: ReceiptId;
+  }[],
 ): DependencyVector {
   return entries
     .map((entry) => ({
@@ -403,7 +408,12 @@ export async function plannedMission(
 
 export async function claimStart(
   h: Harness,
-  options: { taskId?: TaskId; missionId?: MissionId; workerId?: string; leaseMs?: number } = {},
+  options: {
+    taskId?: TaskId;
+    missionId?: MissionId;
+    workerId?: string;
+    leaseMs?: number;
+  } = {},
 ) {
   const claimed = await h.coordinator.claimAttempt({
     workerId: options.workerId ?? 'worker-a',
@@ -441,7 +451,12 @@ export async function attemptRow(h: Harness, attemptId: string) {
   return rows[0] as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 }
 
-export async function count(h: Harness, table: string, where = 'true', params: unknown[] = []) {
+export async function count(
+  h: Harness,
+  table: string,
+  where = 'true',
+  params: unknown[] = [],
+) {
   const { rows } = await h.admin.query<{ n: string }>(
     `SELECT count(*) AS n FROM ${table} WHERE ${where}`,
     params,
@@ -458,7 +473,11 @@ export async function eventKinds(h: Harness, missionId: string) {
 }
 
 export async function recoveryKinds(h: Harness, missionId: string) {
-  const { rows } = await h.admin.query<{ kind: string; task_id: string | null; attempt_id: string | null }>(
+  const { rows } = await h.admin.query<{
+    kind: string;
+    task_id: string | null;
+    attempt_id: string | null;
+  }>(
     `SELECT kind, task_id, attempt_id FROM coordinator.recovery_events
       WHERE mission_id = $1 ORDER BY created_at, id`,
     [missionId],
@@ -467,7 +486,11 @@ export async function recoveryKinds(h: Harness, missionId: string) {
 }
 
 export function staleVersion(receiptId?: string) {
-  return new SupportError('stale_version', 'recorded revision 3, live 4', receiptId);
+  return new SupportError(
+    'stale_version',
+    'recorded revision 3, live 4',
+    receiptId,
+  );
 }
 
 /** A probe receipt shaped like checkout.acceptance (ARCHITECTURE 9.4/9.5). */

@@ -58,7 +58,10 @@ function judge(
       };
     if (live !== row.sourceRevision)
       return {
-        reason: live > row.sourceRevision ? 'stale_pending_observation' : 'stale_version',
+        reason:
+          live > row.sourceRevision
+            ? 'stale_pending_observation'
+            : 'stale_version',
         detail: `${row.sourceKey} is at version ${live}, receipt ${row.id} records ${row.sourceRevision}`,
       };
   }
@@ -180,7 +183,9 @@ async function observedHeads(
 }
 
 /** The SupportValidator port bound to this implementation. */
-export function createSupportValidator(options?: LedgerOptions): SupportValidator {
+export function createSupportValidator(
+  options?: LedgerOptions,
+): SupportValidator {
   return {
     assertCurrent: (client, receiptIds, opts) =>
       assertCurrent(client, receiptIds, opts, options),

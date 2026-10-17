@@ -102,7 +102,10 @@ export interface RegisterObservationInput {
   /** Overrides the derived InvalidationEvent.reason (e.g. conflicting_observation). */
   invalidationReason?: Extract<
     InvalidationReason,
-    'newer_observation' | 'conflicting_observation' | 'self_write_mismatch' | 'collection_changed'
+    | 'newer_observation'
+    | 'conflicting_observation'
+    | 'self_write_mismatch'
+    | 'collection_changed'
   >;
 }
 
@@ -253,7 +256,8 @@ function prepare(input: RegisterObservationInput): Prepared {
 /** Claimed revisions: older than the assignable one is stale, newer is a mismatch. */
 function checkClaim(claimed: number | undefined, expected: number) {
   if (claimed === undefined || claimed === expected) return;
-  if (claimed < expected) throw new StaleObservationRejectedError(claimed, expected);
+  if (claimed < expected)
+    throw new StaleObservationRejectedError(claimed, expected);
   throw new RevisionMismatchError(claimed, expected);
 }
 
@@ -298,7 +302,10 @@ async function readControlled(
   } else {
     const value = CollectionValueSchema.parse(prepared.value);
     if (value.collectionVersion < revision)
-      throw new StaleObservationRejectedError(value.collectionVersion, revision);
+      throw new StaleObservationRejectedError(
+        value.collectionVersion,
+        revision,
+      );
     if (value.collectionVersion > revision)
       throw new RevisionMismatchError(value.collectionVersion, revision);
     const keys = await liveMemberKeys(client, options.ledger);
@@ -335,10 +342,14 @@ function derivedReason(
   input: RegisterObservationInput,
 ): Extract<
   InvalidationReason,
-  'newer_observation' | 'conflicting_observation' | 'self_write_mismatch' | 'collection_changed'
+  | 'newer_observation'
+  | 'conflicting_observation'
+  | 'self_write_mismatch'
+  | 'collection_changed'
 > {
   if (input.invalidationReason) return input.invalidationReason;
-  if (prepared.provenance.selfWrite === 'mismatch') return 'self_write_mismatch';
+  if (prepared.provenance.selfWrite === 'mismatch')
+    return 'self_write_mismatch';
   if (prepared.ref.sourceType === 'controlled_collection')
     return 'collection_changed';
   return 'newer_observation';
@@ -397,7 +408,9 @@ export async function registerObservation(
       head !== null &&
       head.status === 'supported' &&
       head.contentDigest === prepared.digest;
-    revision = sameValue ? head.sourceRevision : (head?.sourceRevision ?? 0) + 1;
+    revision = sameValue
+      ? head.sourceRevision
+      : (head?.sourceRevision ?? 0) + 1;
     checkClaim(input.claimed?.sourceRevision, revision);
     confirmHead = sameValue;
   }
@@ -450,7 +463,10 @@ export async function registerObservation(
   };
   const result =
     options.closure === 'skip'
-      ? await supersedeWithoutClosure(client, { ...base, coarse: options.coarse })
+      ? await supersedeWithoutClosure(client, {
+          ...base,
+          coarse: options.coarse,
+        })
       : await supersedeAndInvalidate(client, {
           ...base,
           limits: options.limits,

@@ -275,19 +275,19 @@ describe('G5.6b the wire carries what the snapshot claims (live, through the ada
       );
       // Wire identity is checked with the full tool set. The model may
       // answer or reach for a tool; either is a real completion here.
-      const ra = await viaProxy.complete(toRequest(a), ctx('worker'));
-      const rb = await viaProxy.complete(toRequest(b), ctx('worker'));
+      const ra = await completeThroughSaturation(viaProxy, toRequest(a));
+      const rb = await completeThroughSaturation(viaProxy, toRequest(b));
       expect(['completed', 'tool_calls']).toContain(ra.outcome);
       expect(['completed', 'tool_calls']).toContain(rb.outcome);
       // Evidence use is checked with the same system text and no tools, so the
       // model must answer in text: the changed evidence is what it quotes.
-      const ta = await viaProxy.complete(
+      const ta = await completeThroughSaturation(
+        viaProxy,
         toRequest(a, { tools: [], toolSchemaHash: null }),
-        ctx('worker'),
       );
-      const tb = await viaProxy.complete(
+      const tb = await completeThroughSaturation(
+        viaProxy,
         toRequest(b, { tools: [], toolSchemaHash: null }),
-        ctx('worker'),
       );
       expect(ta.outcome).toBe('completed');
       expect(tb.outcome).toBe('completed');
@@ -430,12 +430,12 @@ describe('G5.6c cached-token honesty: null = unavailable, 0 only if the provider
           const viaProxy = await createAdapter({
             OPENAI_BASE_URL: proxy.baseUrl,
           });
-          const r = await viaProxy.complete(
+          const r = await completeThroughSaturation(
+            viaProxy,
             chat(live.model, 'Reply with exactly: OK', {
               stream,
               maxTokens: 32,
             }),
-            ctx('worker'),
           );
           expect(r.outcome).toBe('completed');
           expect(r.usage.cachedTokens).toBe(expected);
@@ -459,7 +459,10 @@ describe('G5.6c cached-token honesty: null = unavailable, 0 only if the provider
     }));
     try {
       const viaProxy = await createAdapter({ OPENAI_BASE_URL: proxy.baseUrl });
-      const r = await viaProxy.complete(chat(live.model, 'x'), ctx('worker'));
+      const r = await completeThroughSaturation(
+        viaProxy,
+        chat(live.model, 'x'),
+      );
       expect(r.attempts[0].usage.cachedTokens).toBeNull();
       expect(r.usage.cachedTokens).toBeNull();
     } finally {
