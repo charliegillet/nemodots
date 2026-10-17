@@ -431,6 +431,80 @@ describe('telemetry on PostgreSQL', () => {
     expect(await getMissionTiming(app, missionId)).toEqual(timing);
   });
 
+  it('timing reflects fenced calls with no spans and calls recorded after the last span', async () => {
+    const noSpans = randomUUID();
+    await storeCall(noSpans, {
+      role: 'worker',
+      model: SUPER,
+      prefix: PREFIX_A,
+      attempts: [attempt(1, { finishedAt: at(1000) })],
+    });
+    const t0 = await getMissionTiming(app, noSpans);
+    expect(t0.inferenceMs).toBe(1000);
+    expect(t0.spans.inference).toBe(1);
+
+    const later = randomUUID();
+    await inTx((c) =>
+      recordToolSpan(c, {
+        missionId: later,
+        toolName: 'read_runbook',
+        startedAt: at(0),
+        finishedAt: at(50),
+        outcome: 'ok',
+      }),
+    );
+    await storeCall(later, {
+      role: 'worker',
+      model: SUPER,
+      prefix: PREFIX_A,
+      attempts: [attempt(1, { finishedAt: at(1000) })],
+    });
+    const t1 = await getMissionTiming(app, later);
+    expect(t1).toMatchObject({ inferenceMs: 1000, toolMs: 50 });
+    const root = await mkdtemp(path.join(os.tmpdir(), 'nemodots-telemetry-'));
+    try {
+      const result = await exportMissionTelemetry(app, later, {
+        rootDir: root,
+      });
+      const text = await readFile(result.path, 'utf8');
+      const timing = text
+        .trimEnd()
+        .split('\n')
+        .map((l) => JSON.parse(l) as { type: string; inferenceMs?: number })
+        .find((l) => l.type === 'timing');
+      expect(JSON.stringify(timing)).toContain('1000');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('is correct after two concurrent transactions record spans', async () => {
+    const missionId = randomUUID();
+    const a = await app.connect();
+    const b = await app.connect();
+    try {
+      await a.query('BEGIN');
+      await b.query('BEGIN');
+      const span = (ms: number) => ({
+        missionId,
+        toolName: 'x',
+        startedAt: at(0),
+        finishedAt: at(ms),
+        outcome: 'ok' as const,
+      });
+      await recordToolSpan(a, span(100));
+      await recordToolSpan(b, span(200));
+      await a.query('COMMIT');
+      await b.query('COMMIT');
+    } finally {
+      a.release();
+      b.release();
+    }
+    const timing = await getMissionTiming(app, missionId);
+    expect(timing.toolMs).toBe(300);
+    expect(timing.spans.tool).toBe(2);
+  });
+
   it('stores a tool span once per id and refuses a conflicting redelivery', async () => {
     const missionId = randomUUID();
     const id = randomUUID();

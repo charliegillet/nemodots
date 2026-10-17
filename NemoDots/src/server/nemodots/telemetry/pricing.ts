@@ -45,7 +45,11 @@ const OUTPUT_KEYS = [
   'output_token',
   'output_tokens',
 ] as const;
+// `input_cache_reads` is the field Crusoe's live /v1/models returns (verified
+// 2026-10-17: prompt, completion, image, request, video, input_cache_reads).
+// The other names are unverified aliases kept for tolerance.
 const CACHED_KEYS = [
+  'input_cache_reads',
   'cached',
   'cached_input',
   'cache_read',

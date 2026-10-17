@@ -55,6 +55,45 @@ describe('parseModelPricing', () => {
   });
 });
 
+describe('parseModelPricing against the live Crusoe shape', () => {
+  it('reads prompt, completion and input_cache_reads', () => {
+    const prices = parseModelPricing({
+      data: [
+        {
+          id: 'nvidia/NVIDIA-Nemotron-3-Super-120B-A12B',
+          pricing: {
+            prompt: '0.30',
+            completion: '2.40',
+            image: '0',
+            request: '0',
+            video: '0',
+            input_cache_reads: '0.15',
+          },
+        },
+      ],
+    });
+    expect(prices).toEqual([
+      {
+        model: 'nvidia/NVIDIA-Nemotron-3-Super-120B-A12B',
+        inputPerMillion: 0.3,
+        outputPerMillion: 2.4,
+        cachedPerMillion: 0.15,
+      },
+    ]);
+    const cost = estimateCost(
+      {
+        promptTokens: 1_000_000,
+        completionTokens: 1_000_000,
+        cachedTokens: 500_000,
+      },
+      prices[0],
+    );
+    // 0.5M uncached prompt @0.30 + 0.5M cached @0.15 + 1M completion @2.40
+    expect(cost.usd).toBeCloseTo(0.15 + 0.075 + 2.4, 10);
+    expect(cost.unavailableReason).toBeNull();
+  });
+});
+
 describe('estimateCost', () => {
   it('prices cached tokens at the cached rate', () => {
     const cost = estimateCost(

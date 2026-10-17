@@ -83,6 +83,12 @@ export interface ProvenanceHandle {
   readonly snapshots: readonly ContextSnapshot[];
   readonly records: readonly ModelCallRecord[];
   readonly toolActivity: readonly ToolActivity[];
+  /**
+   * Closes a model call the chat engine never closed: when the consumer stops
+   * iterating after a RUN_ERROR or an abort, TanStack's terminal hooks may not
+   * run. Idempotent; a no-op once onFinish/onAbort/onError has run.
+   */
+  flush(reason: 'error' | 'abort' | 'complete'): Promise<void>;
 }
 
 const PAGE_TOOLS = new Set([
@@ -634,6 +640,14 @@ export function createProvenanceMiddleware(
 
   return {
     middleware,
+    async flush(reason) {
+      if (current) {
+        if (reason === 'abort') current.aborted = true;
+        else if (reason === 'error' && !current.error)
+          current.error = 'run error';
+      }
+      await finalize();
+    },
     get snapshots() {
       return snapshots;
     },

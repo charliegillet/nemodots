@@ -4,12 +4,12 @@ import { DotAgent } from '../../../src/server/dot-agent.js';
 import { Store } from '../../../src/server/store.js';
 import { WorkspaceStore } from '../../../src/server/workspace.js';
 import type { PlatformConfig } from '../../../src/server/platform-config.js';
+import type { DependencyEntry } from '../../../src/server/nemodots/contracts/index.js';
 import { completion } from '../../fixtures/model-stream.js';
 import {
   setActivePolicy,
   setInterceptionRuntime,
   derivedUuid,
-  type DependencyEntry,
   type InterceptionRuntime,
   type ModelCallSinkInput,
   type ModelCallSinkTurn,

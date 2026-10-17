@@ -1,12 +1,12 @@
-// Tool spans, orphaned-call storage and the mission timing rollup.
+// Tool spans, orphaned-call storage and the mission timing aggregate.
 //
 // recordToolSpan stores one row per executed or refused tool call (timing,
-// outcome, digests; never arguments, results or prompts) and refreshes the
-// mission's timing buckets. recordOrphanedInference is the telemetry entry for
-// a model call that completed on the provider after the author's lease was
-// lost (finding C16): it delegates to the ledger's unfenced path and refreshes
-// the timing rollup. refreshMissionTiming recomputes the setup / inference /
-// tool buckets from stored rows, so calling it twice never double counts.
+// outcome, digests; never arguments, results or prompts). recordOrphanedInference
+// is the telemetry entry for a model call that completed on the provider after
+// the author's lease was lost (finding C16): it delegates to the ledger's
+// unfenced path. getMissionTiming aggregates the setup / inference / tool
+// buckets from stored rows at read time, so it is never stale and never
+// double counts.
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
@@ -179,7 +179,6 @@ export async function recordToolSpan(
         `tool span ${span.id} was already stored with different content`,
       );
   }
-  await refreshMissionTiming(client, span.missionId);
   return { span, created };
 }
 
@@ -192,35 +191,16 @@ export interface MissionTiming {
 }
 
 /**
- * Recomputes ledger.mission_timing from stored rows: setup and tool from
- * tool_spans, inference from finished inference attempts (orphaned ones
- * included: they were billed and took time). An attempt without finishedAt
- * (cancelled before completion) contributes no time. Idempotent.
+ * Mission timing buckets, aggregated from stored rows at read time: setup and
+ * tool from tool_spans, inference from finished inference attempts (orphaned
+ * ones included: they were billed and took time). An attempt without
+ * finishedAt (cancelled before completion) contributes no time.
+ *
+ * Nothing is materialized. A stored rollup went stale when attempts were
+ * written by the ledger's fenced path and lost updates under concurrent
+ * transactions, so ledger.mission_timing (migration 0006) is no longer
+ * written or read; the aggregate below is always consistent with the rows.
  */
-export async function refreshMissionTiming(
-  client: PgClient,
-  missionId: string,
-): Promise<MissionTiming> {
-  await client.query(
-    `INSERT INTO ledger.mission_timing (mission_id, bucket, total_ms, span_count)
-     SELECT $1::uuid, bucket, COALESCE(SUM(ms), 0)::bigint, COUNT(*)::integer
-       FROM (
-         SELECT bucket, duration_ms AS ms FROM ledger.tool_spans WHERE mission_id = $1
-         UNION ALL
-         SELECT 'inference', ROUND(EXTRACT(EPOCH FROM (finished_at - started_at)) * 1000)::bigint
-           FROM ledger.inference_attempts
-          WHERE mission_id = $1 AND finished_at IS NOT NULL
-       ) spans
-      GROUP BY bucket
-     ON CONFLICT (mission_id, bucket) DO UPDATE
-       SET total_ms = EXCLUDED.total_ms, span_count = EXCLUDED.span_count,
-           updated_at = clock_timestamp()`,
-    [missionId],
-  );
-  return getMissionTiming(client, missionId);
-}
-
-/** Reads the stored rollup; buckets without rows are zero spans, zero ms. */
 export async function getMissionTiming(
   client: PgClient,
   missionId: string,
@@ -230,7 +210,15 @@ export async function getMissionTiming(
     total_ms: string;
     span_count: number;
   }>(
-    'SELECT bucket, total_ms, span_count FROM ledger.mission_timing WHERE mission_id = $1',
+    `SELECT bucket, COALESCE(SUM(ms), 0)::bigint AS total_ms, COUNT(*)::integer AS span_count
+       FROM (
+         SELECT bucket, duration_ms AS ms FROM ledger.tool_spans WHERE mission_id = $1
+         UNION ALL
+         SELECT 'inference', ROUND(EXTRACT(EPOCH FROM (finished_at - started_at)) * 1000)::bigint
+           FROM ledger.inference_attempts
+          WHERE mission_id = $1 AND finished_at IS NOT NULL
+       ) spans
+      GROUP BY bucket`,
     [missionId],
   );
   const timing: MissionTiming = {
@@ -249,18 +237,19 @@ export async function getMissionTiming(
   return timing;
 }
 
+/** Kept for callers of the earlier API; identical to getMissionTiming (no stored rollup). */
+export const refreshMissionTiming = getMissionTiming;
+
 /**
  * Stores the attempts of a call whose fenced record was rejected (C16) as
- * unfenced `orphaned_fence` rows and refreshes the timing rollup. Idempotent
+ * unfenced `orphaned_fence` rows. Idempotent
  * per (call, n). Never writes a record, snapshot or edge.
  */
 export async function recordOrphanedInference(
   client: PgClient,
   input: RecordOrphanedAttemptInput,
 ): Promise<{ inserted: number }> {
-  const result = await recordOrphanedAttempt(client, input);
-  await refreshMissionTiming(client, input.scope.missionId);
-  return result;
+  return recordOrphanedAttempt(client, input);
 }
 
 export async function listToolSpans(

@@ -29,6 +29,14 @@ describe('findRedactionViolation', () => {
       'secret-shaped value',
     );
   });
+  it('does not flag benign words containing sk- but still flags key shapes', () => {
+    for (const code of ['task-timeout', 'disk-full', 'risk-high', 'desk-1'])
+      expect(findRedactionViolation(`{"errorCode":"${code}"}`)).toBeNull();
+    expect(findRedactionViolation('{"k":"sk-abcdefgh12345678"}')).toBe(
+      'sk- prefix',
+    );
+    expect(findRedactionViolation('sk-proj-abcdefgh_1234')).toBe('sk- prefix');
+  });
   it('flags a configured secret and its 8-character prefix', () => {
     const secret = 'zz9-test-secret-value-1234';
     expect(findRedactionViolation(`a ${secret} b`, [secret])).toBe(

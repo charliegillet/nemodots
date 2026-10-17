@@ -45,7 +45,8 @@ export function findRedactionViolation(
   text: string,
   secrets: readonly string[] = [],
 ): string | null {
-  if (text.includes('sk-')) return 'sk- prefix';
+  // Token boundary: ordinary words such as task-, disk- or risk- are not keys.
+  if (/(^|[^A-Za-z0-9])sk-[A-Za-z0-9_-]{8,}/.test(text)) return 'sk- prefix';
   if (/bearer/i.test(text)) return 'Bearer token';
   for (const secret of secrets) {
     if (secret.length < 8) continue;

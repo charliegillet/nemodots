@@ -255,3 +255,15 @@ Parallel is selected by default in live research and Dot conversations. Ask a to
 `WEB_SEARCH_PROVIDER=browser` preserves the existing URL-only browser reader, and `WEB_SEARCH_PROVIDER=disabled` disables these research tools. Workspace and Dot research permissions, pause and cancellation controls still apply. Sample research remains fictional and does not contact a provider.
 
 Queries, requested URLs, a stable session identifier and the research objective are sent to `https://search.parallel.ai/mcp`. Memories and complete conversations are not automatically forwarded to Parallel. Model-selected objectives may still contain context from the conversation. The anonymous service is free for light use with provider-managed limits; set `PARALLEL_API_KEY` on the server for production or higher limits. Provider errors and empty results are reported rather than replaced with invented evidence. See [Parallel Search MCP documentation](https://docs.parallel.ai/integrations/mcp/search-mcp).
+
+## NemoDots
+
+This repository is also the home of **NemoDots**, a persistent team of NVIDIA Nemotron agents (on Crusoe Managed Inference) that restores a deliberately broken checkout app while keeping shared evidence current. When evidence changes, the team adapts: work that rested on superseded evidence is blocked or redone, work that did not is kept, and an independent probe decides whether checkout works again.
+
+NemoDots is built on OpenDots by CopilotKit (MIT License, copyright notice unchanged in [LICENSE](LICENSE)). The application here started from OpenDots commit `ab39f2508f3fd23a949837622456f3d61a108e9a`; the sections above describe upstream OpenDots and are unchanged. Third-party package licenses are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+- [Operator setup](docs/nemodots/SETUP.md): native PostgreSQL and Redis stack (Docker is not used and is unavailable in the reference environment), the three required `OPENAI_*` names with no default base URL, health checks, tests.
+- [Changed-evidence demonstration](docs/nemodots/DEMO.md): the demo script, how to read the recovery timeline, what the acceptance probe does and does not prove, and how to tell a live run from a fixture run.
+- [Architecture](docs/nemodots/ARCHITECTURE.md) and [contracts](docs/nemodots/CONTRACTS.md).
+
+Limits stated up front: the demo's second change is a scenario-driven reaction to the team's proposal, not an unscripted event, and for observed sources (health, metrics, Redis statistics) the guarantee is freshness at admission, not at the instant an effect lands.

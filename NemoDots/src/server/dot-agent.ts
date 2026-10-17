@@ -81,6 +81,7 @@ export class DotAgent extends AbstractAgent {
       const controller = new AbortController();
       this.controller = controller;
       let subscription: { unsubscribe(): void } | undefined;
+      let closeProvenance: ((reason: 'abort') => Promise<void>) | undefined;
       let watcher: ReturnType<typeof setInterval> | undefined;
       let finished = false;
       let configurationFailure = false;
@@ -402,6 +403,7 @@ export class DotAgent extends AbstractAgent {
               memories: memoryRecords,
             })
           : undefined;
+        closeProvenance = provenance?.flush;
         const adapter = openaiCompatibleText(this.config.model, {
           apiKey: this.config.apiKey,
           baseURL: baseUrl,
@@ -535,6 +537,7 @@ export class DotAgent extends AbstractAgent {
                 );
               },
               error: (error: unknown) => {
+                void provenance?.flush('error');
                 observe({ type: EventType.RUN_ERROR });
                 if (this.channel) {
                   subscriber.next(channelError());
@@ -542,6 +545,9 @@ export class DotAgent extends AbstractAgent {
                 } else subscriber.error(error);
               },
               complete: () => {
+                void provenance?.flush(
+                  controller.signal.aborted ? 'abort' : 'complete',
+                );
                 if (controller.signal.aborted && !finished)
                   observe({ type: EventType.RUN_ERROR });
                 subscriber.complete();
@@ -562,6 +568,7 @@ export class DotAgent extends AbstractAgent {
         controller.abort();
         this.inner?.abortRun();
         subscription?.unsubscribe();
+        void closeProvenance?.('abort');
       };
     });
   }
