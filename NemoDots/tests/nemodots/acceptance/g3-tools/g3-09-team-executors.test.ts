@@ -15,11 +15,7 @@
 // module present but another shape it FAILS with DRIVER WIRING PENDING naming the convention. No case is a skip.
 import { createHash } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import {
-  INJECTION,
-  secretsPresentIn,
-  visibleSecrets,
-} from './g3-support.js';
+import { INJECTION, secretsPresentIn, visibleSecrets } from './g3-support.js';
 import {
   CAPS,
   TeamWorld,
@@ -30,7 +26,8 @@ import {
   type Seeded,
 } from './g3-team-driver.js';
 
-const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
+const sha256 = (text: string) =>
+  createHash('sha256').update(text).digest('hex');
 const POOL_DIGEST = sha256('2'); // canonical JSON of the current value 2
 
 const NINE = [
@@ -161,10 +158,14 @@ describe('[TP3.3][T1] the executor registry is closed', () => {
       'OBSERVE_SOURCE',
       'observe_source ',
     ]) {
-      const outcome = await exec(name, { id: 'x', command: 'id' }, {
-        context: seed.ctx,
-        toolCallId: toolCall('unknown'),
-      });
+      const outcome = await exec(
+        name,
+        { id: 'x', command: 'id' },
+        {
+          context: seed.ctx,
+          toolCallId: toolCall('unknown'),
+        },
+      );
       expect(outcome.ok, name).toBe(false);
       expect(outcome.text, name).not.toMatch(/is not a function|undefined/);
     }
@@ -174,10 +175,14 @@ describe('[TP3.3][T1] the executor registry is closed', () => {
       'unknown tools write nothing',
     );
     // the nine are still reachable (a registry that rejects everything would pass the loop above)
-    const listed = await exec('list_runbooks', {}, {
-      context: seed.ctx,
-      toolCallId: toolCall('list'),
-    });
+    const listed = await exec(
+      'list_runbooks',
+      {},
+      {
+        context: seed.ctx,
+        toolCallId: toolCall('list'),
+      },
+    );
     expect(listed.ok, listed.text).toBe(true);
     expect(NINE).toHaveLength(9);
   });
@@ -190,10 +195,14 @@ describe('[TP3.3][T2] runbook ids resolve through the catalogue map only', () =>
     const exec = await bindTeamExecutor(tw);
     const seed = await tw.seedAttempt('investigator');
     const ctx = seed.ctx;
-    const listed = await exec('list_runbooks', {}, {
-      context: ctx,
-      toolCallId: toolCall('rb-list'),
-    });
+    const listed = await exec(
+      'list_runbooks',
+      {},
+      {
+        context: ctx,
+        toolCallId: toolCall('rb-list'),
+      },
+    );
     expect(listed.ok, listed.text).toBe(true);
     const ids = JSON.stringify(listed.value).match(/[a-z0-9][a-z0-9_-]{2,63}/g);
     expect(ids?.length).toBeGreaterThan(0);
@@ -207,10 +216,14 @@ describe('[TP3.3][T2] runbook ids resolve through the catalogue map only', () =>
       'ENV',
       'x'.repeat(65),
     ]) {
-      const outcome = await exec('read_runbook', { id }, {
-        context: ctx,
-        toolCallId: toolCall('rb'),
-      });
+      const outcome = await exec(
+        'read_runbook',
+        { id },
+        {
+          context: ctx,
+          toolCallId: toolCall('rb'),
+        },
+      );
       expect(outcome.ok, id).toBe(false);
       expect(outcome.text, id).not.toMatch(
         /root:|OPENAI_API_KEY|CRUSOE|postgres:\/\//,
@@ -218,18 +231,26 @@ describe('[TP3.3][T2] runbook ids resolve through the catalogue map only', () =>
     }
     // well-formed ids that are not in the catalogue
     for (const id of ['env', 'passwd', 'does-not-exist']) {
-      const outcome = await exec('read_runbook', { id }, {
-        context: ctx,
-        toolCallId: toolCall('rb'),
-      });
+      const outcome = await exec(
+        'read_runbook',
+        { id },
+        {
+          context: ctx,
+          toolCallId: toolCall('rb'),
+        },
+      );
       expect(outcome.ok, id).toBe(false);
     }
     // the same call for an unknown well-formed id and for a catalogue-shaped traversal id reveal no file content
     const known = String(ids![0]);
-    const outcome = await exec('read_runbook', { id: known }, {
-      context: ctx,
-      toolCallId: toolCall('rb-ok'),
-    });
+    const outcome = await exec(
+      'read_runbook',
+      { id: known },
+      {
+        context: ctx,
+        toolCallId: toolCall('rb-ok'),
+      },
+    );
     if (outcome.ok) expect(outcome.text.length).toBeGreaterThan(20);
   });
 });
@@ -237,21 +258,29 @@ describe('[TP3.3][T2] runbook ids resolve through the catalogue map only', () =>
 /* ------------------------------------------------------------------ G3-T3 mission scoping of get_task_status */
 
 describe('[TP3.2][T3] get_task_status is mission-scoped', () => {
-  it("an own-mission task returns its status; a foreign task and an unknown task are indistinguishable and reveal nothing", async () => {
+  it('an own-mission task returns its status; a foreign task and an unknown task are indistinguishable and reveal nothing', async () => {
     const exec = await bindTeamExecutor(tw);
     const seed = await tw.seedAttempt('investigator');
     const other = await tw.seedAttempt('investigator');
-    const own = await exec('get_task_status', { taskId: seed.task }, {
-      context: seed.ctx,
-      toolCallId: toolCall('status'),
-    });
+    const own = await exec(
+      'get_task_status',
+      { taskId: seed.task },
+      {
+        context: seed.ctx,
+        toolCallId: toolCall('status'),
+      },
+    );
     expect(own.ok, own.text).toBe(true);
     expect(own.text).toContain('running');
 
-    const foreign = await exec('get_task_status', { taskId: other.task }, {
-      context: seed.ctx,
-      toolCallId: toolCall('status'),
-    });
+    const foreign = await exec(
+      'get_task_status',
+      { taskId: other.task },
+      {
+        context: seed.ctx,
+        toolCallId: toolCall('status'),
+      },
+    );
     const unknown = await exec(
       'get_task_status',
       { taskId: '9b0c1d2e-3f40-4152-8364-758697a8b9ca' },
@@ -260,7 +289,10 @@ describe('[TP3.2][T3] get_task_status is mission-scoped', () => {
     expect(foreign.ok).toBe(false);
     expect(unknown.ok).toBe(false);
     const normalise = (text: string) =>
-      text.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, '<id>');
+      text.replace(
+        /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g,
+        '<id>',
+      );
     expect(normalise(foreign.text)).toBe(normalise(unknown.text));
     expect(foreign.text).not.toContain('running');
     expect(foreign.text).not.toContain(other.mission);
@@ -293,7 +325,11 @@ describe('[TP3.2][T4] model-supplied identity and receipt ids grant nothing', ()
       expect(outcome.ok, id).toBe(false);
       expect(outcome.text).toMatch(/citation_out_of_scope|out of scope/i);
     }
-    expectNoWrites(before, await tw.counts(seed.mission, seed.attempt), 'rejections');
+    expectNoWrites(
+      before,
+      await tw.counts(seed.mission, seed.attempt),
+      'rejections',
+    );
 
     // in scope: the vector of the emitting model call (health r3) is a valid citation
     const ok = await call(finding(seed, [seed.health.id, seed.member.id]));
@@ -303,7 +339,11 @@ describe('[TP3.2][T4] model-supplied identity and receipt ids grant nothing', ()
       task_id: string;
       attempt_id: string;
       supporting_receipt_ids: string[];
-      dependency_vector: { sourceKey: string; sourceRevision: number; receiptId: string }[];
+      dependency_vector: {
+        sourceKey: string;
+        sourceRevision: number;
+        receiptId: string;
+      }[];
     }>(
       `SELECT mission_id, task_id, attempt_id, supporting_receipt_ids, dependency_vector FROM coordinator.findings WHERE mission_id = $1`,
       [seed.mission],
@@ -356,7 +396,10 @@ describe('[TP3.1][T-fence] a stale fencing token or generation leaves zero rows'
         `${tool} with a stale fence`,
       );
       // an attempt that left `running` is fenced too
-      await tw.q(`UPDATE coordinator.task_attempts SET status = 'aborted', abort_reason = 'lease_lost' WHERE id = $1`, [seed.attempt]);
+      await tw.q(
+        `UPDATE coordinator.task_attempts SET status = 'aborted', abort_reason = 'lease_lost' WHERE id = $1`,
+        [seed.attempt],
+      );
       const aborted = await exec(tool, args(seed), {
         context: seed.ctx,
         toolCallId: toolCall('fence'),
@@ -393,37 +436,58 @@ describe('[TP3.1][T-idem] propose_action derives its idempotency from the tool c
       toolCallId,
       modelCallId: seed.modelCallId,
     });
-    const first = await exec('propose_action', setPool(12, seed), options('tc-1'));
+    const first = await exec(
+      'propose_action',
+      setPool(12, seed),
+      options('tc-1'),
+    );
     expect(first.ok, first.text).toBe(true);
     const firstId = intentIdOf(first.value);
     expect(firstId).toBeTruthy();
     expect((await tw.intents(seed.mission)).length).toBe(1);
 
-    const replay = await exec('propose_action', setPool(12, seed), options('tc-1'));
+    const replay = await exec(
+      'propose_action',
+      setPool(12, seed),
+      options('tc-1'),
+    );
     expect(replay.ok, replay.text).toBe(true);
     expect(intentIdOf(replay.value)).toBe(firstId);
     expect((await tw.intents(seed.mission)).length).toBe(1);
 
-    const tampered = await exec('propose_action', setPool(13, seed), options('tc-1'));
+    const tampered = await exec(
+      'propose_action',
+      setPool(13, seed),
+      options('tc-1'),
+    );
     // oracle ADM-05a: blocked(idempotency_conflict) or thrown; the original stays and 13 is never stored
     const rows = JSON.stringify(await tw.intents(seed.mission));
     expect(
       tampered.text + rows,
       'the conflict is reported as idempotency_conflict',
     ).toContain('idempotency_conflict');
-    expect(tampered.value === undefined || intentIdOf(tampered.value) !== firstId || !tampered.ok).toBe(true);
+    expect(
+      tampered.value === undefined ||
+        intentIdOf(tampered.value) !== firstId ||
+        !tampered.ok,
+    ).toBe(true);
     expect(rows).not.toMatch(/"value":\s*13/);
     expect(await tw.configOf('db.pool_max')).toEqual({ value: 2, version: 1 });
 
     // a different tool call id with the same payload is a NEW proposal (the key derives from the tool call id)
-    const other = await exec('propose_action', setPool(12, seed), options('tc-2'));
+    const other = await exec(
+      'propose_action',
+      setPool(12, seed),
+      options('tc-2'),
+    );
     expect(other.ok, other.text).toBe(true);
     expect(intentIdOf(other.value)).not.toBe(firstId);
   });
 });
 
 describe('[TP3.2][T-scope] propose_action through the executor (oracle ADM-18, ADM-06c, ADM-06d)', () => {
-  const NEVER_ACTIVE = /"status":\s*"(proposed|admitted|committed|dispatched|succeeded)"/;
+  const NEVER_ACTIVE =
+    /"status":\s*"(proposed|admitted|committed|dispatched|succeeded)"/;
 
   it('ADM-18: a receipt of another mission, or one the attempt never saw, is citation_out_of_scope; nothing is admitted or committed', async () => {
     const exec = await bindTeamExecutor(tw);
@@ -441,7 +505,10 @@ describe('[TP3.2][T-scope] propose_action through the executor (oracle ADM-18, A
       const rows = JSON.stringify(await tw.intents(seed.mission));
       expect(outcome.text + rows, stray).toContain('citation_out_of_scope');
       expect(rows, stray).not.toMatch(NEVER_ACTIVE);
-      expect(await tw.configOf('db.pool_max')).toEqual({ value: 2, version: 1 });
+      expect(await tw.configOf('db.pool_max')).toEqual({
+        value: 2,
+        version: 1,
+      });
     }
   });
 
@@ -450,7 +517,14 @@ describe('[TP3.2][T-scope] propose_action through the executor (oracle ADM-18, A
     const seed = await tw.seedAttempt('cache_specialist');
     const attempts: [string, unknown][] = [
       ['out-of-domain', setPool(50, seed)],
-      ['unknown-kind', { ...setPool(12, seed), action: 'unknown_kind', payload: { table: 'checkout.orders' } }],
+      [
+        'unknown-kind',
+        {
+          ...setPool(12, seed),
+          action: 'unknown_kind',
+          payload: { table: 'checkout.orders' },
+        },
+      ],
       ['extra-field', setPool(12, seed, { causedByActionId: 'forged' })],
     ];
     for (const [label, args] of attempts) {
@@ -460,7 +534,9 @@ describe('[TP3.2][T-scope] propose_action through the executor (oracle ADM-18, A
         modelCallId: seed.modelCallId,
       });
       expect(outcome.ok, label).toBe(false);
-      expect(outcome.text, label).toMatch(/payload_invalid|invalid|unrecognized|strict|schema/i);
+      expect(outcome.text, label).toMatch(
+        /payload_invalid|invalid|unrecognized|strict|schema/i,
+      );
     }
     const rows = JSON.stringify(await tw.intents(seed.mission));
     expect(rows).not.toMatch(NEVER_ACTIVE);
@@ -489,18 +565,31 @@ describe('[TP3.1][T5] observe_source records a receipt, a readset edge and an ev
     const exec = await bindTeamExecutor(tw);
     const seed = await tw.seedAttempt('investigator');
     const call = (key: string) =>
-      exec('observe_source', { sourceKey: key }, {
-        context: seed.ctx,
-        toolCallId: toolCall('observe'),
-        modelCallId: seed.modelCallId,
-      });
+      exec(
+        'observe_source',
+        { sourceKey: key },
+        {
+          context: seed.ctx,
+          toolCallId: toolCall('observe'),
+          modelCallId: seed.modelCallId,
+        },
+      );
 
     const bad = await tw.counts(seed.mission, seed.attempt);
-    for (const key of ['checkout.secrets', 'postgres://x', '../etc/passwd', 'checkout.config/']) {
+    for (const key of [
+      'checkout.secrets',
+      'postgres://x',
+      '../etc/passwd',
+      'checkout.config/',
+    ]) {
       const outcome = await call(key);
       expect(outcome.ok, key).toBe(false);
     }
-    expectNoWrites(bad, await tw.counts(seed.mission, seed.attempt), 'invalid keys');
+    expectNoWrites(
+      bad,
+      await tw.counts(seed.mission, seed.attempt),
+      'invalid keys',
+    );
 
     const start = await tw.counts(seed.mission, seed.attempt);
     const first = await call('checkout.config/cache.namespace');
@@ -514,12 +603,22 @@ describe('[TP3.1][T5] observe_source records a receipt, a readset edge and an ev
     expect(afterFirst.toolCallEvents - start.toolCallEvents).toBe(1);
     expect(afterFirst.config).toBe(start.config); // observing never writes the controlled state
 
-    const edge = await tw.q<{ kind: string; from_kind: string; to_kind: string; to_id: string }>(
+    const edge = await tw.q<{
+      kind: string;
+      from_kind: string;
+      to_kind: string;
+      to_id: string;
+    }>(
       `SELECT kind, from_kind, to_kind, to_id FROM ledger.dependency_edges WHERE mission_id = $1`,
       [seed.mission],
     );
     expect(edge).toEqual([
-      { kind: 'evidence', from_kind: 'receipt', to_kind: 'attempt', to_id: seed.attempt },
+      {
+        kind: 'evidence',
+        from_kind: 'receipt',
+        to_kind: 'attempt',
+        to_id: seed.attempt,
+      },
     ]);
 
     const second = await call('checkout.config/cache.namespace');
@@ -543,11 +642,15 @@ describe('[TP3.5][T6] instruction-like text in a tool result is data', () => {
       [INJECTION],
     );
     const before = await tw.counts(seed.mission, seed.attempt);
-    const outcome = await exec('observe_source', { sourceKey: 'checkout.config/ui.banner_text' }, {
-      context: seed.ctx,
-      toolCallId: toolCall('hostile'),
-      modelCallId: seed.modelCallId,
-    });
+    const outcome = await exec(
+      'observe_source',
+      { sourceKey: 'checkout.config/ui.banner_text' },
+      {
+        context: seed.ctx,
+        toolCallId: toolCall('hostile'),
+        modelCallId: seed.modelCallId,
+      },
+    );
     expect(outcome.ok, outcome.text).toBe(true);
     expect(outcome.text).toContain('IGNORE ALL PREVIOUS INSTRUCTIONS');
     const after = await tw.counts(seed.mission, seed.attempt);
@@ -556,7 +659,10 @@ describe('[TP3.5][T6] instruction-like text in a tool result is data', () => {
     expect(after.findings).toBe(before.findings);
     expect(after.authorizations).toBe(before.authorizations);
     expect(after.config).toBe(before.config);
-    expect(await tw.configOf('cache.namespace')).toEqual({ value: 'acc3-ns-a', version: 1 });
+    expect(await tw.configOf('cache.namespace')).toEqual({
+      value: 'acc3-ns-a',
+      version: 1,
+    });
   });
 });
 
@@ -573,15 +679,31 @@ describe('[TP3.4][T7] no tool result leaks credentials or the fault actor', () =
       modelCallId: seed.modelCallId,
     });
     const results: Outcome[] = [];
-    results.push(await exec('observe_source', { sourceKey: 'checkout.config/cache.namespace' }, o('t7a')));
-    results.push(await exec('observe_source', { sourceKey: 'checkout.health' }, o('t7b')));
+    results.push(
+      await exec(
+        'observe_source',
+        { sourceKey: 'checkout.config/cache.namespace' },
+        o('t7a'),
+      ),
+    );
+    results.push(
+      await exec('observe_source', { sourceKey: 'checkout.health' }, o('t7b')),
+    );
     results.push(await exec('list_runbooks', {}, o('t7c')));
-    results.push(await exec('get_task_status', { taskId: seed.task }, o('t7d')));
+    results.push(
+      await exec('get_task_status', { taskId: seed.task }, o('t7d')),
+    );
     results.push(await exec('wait_for_children', {}, o('t7e')));
     results.push(await exec('publish_finding', finding(seed), o('t7f')));
     results.push(await exec('propose_action', setPool(12, seed), o('t7g')));
     results.push(await exec('delegate_task', delegation(), o('t7h')));
-    results.push(await exec('request_replan', { reason: 'The plan no longer fits.' }, o('t7i')));
+    results.push(
+      await exec(
+        'request_replan',
+        { reason: 'The plan no longer fits.' },
+        o('t7i'),
+      ),
+    );
     const text = results.map((r) => r.text).join('\n');
     expect(text.length).toBeGreaterThan(0);
     expect(secretsPresentIn(text, visibleSecrets())).toEqual([]);
@@ -598,60 +720,121 @@ describe('[TP3.1][T8] delegate_task and propose_action are policy-checked at the
     const exec = await bindTeamExecutor(tw);
     const seed = await tw.seedAttempt('cache_specialist');
     const run = (ctx: Seeded['ctx'], args: unknown) =>
-      exec('delegate_task', args, { context: ctx, toolCallId: toolCall('del'), modelCallId: seed.modelCallId });
+      exec('delegate_task', args, {
+        context: ctx,
+        toolCallId: toolCall('del'),
+        modelCallId: seed.modelCallId,
+      });
     const before = await tw.counts(seed.mission, seed.attempt);
 
-    expect((await run(seed.ctx, delegation({ role: 'investigator' }))).ok).toBe(false);
-    expect((await run(seed.ctx, delegation({ role: 'cache_specialist' }))).ok).toBe(false);
-    expect((await run(seed.ctx, delegation({ role: 'planner' }))).ok).toBe(false);
-    expect((await run(seed.ctx, delegation({ role: 'postcondition' }))).ok).toBe(false);
-    expect((await run(seed.ctx, delegation({ justification: '' }))).ok).toBe(false);
+    expect((await run(seed.ctx, delegation({ role: 'investigator' }))).ok).toBe(
+      false,
+    );
+    expect(
+      (await run(seed.ctx, delegation({ role: 'cache_specialist' }))).ok,
+    ).toBe(false);
+    expect((await run(seed.ctx, delegation({ role: 'planner' }))).ok).toBe(
+      false,
+    );
+    expect(
+      (await run(seed.ctx, delegation({ role: 'postcondition' }))).ok,
+    ).toBe(false);
+    expect((await run(seed.ctx, delegation({ justification: '' }))).ok).toBe(
+      false,
+    );
     const noJustification: Record<string, unknown> = delegation();
     delete noJustification.justification;
     expect((await run(seed.ctx, noJustification)).ok).toBe(false);
-    expect((await run(seed.ctx, delegation({ capabilities: ['propose_cache_flush'] }))).ok).toBe(false);
-    const verifierCtx = { ...seed.ctx, role: 'verifier', capabilities: [...CAPS.verifier] };
+    expect(
+      (
+        await run(
+          seed.ctx,
+          delegation({ capabilities: ['propose_cache_flush'] }),
+        )
+      ).ok,
+    ).toBe(false);
+    const verifierCtx = {
+      ...seed.ctx,
+      role: 'verifier',
+      capabilities: [...CAPS.verifier],
+    };
     expect((await run(verifierCtx, delegation())).ok).toBe(false);
-    expect((await tw.counts(seed.mission, seed.attempt)).tasks).toBe(before.tasks);
+    expect((await tw.counts(seed.mission, seed.attempt)).tasks).toBe(
+      before.tasks,
+    );
 
     const ok = await run(seed.ctx, delegation());
     expect(ok.ok, ok.text).toBe(true);
-    const child = await tw.q<{ role: string; capabilities: string[]; depth: number; parent_id: string; justification: string }>(
+    const child = await tw.q<{
+      role: string;
+      capabilities: string[];
+      depth: number;
+      parent_id: string;
+      justification: string;
+    }>(
       `SELECT role, capabilities, depth, parent_id, justification FROM coordinator.tasks WHERE mission_id = $1 AND parent_id = $2`,
       [seed.mission, seed.task],
     );
     expect(child).toHaveLength(1);
     expect(child[0].role).toBe('verifier');
-    expect([...child[0].capabilities].sort()).toEqual([...CAPS.verifier].sort());
+    expect([...child[0].capabilities].sort()).toEqual(
+      [...CAPS.verifier].sort(),
+    );
     expect(child[0].depth).toBe(2); // root 0, T 1, child 2
-    expect(child[0].justification).toBe('Needs an independent read of the checkout.');
+    expect(child[0].justification).toBe(
+      'Needs an independent read of the checkout.',
+    );
   });
 
   it('breadth, depth and total caps (4, 3, 24) are enforced and a refused delegation creates no task', async () => {
     const exec = await bindTeamExecutor(tw);
     const run = (seed: Seeded) =>
-      exec('delegate_task', delegation(), { context: seed.ctx, toolCallId: toolCall('cap'), modelCallId: seed.modelCallId });
+      exec('delegate_task', delegation(), {
+        context: seed.ctx,
+        toolCallId: toolCall('cap'),
+        modelCallId: seed.modelCallId,
+      });
 
     // breadth: T already has 4 children
     const wide = await tw.seedAttempt('investigator');
     for (let i = 0; i < 4; i += 1)
-      await tw.seedTask(wide.mission, { role: 'verifier', parentId: wide.task, depth: 2 });
+      await tw.seedTask(wide.mission, {
+        role: 'verifier',
+        parentId: wide.task,
+        depth: 2,
+      });
     const wideBefore = await tw.counts(wide.mission, wide.attempt);
     const fifth = await run(wide);
     expect(fifth.ok, 'fifth child').toBe(false);
-    expect((await tw.counts(wide.mission, wide.attempt)).tasks).toBe(wideBefore.tasks);
+    expect((await tw.counts(wide.mission, wide.attempt)).tasks).toBe(
+      wideBefore.tasks,
+    );
 
     // depth: T sits at the maximum depth 3, so a child would be depth 4
     const deep = await tw.seedAttempt('investigator');
-    await tw.q(`UPDATE coordinator.tasks SET depth = 3 WHERE id = $1`, [deep.task]);
+    await tw.q(`UPDATE coordinator.tasks SET depth = 3 WHERE id = $1`, [
+      deep.task,
+    ]);
     const deepBefore = await tw.counts(deep.mission, deep.attempt);
     expect((await run(deep)).ok, 'depth 4').toBe(false);
-    expect((await tw.counts(deep.mission, deep.attempt)).tasks).toBe(deepBefore.tasks);
+    expect((await tw.counts(deep.mission, deep.attempt)).tasks).toBe(
+      deepBefore.tasks,
+    );
 
     // total: the mission already has 24 tasks
     const full = await tw.seedAttempt('investigator');
     for (let i = 0; i < 22; i += 1)
-      await tw.seedTask(full.mission, { role: 'verifier', status: 'succeeded', parentId: (await tw.q<{ id: string }>(`SELECT id FROM coordinator.tasks WHERE mission_id = $1 AND depth = 0`, [full.mission]))[0].id, depth: 1 });
+      await tw.seedTask(full.mission, {
+        role: 'verifier',
+        status: 'succeeded',
+        parentId: (
+          await tw.q<{ id: string }>(
+            `SELECT id FROM coordinator.tasks WHERE mission_id = $1 AND depth = 0`,
+            [full.mission],
+          )
+        )[0].id,
+        depth: 1,
+      });
     expect((await tw.counts(full.mission, full.attempt)).tasks).toBe(24);
     expect((await run(full)).ok, '25th task').toBe(false);
     expect((await tw.counts(full.mission, full.attempt)).tasks).toBe(24);

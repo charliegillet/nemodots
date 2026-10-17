@@ -46,10 +46,15 @@ describe('[TP3.1][R1] a Dot turn records the Dot id and an instructions digest, 
       `SELECT injected FROM ledger.context_snapshots WHERE created_at > $1::timestamptz`,
       [since],
     );
-    expect(rows.length, 'the turn recorded a context snapshot').toBeGreaterThan(0);
+    expect(rows.length, 'the turn recorded a context snapshot').toBeGreaterThan(
+      0,
+    );
     const text = JSON.stringify(rows.map((row) => row.injected));
     expect(text).toContain(w.incident.id);
-    const digests = [sha(INCIDENT_INSTRUCTIONS), sha(JSON.stringify(INCIDENT_INSTRUCTIONS))];
+    const digests = [
+      sha(INCIDENT_INSTRUCTIONS),
+      sha(JSON.stringify(INCIDENT_INSTRUCTIONS)),
+    ];
     expect(
       digests.some((d) => text.includes(d)),
       'the digest of the Dot instructions is recorded',
@@ -66,7 +71,11 @@ describe('[TP3.1][R4] replayed history inherits the vector of the turn that prod
     });
     const key = `opendots.page/${p.id}`;
     const turn1 = await runDotTurn(w, w.incident.id, [
-      { toolCalls: [{ id: 'h1', name: 'read_space_page', arguments: { id: p.id } }] },
+      {
+        toolCalls: [
+          { id: 'h1', name: 'read_space_page', arguments: { id: p.id } },
+        ],
+      },
       { text: 'noted' },
     ]);
     expect(turn1.runError).toBeUndefined();
@@ -79,12 +88,19 @@ describe('[TP3.1][R4] replayed history inherits the vector of the turn that prod
     });
     expect(edit.status).toBe(200);
     const since = (
-      await adminQuery<{ t: string }>(w.db!.admin, `SELECT clock_timestamp()::text AS t`)
+      await adminQuery<{ t: string }>(
+        w.db!.admin,
+        `SELECT clock_timestamp()::text AS t`,
+      )
     )[0].t;
 
     // turn 2 replays turn 1 exactly as the browser would: user, assistant tool call, tool result, assistant text
     const history = [
-      { id: 'u1', role: 'user', content: 'Please help with the incident pages.' },
+      {
+        id: 'u1',
+        role: 'user',
+        content: 'Please help with the incident pages.',
+      },
       {
         id: 'a1',
         role: 'assistant',
@@ -93,7 +109,10 @@ describe('[TP3.1][R4] replayed history inherits the vector of the turn that prod
           {
             id: 'h1',
             type: 'function',
-            function: { name: 'read_space_page', arguments: JSON.stringify({ id: p.id }) },
+            function: {
+              name: 'read_space_page',
+              arguments: JSON.stringify({ id: p.id }),
+            },
           },
         ],
       },
@@ -109,7 +128,11 @@ describe('[TP3.1][R4] replayed history inherits the vector of the turn that prod
 
     const snapshots = await adminQuery<{
       injected: { historyItems?: unknown[] } | null;
-      dependency_vector: { sourceKey: string; sourceRevision: number; receiptId: string }[];
+      dependency_vector: {
+        sourceKey: string;
+        sourceRevision: number;
+        receiptId: string;
+      }[];
     }>(
       w.db!.admin,
       `SELECT injected, dependency_vector FROM ledger.context_snapshots WHERE created_at > $1::timestamptz`,
@@ -118,14 +141,21 @@ describe('[TP3.1][R4] replayed history inherits the vector of the turn that prod
     expect(snapshots.length, 'turn 2 recorded a snapshot').toBeGreaterThan(0);
     for (const snapshot of snapshots) {
       // hand-enumerated history: user, assistant tool call, tool result, assistant text = at least 4 items
-      expect(snapshot.injected?.historyItems?.length ?? 0).toBeGreaterThanOrEqual(4);
-      const entries = snapshot.dependency_vector.filter((e) => e.sourceKey === key);
+      expect(
+        snapshot.injected?.historyItems?.length ?? 0,
+      ).toBeGreaterThanOrEqual(4);
+      const entries = snapshot.dependency_vector.filter(
+        (e) => e.sourceKey === key,
+      );
       expect(
         entries.map((e) => e.sourceRevision),
         'the replayed tool result carries the page revision it was read at (1), not the current revision (2)',
       ).toEqual([1]);
     }
-    const receipts = await adminQuery<{ source_revision: number; status: string }>(
+    const receipts = await adminQuery<{
+      source_revision: number;
+      status: string;
+    }>(
       w.db!.admin,
       `SELECT r.source_revision, r.status FROM ledger.observation_receipts r JOIN ledger.sources s ON s.id = r.source_id WHERE s.key = $1 ORDER BY r.source_revision`,
       [key],

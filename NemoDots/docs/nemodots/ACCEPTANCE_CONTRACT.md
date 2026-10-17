@@ -147,3 +147,18 @@ SHA-256 of every frozen file, computed with `shasum -a 256` after formatting. `t
 | `acceptance-v1` | 2026-10-17 | initial freeze before W4 | TEST_PROMPT verification contract, BUILD_PROMPT "freeze before W4" | n/a      |
 
 A legitimate correction (a spec or oracle bug) adds a row here with the before and after values and the rationale. Someone other than its author reviews it, and all hashes are recomputed. Lowering a threshold, broadening an `anyOf`, swapping a fault for an easier one or skipping an assertion to get green is forbidden.
+
+## 10. Gate 3 (tool and scope audit) dependencies and open specification gaps
+
+Owner: the verifier (`tests/nemodots/acceptance/g3-tools/`). Not part of the frozen hash table.
+
+**Team executors (`g3-09`).** `src/server/nemodots/team/tools.ts` must export `createTeamTools(deps)` returning `{ execute(name, rawArgs, { context, toolCallId, modelCallId }): Promise<unknown> }`. `context` is the `AttemptContext` of CONTRACTS section 10, `modelCallId` is the emitting model call (needed by `propose_action`, which passes `ctx & { modelCallId, toolCallId }` to `ActionAdmissionPort.propose`). Unknown tool names must be rejected by `execute` itself. `deps` is a generous bag (`pool`, `appPool`, `adminUrl`, `appUrl`, `env`, `clock`); unused keys are ignored. Any other shape fails with DRIVER WIRING PENDING, not a skip. The driver seeds missions, tasks, attempts, receipts and the emitting model call with SQL (as `claimAttempt` and the watcher would leave them) and its self-check passes without production code.
+
+**Composition (`g3-03`..`g3-08`, `g3-10`).** `createNemoDots(env, { workspace, inference? })` must accept an optional `inference` port. After `nd.stop()` a second `createNemoDots` on the same databases must give the same answers (restart test B3).
+
+**Specification gaps escalated to the lead.**
+1. **I6/M10 bound vector.** TOOL_COVERAGE M9 says `createApproval` stores the current provenance scope vector, M10 allows NULL. The acceptance assumes an ordinary (unlisted) Dot turn that read a page binds a non-NULL vector while `NEMODOTS_INCIDENT_DOT_IDS` is non-empty, because incident Dots have no connections (R10) and would otherwise leave no configuration that exercises revalidation. If this is wrong the lead must say which Dot kind gets a bound vector; until then B1 and B2 FAIL with "revalidation unverifiable" rather than pass on a NULL vector.
+2. **History sanitisation.** The context compiler redacts credentials in replayed history but does not strip `caused_by_actor` / `injector:` text from a replayed tool message (`g3-02`). Either the contract says tool results are sanitised before they are stored (then the compiler need not strip) or the compiler must strip. The test asserts the stricter reading.
+3. **Live Intelligence cases (`g3-11`)** use the real Intelligence key and a verifier-scripted model behind `OPENAI_BASE_URL`; they prove enforcement on the real Dot path, not what a live Nemotron would choose.
+
+**Ports.** `g3-03`..`g3-10` use app 4661 (checkout 4660 reserved), database prefix `acc3_`, Redis db 4. `g3-11` and `g3-12` reuse the g4 block (checkout 4680, app 4681, provider 4683); suites run one file at a time.

@@ -397,7 +397,8 @@ export async function seedControlledState(world: {
   db: Acc3Database | null;
   redisPrefix: string;
 }): Promise<void> {
-  if (!world.db) throw new Error('seedControlledState needs the NemoDots database');
+  if (!world.db)
+    throw new Error('seedControlledState needs the NemoDots database');
   await seedConfigRows(world.db.admin);
   const client = createClient({ url: acc3RedisUrl() });
   await client.connect();
@@ -425,10 +426,14 @@ async function redisDigest(prefix: string): Promise<string> {
       const type = await client.type(key);
       let body = '';
       if (type === 'string') body = String(await client.get(key));
-      else if (type === 'hash') body = JSON.stringify(await client.hGetAll(key));
-      else if (type === 'list') body = JSON.stringify(await client.lRange(key, 0, -1));
-      else if (type === 'set') body = JSON.stringify((await client.sMembers(key)).sort());
-      else if (type === 'zset') body = JSON.stringify(await client.zRangeWithScores(key, 0, -1));
+      else if (type === 'hash')
+        body = JSON.stringify(await client.hGetAll(key));
+      else if (type === 'list')
+        body = JSON.stringify(await client.lRange(key, 0, -1));
+      else if (type === 'set')
+        body = JSON.stringify((await client.sMembers(key)).sort());
+      else if (type === 'zset')
+        body = JSON.stringify(await client.zRangeWithScores(key, 0, -1));
       parts.push(`${key}=${type}:${body}`);
     }
     return `redis ${keys.length} keys ${parts.join('|')}`;
@@ -1058,7 +1063,8 @@ export async function openWorld(options: WorldOptions = {}): Promise<World> {
       restart: async (restartOptions = {}) => {
         if (options.serve)
           throw new Error('restart() is not supported on a served world');
-        if (!wantNd) throw new Error('restart() needs the NemoDots composition');
+        if (!wantNd)
+          throw new Error('restart() needs the NemoDots composition');
         const bootstrap = await loadExport<
           (
             env: Record<string, string | undefined>,
@@ -1120,6 +1126,7 @@ export async function openWorld(options: WorldOptions = {}): Promise<World> {
     store.close();
     workspace.close();
     if (created) await created.drop();
+    rmSync(fixturePath, { force: true });
     rmSync(sqlitePath, { force: true });
     throw error;
   }
@@ -1283,7 +1290,10 @@ export function expectRefusedCall(
 ) {
   expect(turn.runError, `${label}: the turn must not crash`).toBeUndefined();
   const result = turn.resultOf(toolCallId);
-  expect(result, `${label}: the model must receive a tool result`).toBeDefined();
+  expect(
+    result,
+    `${label}: the model must receive a tool result`,
+  ).toBeDefined();
   expect(result, `${label}: the result must be a visible refusal`).toMatch(
     pattern,
   );

@@ -316,7 +316,9 @@ export class TeamWorld {
    * model call whose snapshot vector holds exactly {member, health}; `unseen` is a receipt of the same mission
    * the attempt never saw and `foreign` belongs to another mission.
    */
-  async seedAttempt(role: keyof typeof CAPS = 'cache_specialist'): Promise<Seeded> {
+  async seedAttempt(
+    role: keyof typeof CAPS = 'cache_specialist',
+  ): Promise<Seeded> {
     const mission = await this.seedMission();
     const other = await this.seedMission();
     const parent = await this.seedTask(mission, {
@@ -335,12 +337,9 @@ export class TeamWorld {
       capabilities: [...CAPS[role]],
       role,
     };
-    const health = await this.seedReceipt(
-      mission,
-      'checkout.health',
-      3,
-      { status: 'degraded' },
-    );
+    const health = await this.seedReceipt(mission, 'checkout.health', 3, {
+      status: 'degraded',
+    });
     const member = await this.seedReceipt(
       mission,
       'checkout.config/db.pool_max',
@@ -355,12 +354,9 @@ export class TeamWorld {
       { hitRate: 0.4 },
       'observed_store',
     );
-    const foreign = await this.seedReceipt(
-      other,
-      'checkout.metrics',
-      5,
-      { p95: 900 },
-    );
+    const foreign = await this.seedReceipt(other, 'checkout.metrics', 5, {
+      p95: 900,
+    });
     const modelCallId = await this.seedModelCall(ctx, [member, health]);
     const seeded: Seeded = {
       mission,

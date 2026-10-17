@@ -11,7 +11,10 @@ import {
   type ReceiptId,
   type SourceKey,
 } from '../../../../src/server/nemodots/contracts/index.js';
-import { compileContext } from '../../../../src/server/nemodots/context/compile.js';
+import {
+  compileContext,
+  type CompileContextInput,
+} from '../../../../src/server/nemodots/context/compile.js';
 
 const NOW = '2026-10-17T18:00:00.000Z';
 const SNAP = '5b1d2c3e-4f50-4a61-8b72-93a4b5c6d7e8' as ContextSnapshotId;
@@ -34,7 +37,7 @@ const toolNames = [
   'publish_finding',
 ] as const;
 
-function compileWith(text: string) {
+function compileWith(text: string, over: Partial<CompileContextInput> = {}) {
   const dep: DependencyEntry = {
     sourceKey: 'checkout.health' as SourceKey,
     sourceRevision: 4,
@@ -89,6 +92,7 @@ function compileWith(text: string) {
         dependencyVector: [dep],
       },
     ],
+    ...over,
   });
 }
 
@@ -162,6 +166,8 @@ describe('[TP3.5] instruction-like text stays data', () => {
     );
     expect(out.system).not.toContain(secret);
     expect(out.system).not.toContain('CRUSOE_API_KEY=abc123');
+    expect(JSON.stringify(out.messages)).not.toContain(secret);
+    expect(JSON.stringify(out.messages)).not.toContain('CRUSOE_API_KEY=abc123');
     expect(out.redactions).toBeGreaterThan(0);
   });
 
@@ -206,5 +212,104 @@ describe('[TP3.5] instruction-like text stays data', () => {
     });
     expect(out.system).not.toContain('scenario-fault-7');
     expect(out.system).not.toContain('injector:');
+    expect(JSON.stringify(out.messages)).not.toContain('scenario-fault-7');
+  });
+});
+
+const OTHER_RID = '8d9e0f1a-2b3c-4d4e-8f50-6b7c8d9e0f1a' as ReceiptId;
+
+describe('[TP3.5] the conversation messages (history and tool results) are data-handled too', () => {
+  it.each([0, 2].map((i) => [i, HOSTILE[i]] as const))(
+    '[TP3.5] hostile payload #%i appears in out.messages only as an escaped tool-role message, never in a user or assistant message',
+    (_i, text) => {
+      const out = compileWith(text);
+      const fragment = text.includes('IGNORE ALL PREVIOUS INSTRUCTIONS')
+        ? 'IGNORE ALL PREVIOUS INSTRUCTIONS'
+        : 'END OF EVIDENCE';
+      const carrying = out.messages.filter((m) =>
+        JSON.stringify(m.content).includes(fragment),
+      );
+      expect(
+        carrying.length,
+        'the replayed tool result is present',
+      ).toBeGreaterThan(0);
+      for (const message of carrying) expect(message.role).toBe('tool');
+      const controls = [...JSON.stringify(out.messages)].filter((ch) => {
+        const code = ch.codePointAt(0)!;
+        return code < 0x20 || code === 0x7f;
+      });
+      expect(controls).toEqual([]);
+    },
+  );
+
+  it('[TP3.4][TP3.5] credentials in replayed user, assistant, tool-call-argument and tool messages are redacted (history is credential-redacted but not wrapped)', () => {
+    const key = 'nvapi-' + 'Z9y8X7w6V5u4T3s2R1q0P9o8N7m6';
+    const out = compileWith('plain', {
+      history: [
+        {
+          role: 'user',
+          content: `my key is ${key}`,
+          dependencyVector: [],
+        },
+        {
+          role: 'assistant',
+          content: `calling with ${key}`,
+          toolCalls: [
+            {
+              id: 'tc-1',
+              name: 'observe_source',
+              arguments: JSON.stringify({ note: key }),
+            },
+          ],
+          dependencyVector: [],
+        },
+        {
+          role: 'tool',
+          content: `Authorization: Bearer ${'q'.repeat(40)} ${key}`,
+          toolCallId: 'tc-1',
+          toolName: 'observe_source',
+          dependencyVector: [],
+        },
+      ],
+    });
+    const serialized = JSON.stringify(out.messages);
+    expect(serialized).not.toContain(key);
+    expect(serialized).not.toContain('q'.repeat(40));
+    expect(out.redactions).toBeGreaterThanOrEqual(3);
+  });
+
+  it('[TP3.5] an injector actor key in a replayed tool message does not reach the model (a diagnosis cannot leak through history)', () => {
+    const out = compileWith('plain', {
+      history: [
+        {
+          role: 'tool',
+          content: JSON.stringify({
+            status: 'degraded',
+            caused_by_actor: 'injector:scenario-fault-7',
+          }),
+          toolCallId: 'tc-9',
+          toolName: 'observe_source',
+          dependencyVector: [],
+        },
+      ],
+    });
+    const everything = out.system + JSON.stringify(out.messages);
+    expect(everything).not.toContain('scenario-fault-7');
+    expect(everything).not.toContain('injector:');
+  });
+
+  it('[TP3.5] an inherited vector entry for a receipt that is NOT injected is unioned into the snapshot vector (dropping inherited edges would hide a dependency)', () => {
+    const inherited: DependencyEntry = {
+      sourceKey: 'redis.stats' as SourceKey,
+      sourceRevision: 2,
+      receiptId: OTHER_RID,
+    };
+    const out = compileWith('plain', { inheritedVector: [inherited] });
+    const ids = out.snapshot.dependencyVector.map((e) => e.receiptId);
+    expect(ids).toContain(OTHER_RID);
+    expect(ids).toContain(RID);
+    expect(ContextSnapshotSchema.safeParse(out.snapshot).success).toBe(true);
+    // and the injected receipts do not include it: the entry is a dependency, not content
+    expect(out.system).not.toContain(OTHER_RID);
   });
 });

@@ -324,7 +324,9 @@ describe('[TP3.2] missions are scoped: unknown and foreign ids reveal nothing, s
         const reader = response.body!.getReader();
         const decoder = new TextDecoder();
         for (;;) {
-          const next = await reader.read().catch(() => ({ done: true, value: undefined }));
+          const next = await reader
+            .read()
+            .catch(() => ({ done: true, value: undefined }));
           if (next.done) break;
           text += decoder.decode(next.value, { stream: true });
         }
@@ -355,10 +357,9 @@ describe('[TP3.2] missions are scoped: unknown and foreign ids reveal nothing, s
         body: '{}',
       });
       expect(cancelB.status).toBe(200);
-      expect(
-        await streamB.until(b),
-        "B's own stream delivered B's event",
-      ).toBe(true);
+      expect(await streamB.until(b), "B's own stream delivered B's event").toBe(
+        true,
+      );
       const cancelA = await w.authed(`/api/nemodots/missions/${a}/cancel`, {
         method: 'POST',
         body: '{}',
@@ -369,9 +370,18 @@ describe('[TP3.2] missions are scoped: unknown and foreign ids reveal nothing, s
       const deadline = Date.now() + 20_000;
       while (framesOfA() < 2 && Date.now() < deadline)
         await new Promise((r) => setTimeout(r, 25));
-      expect(framesOfA(), 'A emitted a second event (its cancellation)').toBeGreaterThanOrEqual(2);
-      expect(streamA.text(), "B's id must never appear on A's stream").not.toContain(b);
-      expect(streamB.text(), "A's id must never appear on B's stream").not.toContain(a);
+      expect(
+        framesOfA(),
+        'A emitted a second event (its cancellation)',
+      ).toBeGreaterThanOrEqual(2);
+      expect(
+        streamA.text(),
+        "B's id must never appear on A's stream",
+      ).not.toContain(b);
+      expect(
+        streamB.text(),
+        "A's id must never appear on B's stream",
+      ).not.toContain(a);
     } finally {
       await streamA.stop();
       await streamB.stop();

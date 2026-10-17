@@ -1,7 +1,6 @@
 // Gate 3 coverage map: every TEST_PROMPT gate-3 bullet (TP3.1-TP3.7) and every execution-path row of
 // TOOL_COVERAGE.md sections 2 and 3 (R1-R15, M1-M16) must be named by at least one test in this folder.
-// A row that the suite does not name FAILS this test; a row whose only test is a NOT_RUN / pending-wiring case
-// is reported by that test, never hidden here. The map is hand-written from the two documents.
+// A row that the suite does not name FAILS this test; a row whose only test cannot run yet fails in that test, never here. The map is hand-written from the two documents.
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -97,7 +96,7 @@ describe('gate 3 case map', () => {
 
   it('the nine team tools of TOOL_COVERAGE section 1 each have a strictness test and an executor case', () => {
     const contract = sources.find((s) => s.file.startsWith('g3-01'))!.text;
-    const executors = sources.find((s) => s.file.startsWith('g3-08'))!.text;
+    const executors = sources.find((s) => s.file.startsWith('g3-09'))!.text;
     expect(contract).toContain('DOCUMENTED_TOOLS');
     for (const tool of [
       'observe_source',
@@ -111,7 +110,32 @@ describe('gate 3 case map', () => {
       'request_replan',
     ])
       expect(contract, tool).toContain(`'${tool}'`);
-    expect(executors).toContain('G3-T1');
-    expect(executors).toContain('G3-T8');
+    for (const tag of [
+      'T1',
+      'T2',
+      'T3',
+      'T4',
+      'T5',
+      'T6',
+      'T7',
+      'T8',
+      'T-fence',
+      'T-idem',
+      'T-scope',
+    ])
+      expect(executors, tag).toContain(`[${tag}]`);
+    // the nine tools are all exercised by an executor case, not only by a strictness test
+    for (const tool of [
+      'observe_source',
+      'list_runbooks',
+      'read_runbook',
+      'delegate_task',
+      'get_task_status',
+      'wait_for_children',
+      'publish_finding',
+      'propose_action',
+      'request_replan',
+    ])
+      expect(executors, tool).toContain(`'${tool}'`);
   });
 });

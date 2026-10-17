@@ -154,7 +154,9 @@ describe('[TP3.1][M3][M4] page revisions reach the ledger from every page write 
     const afterCreate = await pageLedgerTrace(w.db!.admin, page.id);
     expect(afterCreate.sources).toBe(1);
     expect(afterCreate.sourceTypes).toEqual(['page_snapshot']);
-    expect(afterCreate.revisions, 'create records page revision 1').toEqual([1]);
+    expect(afterCreate.revisions, 'create records page revision 1').toEqual([
+      1,
+    ]);
 
     const ok = await w.authed(`/api/spaces/${w.spaceA}/pages/${page.id}`, {
       method: 'PATCH',

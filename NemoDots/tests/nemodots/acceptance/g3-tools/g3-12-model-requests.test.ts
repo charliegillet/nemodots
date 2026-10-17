@@ -36,20 +36,31 @@ const PLAN = {
       title: 'Inspect health',
       question: 'What does the health endpoint report?',
       role: 'investigator',
-      capabilities: ['observe', 'delegate', 'publish_finding', 'request_replan'],
+      capabilities: [
+        'observe',
+        'delegate',
+        'publish_finding',
+        'request_replan',
+      ],
       dependsOn: [],
     },
     {
       title: 'Inspect configuration',
       question: 'Which configuration members exist?',
       role: 'investigator',
-      capabilities: ['observe', 'delegate', 'publish_finding', 'request_replan'],
+      capabilities: [
+        'observe',
+        'delegate',
+        'publish_finding',
+        'request_replan',
+      ],
       dependsOn: [],
     },
   ],
 };
 
-let memo: Promise<{ provider: Provider; system: System; api: NemoApi }> | null = null;
+let memo: Promise<{ provider: Provider; system: System; api: NemoApi }> | null =
+  null;
 async function boot() {
   const provider = await startProvider({
     port: G4.providerPort,
@@ -99,7 +110,9 @@ describe('[TP3.3][TP3.4][TP3.7] the requests the NemoDots planner and workers se
         500,
       );
     } finally {
-      await api.lifecycle(mission.id, 'cancel', [200, 409]).catch(() => undefined);
+      await api
+        .lifecycle(mission.id, 'cancel', [200, 409])
+        .catch(() => undefined);
     }
 
     const planner = provider.calls.filter((c) => c.kind === 'structured');
@@ -114,10 +127,15 @@ describe('[TP3.3][TP3.4][TP3.7] the requests the NemoDots planner and workers se
     for (const call of workers) {
       expect(toolNamesOf(call.body), 'worker tools').toEqual(DOCUMENTED_TOOLS);
       expect(call.body.tool_choice).not.toBe('required');
-      expect(JSON.stringify(call.body.tool_choice ?? '')).not.toContain('required');
+      expect(JSON.stringify(call.body.tool_choice ?? '')).not.toContain(
+        'required',
+      );
     }
     const secrets = visibleSecrets();
-    expect(secrets.length, 'the verifier can see secrets to look for').toBeGreaterThan(0);
+    expect(
+      secrets.length,
+      'the verifier can see secrets to look for',
+    ).toBeGreaterThan(0);
     for (const call of provider.calls)
       expect(
         secretsPresentIn(JSON.stringify(call.body), secrets),

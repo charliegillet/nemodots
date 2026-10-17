@@ -70,7 +70,8 @@ async function boot(): Promise<Live> {
       const lastUser = messages.map((m) => m.role).lastIndexOf('user');
       const prompt = textOf(messages[lastUser]);
       const marker = EDIT_MARKER.exec(prompt);
-      if (!marker || call.kind !== 'worker') return { type: 'content', text: 'ok' };
+      if (!marker || call.kind !== 'worker')
+        return { type: 'content', text: 'ok' };
       // only tool results of THIS turn (history of earlier turns is replayed by Intelligence)
       if (messages.slice(lastUser + 1).some((m) => m.role === 'tool'))
         return { type: 'content', text: 'The edit was refused.' };
@@ -147,7 +148,9 @@ function textOf(message: any): string {
   const content = message?.content;
   if (typeof content === 'string') return content;
   if (Array.isArray(content))
-    return content.map((part: any) => (typeof part?.text === 'string' ? part.text : '')).join('\n');
+    return content
+      .map((part: any) => (typeof part?.text === 'string' ? part.text : ''))
+      .join('\n');
   return '';
 }
 
@@ -165,7 +168,10 @@ async function runTurn(l: Live, prompt: string) {
     `${l.system.baseUrl}/api/copilotkit/agent/${encodeURIComponent(l.dotId)}/run`,
     {
       method: 'POST',
-      headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
+      headers: {
+        'content-type': 'application/json',
+        accept: 'text/event-stream',
+      },
       body: JSON.stringify({
         threadId: l.threadId,
         runId: randomUUID(),
@@ -178,7 +184,9 @@ async function runTurn(l: Live, prompt: string) {
     },
   );
   if (!response.ok)
-    throw new Error(`run -> HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
+    throw new Error(
+      `run -> HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`,
+    );
   const events: any[] = [];
   const decoder = new TextDecoder();
   let buffer = '';
@@ -202,7 +210,8 @@ async function runTurn(l: Live, prompt: string) {
       try {
         const event = JSON.parse(data);
         events.push(event);
-        if (event.type === 'RUN_FINISHED' || event.type === 'RUN_ERROR') terminal = event.type;
+        if (event.type === 'RUN_FINISHED' || event.type === 'RUN_ERROR')
+          terminal = event.type;
       } catch {
         /* non-JSON frame */
       }
@@ -226,7 +235,10 @@ function toolMessagesFor(provider: Provider, marker: string): string[] {
 }
 
 async function pageOf(l: Live) {
-  const response = await json(l.system.baseUrl, `/api/spaces/${l.spaceId}/pages/${l.pageId}`);
+  const response = await json(
+    l.system.baseUrl,
+    `/api/spaces/${l.spaceId}/pages/${l.pageId}`,
+  );
   expect(response.status).toBe(200);
   return response.body as { revision: number; content: string };
 }
@@ -235,8 +247,13 @@ describe('LIVE Intelligence: the incident-Dot path with the real conversation st
   it('[TP3.1][TP3.3][R1][M2] L1: one incident-Dot turn through /api/copilotkit records a live-mode ModelCallRecord and refuses edit_space_page visibly, leaving the page unchanged', async () => {
     const l = await live();
     const marker = `ACC3-EDIT ${l.pageId}`;
-    const turn = await runTurn(l, `${marker}: replace the page content with LIVE-EDIT`);
-    expect(turn.terminal, 'the turn finished without RUN_ERROR').toBe('RUN_FINISHED');
+    const turn = await runTurn(
+      l,
+      `${marker}: replace the page content with LIVE-EDIT`,
+    );
+    expect(turn.terminal, 'the turn finished without RUN_ERROR').toBe(
+      'RUN_FINISHED',
+    );
     const attempted = turn.events.some(
       (event) =>
         event.type === 'TOOL_CALL_START' &&
@@ -244,26 +261,42 @@ describe('LIVE Intelligence: the incident-Dot path with the real conversation st
     );
     expect(attempted, 'the model attempted edit_space_page').toBe(true);
     const seen = toolMessagesFor(l.provider, marker);
-    expect(seen.length, 'the model received a tool result for the edit').toBeGreaterThan(0);
+    expect(
+      seen.length,
+      'the model received a tool result for the edit',
+    ).toBeGreaterThan(0);
     expect(seen.join('\n'), 'a visible refusal').toMatch(REFUSAL);
-    expect(await pageOf(l)).toMatchObject({ revision: 1, content: 'LIVE-ORIGINAL' });
+    expect(await pageOf(l)).toMatchObject({
+      revision: 1,
+      content: 'LIVE-ORIGINAL',
+    });
 
     const rows = await l.system.verifier.query(
       `SELECT provider_mode, count(*)::int AS n FROM ledger.model_call_records GROUP BY provider_mode ORDER BY provider_mode`,
     );
-    const live = rows.rows.find((row: any) => row.provider_mode === 'live');
-    expect(live?.n ?? 0, "ModelCallRecord with provider.mode 'live'").toBeGreaterThanOrEqual(1);
-    const telemetry = await json(l.system.baseUrl, '/api/nemodots/telemetry/summary');
+    const liveRow = rows.rows.find((row: any) => row.provider_mode === 'live');
+    expect(
+      liveRow?.n ?? 0,
+      "ModelCallRecord with provider.mode 'live'",
+    ).toBeGreaterThanOrEqual(1);
+    const telemetry = await json(
+      l.system.baseUrl,
+      '/api/nemodots/telemetry/summary',
+    );
     expect(telemetry.status).toBe(200);
     expect(telemetry.body.calls).toBeGreaterThanOrEqual(1);
   }, 400_000);
 
   it('[TP3.1][M5] L2: POST /api/conversations/:id/page saves the persisted conversation and the page revision reaches the ledger', async () => {
     const l = await live();
-    const saved = await post(l.system.baseUrl, `/api/conversations/${l.threadId}/page`, {
-      title: 'Saved conversation',
-      parentId: null,
-    });
+    const saved = await post(
+      l.system.baseUrl,
+      `/api/conversations/${l.threadId}/page`,
+      {
+        title: 'Saved conversation',
+        parentId: null,
+      },
+    );
     expect(saved.status, JSON.stringify(saved.body).slice(0, 300)).toBe(201);
     const id: string = saved.body.id;
     const rows = await l.system.verifier.query(
@@ -271,7 +304,10 @@ describe('LIVE Intelligence: the incident-Dot path with the real conversation st
       [`opendots.page/${id}`],
     );
     expect(
-      rows.rows.map((row: any) => [Number(row.source_revision), row.source_type]),
+      rows.rows.map((row: any) => [
+        Number(row.source_revision),
+        row.source_type,
+      ]),
       'the saved page is revision 1 of a page_snapshot source',
     ).toEqual([[1, 'page_snapshot']]);
   }, 400_000);
@@ -284,10 +320,16 @@ describe('LIVE Intelligence: the incident-Dot path with the real conversation st
       prompt: `${marker}: replace the page content with LIVE-EDIT`,
       threadId: l.threadId,
     });
-    expect(created.status, JSON.stringify(created.body).slice(0, 300)).toBe(201);
-    const run = await post(l.system.baseUrl, `/api/tasks/${created.body.id}/actions`, {
-      action: 'run',
-    });
+    expect(created.status, JSON.stringify(created.body).slice(0, 300)).toBe(
+      201,
+    );
+    const run = await post(
+      l.system.baseUrl,
+      `/api/tasks/${created.body.id}/actions`,
+      {
+        action: 'run',
+      },
+    );
     expect(run.status).toBe(200);
     const deadline = Date.now() + 180_000;
     let seen: string[] = [];
@@ -296,9 +338,42 @@ describe('LIVE Intelligence: the incident-Dot path with the real conversation st
       if (seen.length) break;
       await new Promise((r) => setTimeout(r, 1000));
     }
-    expect(l.provider.calls.length, 'the scheduled turn called the model').toBeGreaterThan(before);
-    expect(seen.length, 'the scheduled turn reached its tool result').toBeGreaterThan(0);
+    expect(
+      l.provider.calls.length,
+      'the scheduled turn called the model',
+    ).toBeGreaterThan(before);
+    expect(
+      seen.length,
+      'the scheduled turn reached its tool result',
+    ).toBeGreaterThan(0);
     expect(seen.join('\n')).toMatch(REFUSAL);
-    expect(await pageOf(l)).toMatchObject({ revision: 1, content: 'LIVE-ORIGINAL' });
+    expect(await pageOf(l)).toMatchObject({
+      revision: 1,
+      content: 'LIVE-ORIGINAL',
+    });
+  }, 400_000);
+
+  it('[TP3.3][R5][R13] L4: the incident Dot is offered no learned-skill tool and no skill catalogue (skillDeliveryEnabled=false)', async () => {
+    const l = await live();
+    const turn = await runTurn(l, 'Say hello in one sentence.');
+    expect(turn.terminal).toBe('RUN_FINISHED');
+    const worker = l.provider.calls.filter((call) => call.kind === 'worker');
+    expect(worker.length, 'the Dot turns offered tools').toBeGreaterThan(0);
+    for (const call of worker) {
+      const names: string[] = (call.body.tools ?? []).map(
+        (tool: any) => tool.function?.name ?? tool.name ?? '',
+      );
+      expect(
+        names.filter((n) => /^copilotkit_|skill/i.test(n)),
+        `call #${call.n}`,
+      ).toEqual([]);
+      const instructions = (call.body.messages ?? [])
+        .filter((m: any) => m.role === 'system' || m.role === 'developer')
+        .map(textOf)
+        .join('\n');
+      expect(instructions).not.toMatch(
+        /skill catalog|available skills|copilotkit_load_skill/i,
+      );
+    }
   }, 400_000);
 });

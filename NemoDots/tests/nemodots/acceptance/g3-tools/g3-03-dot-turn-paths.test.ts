@@ -35,7 +35,8 @@ const lazy = lazyWorld({ nemodots: true }, async (world) => {
   world.agentConfig = BASE_CONFIG();
   await seedControlledState(world);
 });
-const fingerprint = () => controlledStateFingerprint(w.db!.admin, w.redisPrefix);
+const fingerprint = () =>
+  controlledStateFingerprint(w.db!.admin, w.redisPrefix);
 
 /** Context snapshots (the contracted ledger.context_snapshots table) whose injected record names `needle`. */
 async function snapshotsNaming(needle: string): Promise<number> {
@@ -47,7 +48,8 @@ async function snapshotsNaming(needle: string): Promise<number> {
   return rows[0].n;
 }
 
-const UNKNOWN_TOOL = /unknown|not found|no such|not (available|allowed|registered|permitted)|invalid|refus|denied|disabled/i;
+const UNKNOWN_TOOL =
+  /unknown|not found|no such|not (available|allowed|registered|permitted)|invalid|refus|denied|disabled/i;
 let w: World;
 const BASE_CONFIG = () => ({
   intelligenceKey: 'acc3-fixture',
@@ -705,9 +707,10 @@ describe('[TP3.3][TP3.4] disabled and unknown capabilities fail closed; no shell
     ).toEqual([]);
     expect(pagesIn(w.spaceA)).toBe(before);
     const stateAfter = await fingerprint();
-    expect(stateAfter.state, 'config, intents, tasks, findings, outbox, Redis').toBe(
-      stateBefore.state,
-    );
+    expect(
+      stateAfter.state,
+      'config, intents, tasks, findings, outbox, Redis',
+    ).toBe(stateBefore.state);
     expect(stateAfter.receipts, 'no receipt for an unknown tool').toBe(
       stateBefore.receipts,
     );
