@@ -5,8 +5,11 @@
 // Rules (frozen with the acceptance oracle):
 //   R1 the closure of a receipt is every node reachable from it over
 //      `evidence` and `inheritance` edges; `scheduling` edges never propagate.
-//   R2 a task is affected iff one of its attempts is affected (or the task is
-//      itself a reached node).
+//   R2 a task is affected iff one of its LIVE attempts is affected (or the task
+//      is itself a reached node). An attempt that already ended without being
+//      the task's result (invalidated, failed, aborted, expired) is dead: a
+//      repaired task whose old attempt read the changed receipt is not
+//      invalidated again while its live attempt does not depend on it.
 //   R3 the preserved tasks of a mission are its tasks minus its affected tasks.
 //   R5 only missions with at least one affected node get a per-mission entry.
 //   R6 the closure is conservative: a node resting on two receipts is affected
@@ -44,7 +47,20 @@ export interface NodeMeta {
   /** null for receipts (shared across missions). */
   missionId: string | null;
   taskId: string | null;
+  /**
+   * Attempt nodes only: false when the coordinator knows the attempt has ended
+   * without being the task's result (see R2). Unknown (undefined) counts as live.
+   */
+  attemptLive?: boolean;
 }
+
+/** Attempt statuses whose reads no longer describe their task (R2). */
+export const DEAD_ATTEMPT_STATUSES = Object.freeze([
+  'invalidated',
+  'failed',
+  'aborted',
+  'expired',
+] as const);
 
 export interface ReachedNode {
   kind: GraphNodeKind;
@@ -150,7 +166,8 @@ function addNode(buckets: AffectedBuckets, node: NodeMeta) {
       break;
     case 'attempt':
       buckets.attemptIds.add(node.id);
-      if (node.taskId) buckets.taskIds.add(node.taskId); // R2
+      if (node.taskId && node.attemptLive !== false)
+        buckets.taskIds.add(node.taskId); // R2
       break;
     case 'task_output':
       buckets.outputIds.add(node.id);

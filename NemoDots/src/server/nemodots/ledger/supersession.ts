@@ -618,13 +618,3 @@ async function currentGraphVersion(client: PgClient): Promise<number> {
   );
   return Number(rows[0]?.version ?? 0);
 }
-
-export function unionAffected(sets: readonly Affected[]): Affected {
-  const merged: Record<keyof Affected, string[]> = { ...emptyAffected() };
-  for (const key of Object.keys(merged) as (keyof Affected)[]) {
-    const ids = new Set<string>();
-    for (const set of sets) for (const id of set[key]) ids.add(id);
-    merged[key] = [...ids].sort();
-  }
-  return merged as unknown as Affected;
-}
