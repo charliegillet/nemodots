@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- OpenAI wire payloads are untyped JSON */
 // TEST_PROMPT gate 4 case 7: malformed tool JSON, refusal, timeout, rate
 // limit and exhausted budget must end in explicit failure or blocking states,
 // never a fabricated success, a stuck running attempt or an unbounded retry
@@ -8,6 +9,11 @@ import { ofKind } from './analysis.js';
 import { waitForMission } from './api.js';
 import { G4 } from './config.js';
 import { finish, launchMission, lazySystem } from './flow.js';
+import {
+  SPEC_BACKOFF_BASE_MS,
+  SPEC_MAX_ITERATIONS,
+  SPEC_MAX_RETRIES,
+} from './spec.js';
 import type {
   ProviderCall,
   ProviderReply,
@@ -82,6 +88,35 @@ async function runUntilSettled(
 }
 
 describe('G4.7 provider and model failure states (scripted)', () => {
+  it('G4.7-control a fault-free run reaches published outputs, so the failure cases below are caused by their injected fault', async () => {
+    state.script = null; // the well-behaved script
+    const { sys, mission, tail } = await runUntilSettled(240_000);
+    try {
+      const snapshot = await waitForMission(
+        sys.api,
+        mission.id,
+        (s) =>
+          s.tasks.length === 3 &&
+          s.tasks.every((t) => t.status === 'succeeded'),
+        240_000,
+        'every task of the fault-free mission succeeds',
+      );
+      expect(snapshot.mission.status).not.toBe('failed');
+      expect(snapshot.mission.status).not.toBe('blocked_provider');
+      expect(
+        snapshot.outputs.filter((o) => o.usable).length,
+        'a usable output per task',
+      ).toBeGreaterThanOrEqual(3);
+      expect(snapshot.findings.length).toBeGreaterThanOrEqual(3);
+      expect(
+        ofKind(tail.events, 'model_call.recorded').length,
+        'model calls are recorded',
+      ).toBeGreaterThanOrEqual(4);
+    } finally {
+      await finish(sys.api, mission.id, tail);
+    }
+  }, 360_000);
+
   it('G4.7a malformed tool JSON is rejected, recorded, and the loop recovers or fails explicitly', async () => {
     state.script = compose(
       planReply(TWO_BRANCH_PLAN),
@@ -221,11 +256,11 @@ describe('G4.7 provider and model failure states (scripted)', () => {
       expect(final.tasks, 'no tasks are made up from a refusal').toHaveLength(
         0,
       );
+      const reason = `${final.mission.failureReason ?? ''} ${ofKind(tail.events, 'mission.status').at(-1)?.payload.reason ?? ''}`;
       expect(
-        final.mission.failureReason ??
-          ofKind(tail.events, 'mission.status').at(-1)?.payload.reason,
-        'explicit reason',
-      ).toBeTruthy();
+        reason,
+        'the reason names the refusal / content filter, not a generic failure',
+      ).toMatch(/refus|content[_ -]?filter/i);
       expect(snapshot.mission.status).not.toBe('succeeded');
     } finally {
       await finish(sys.api, mission.id, tail);
@@ -285,13 +320,21 @@ describe('G4.7 provider and model failure states (scripted)', () => {
         .filter((c) => c.kind === 'structured');
       expect(
         planner.length,
-        'at most 1 + 4 retries per logical call, one correction at most',
-      ).toBeLessThanOrEqual(10);
+        'the adapter retried a timed-out call (at least 2 requests)',
+      ).toBeGreaterThanOrEqual(2);
       expect(
-        final.mission.failureReason ??
-          ofKind(tail.events, 'mission.status').at(-1)?.payload.reason,
-        'explicit reason',
-      ).toBeTruthy();
+        planner.length,
+        'and stopped after 1 + 4 retries of the one logical planner call',
+      ).toBeLessThanOrEqual(SPEC_MAX_RETRIES + 1);
+      const reason = `${final.mission.failureReason ?? ''} ${ofKind(tail.events, 'mission.status').at(-1)?.payload.reason ?? ''}`;
+      expect(reason, 'the recorded reason names the timeout').toMatch(
+        /time[ _-]?out|timed out/i,
+      );
+      expect(
+        final.mission.status === 'blocked_provider' ||
+          /provider_unreachable|unreachable/i.test(reason),
+        'blocked_provider, or failed with provider_unreachable',
+      ).toBe(true);
       expect(final.tasks.filter((t) => t.status === 'succeeded')).toHaveLength(
         0,
       );
@@ -318,13 +361,24 @@ describe('G4.7 provider and model failure states (scripted)', () => {
       const attempts = provider.calls
         .slice(startIndex)
         .filter((c) => c.kind === 'structured');
-      expect(attempts.length, 'retry bound').toBeLessThanOrEqual(10);
-      expect(final.mission.status).not.toBe('succeeded');
       expect(
-        final.mission.failureReason ??
-          ofKind(tail.events, 'mission.status').at(-1)?.payload.reason,
-        'explicit reason',
-      ).toBeTruthy();
+        attempts.length,
+        'the adapter retried at least once',
+      ).toBeGreaterThanOrEqual(2);
+      expect(
+        attempts.length,
+        'and no more than 1 + 4 times for the one logical planner call',
+      ).toBeLessThanOrEqual(SPEC_MAX_RETRIES + 1);
+      for (let i = 1; i < attempts.length; i += 1)
+        expect(
+          attempts[i].arrivedAt - attempts[i - 1].arrivedAt,
+          `backoff before retry ${i} honours the 1 s retry-after / base delay`,
+        ).toBeGreaterThanOrEqual(SPEC_BACKOFF_BASE_MS - 100);
+      expect(final.mission.status).not.toBe('succeeded');
+      const reason = `${final.mission.failureReason ?? ''} ${ofKind(tail.events, 'mission.status').at(-1)?.payload.reason ?? ''}`;
+      expect(reason, 'the recorded reason names rate limiting').toMatch(
+        /rate[ _-]?limit|429|too many requests/i,
+      );
     } finally {
       await finish(sys.api, mission.id, tail);
     }
@@ -417,16 +471,37 @@ describe('G4.7 provider and model failure states (scripted)', () => {
         total,
         'bounded by mission.budgets.maxInferenceCalls plus in-flight',
       ).toBeLessThanOrEqual(mission.budgets.maxInferenceCalls + 4);
-      const snapshot = await sys.api.snapshot(mission.id);
-      for (const attempt of snapshot.attempts) {
-        const calls = tail
-          .of('model_call.recorded')
-          .filter((e) => e.payload.attemptId === attempt.id).length;
+      const workerRequests = provider.calls
+        .slice(startIndex)
+        .filter((c) => c.kind === 'worker');
+      expect(workerRequests.length).toBeGreaterThan(0);
+      // Provider-side, independent of production telemetry: request k of an
+      // attempt carries k-1 tool results, so the deepest request bounds the
+      // iterations of the longest attempt.
+      const deepest = Math.max(
+        ...workerRequests.map(
+          (c) =>
+            (c.body.messages ?? []).filter((m: any) => m.role === 'tool')
+              .length,
+        ),
+      );
+      expect(
+        deepest + 1,
+        `iterations in the longest attempt, seen at the provider (spec: at most ${SPEC_MAX_ITERATIONS})`,
+      ).toBeLessThanOrEqual(SPEC_MAX_ITERATIONS);
+      const recorded = ofKind(tail.events, 'model_call.recorded');
+      expect(
+        recorded.length,
+        'the system keeps recording model calls while cutting the loop',
+      ).toBeGreaterThanOrEqual(1);
+      const providerIds = new Set(
+        provider.calls.map((c) => c.requestId).filter(Boolean),
+      );
+      for (const e of recorded)
         expect(
-          calls,
-          `model calls in attempt n=${attempt.n}`,
-        ).toBeLessThanOrEqual(12 + 1);
-      }
+          providerIds.has(e.payload.modelCallId as string),
+          `recorded model call ${e.payload.modelCallId} was really sent to the provider (X-Request-Id)`,
+        ).toBe(true);
     } finally {
       await finish(sys.api, mission.id, tail);
     }

@@ -762,3 +762,72 @@ it('cancel aborts running attempts first (status before signal) and records them
     });
   });
 });
+
+it('a publication in flight holds FOR SHARE on the mission row (FOR UPDATE for plan/delegate), proven with NOWAIT probes', async () => {
+  await withHarness(async (h) => {
+    const planned = await plannedMission(h, [
+      { role: 'investigator' },
+      { role: 'investigator' },
+    ]);
+    const probe = async (mode: 'SHARE' | 'UPDATE') => {
+      const client = await h.admin.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(
+          `SELECT 1 FROM coordinator.missions WHERE id = $1 FOR ${mode} NOWAIT`,
+          [planned.missionId],
+        );
+        return 'acquired';
+      } catch (error) {
+        return (error as { code?: string }).code; // 55P03 lock_not_available
+      } finally {
+        await client.query('ROLLBACK');
+        client.release();
+      }
+    };
+    expect(await probe('UPDATE')).toBe('acquired'); // nothing in flight
+
+    const claimed = await claimStart(h, { taskId: planned.taskIds[0] });
+    const parked = latch();
+    const release = latch();
+    h.validator.hold = async () => {
+      parked.open();
+      await release.promise;
+    };
+    const vector = vectorOf([
+      { sourceKey: 'checkout.health', sourceRevision: 1 },
+    ]);
+    const output = h.coordinator.publishOutput(claimed.context, {
+      kind: 'handoff',
+      content: {},
+      dependencyVector: vector,
+    });
+    await parked.promise;
+    expect(await probe('UPDATE')).toBe('55P03'); // a share lock blocks cancel/pause
+    expect(await probe('SHARE')).toBe('acquired'); // publications do not block each other
+    release.open();
+    await output;
+    expect(await probe('UPDATE')).toBe('acquired'); // released at commit
+
+    // delegate takes the exclusive lock: it checks task-count caps under it.
+    const second = await claimStart(h, { taskId: planned.taskIds[1] });
+    const parkedAgain = latch();
+    const releaseAgain = latch();
+    h.validator.hold = async () => {
+      parkedAgain.open();
+      await releaseAgain.promise;
+    };
+    const delegated = h.coordinator.delegate(second.context, {
+      title: 'check',
+      role: 'verifier',
+      question: 'q',
+      dependsOn: [],
+      justification: 'j',
+      dependencyVector: vector,
+    });
+    await parkedAgain.promise;
+    expect(await probe('SHARE')).toBe('55P03');
+    releaseAgain.open();
+    await delegated;
+  });
+});

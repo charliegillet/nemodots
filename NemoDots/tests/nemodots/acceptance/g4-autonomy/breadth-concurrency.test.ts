@@ -9,7 +9,7 @@
 // response. Exactly 4 become tasks and exactly 2 are refused with a breadth
 // reason. 8 workers and 8 simultaneously runnable tasks would put 8 requests in
 // flight; the provider-side peak must stay at or below 4.
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import { treeShape } from './analysis.js';
 import { waitForMission } from './api.js';
 import { G4 } from './config.js';
@@ -115,7 +115,14 @@ async function run() {
       240_000,
       'all tasks settled',
     );
-    return { sys, provider, mission, tail, snapshot, peak: provider.peakInFlight };
+    return {
+      sys,
+      provider,
+      mission,
+      tail,
+      snapshot,
+      peak: provider.peakInFlight,
+    };
   } catch (error) {
     await finish(sys.api, mission.id, tail);
     throw error;
@@ -126,20 +133,27 @@ describe('G4.2 breadth and inference concurrency (scripted, total-task cap canno
   it('G4.2d six attempted children yield exactly four tasks and two breadth refusals', async () => {
     const { mission, tail, snapshot } = await scenario();
     expect(mission.budgets.maxBreadth, 'spec breadth').toBe(SPEC_MAX_BREADTH);
-    expect(mission.budgets.maxTasks, 'the total cap is out of the way').toBe(24);
+    expect(mission.budgets.maxTasks, 'the total cap is out of the way').toBe(
+      24,
+    );
     const fan = snapshot.tasks.find((t) => t.title === 'BREADTH-fan')!;
     const children = snapshot.tasks.filter((t) => t.parentId === fan.id);
-    expect(children, 'exactly the spec breadth of children were accepted').toHaveLength(
-      SPEC_MAX_BREADTH,
+    expect(
+      children,
+      'exactly the spec breadth of children were accepted',
+    ).toHaveLength(SPEC_MAX_BREADTH);
+    expect(treeShape(snapshot).total, 'far below the total cap').toBe(
+      2 + SPEC_MAX_BREADTH,
     );
-    expect(treeShape(snapshot).total, 'far below the total cap').toBe(2 + SPEC_MAX_BREADTH);
     const fanAttempts = new Set(
       snapshot.attempts.filter((a) => a.taskId === fan.id).map((a) => a.id),
     );
     const delegations = tail
       .of('tool_call.recorded')
       .filter(
-        (e) => e.payload.name === 'delegate_task' && fanAttempts.has(e.payload.attemptId),
+        (e) =>
+          e.payload.name === 'delegate_task' &&
+          fanAttempts.has(e.payload.attemptId),
       );
     expect(delegations, 'six attempts recorded').toHaveLength(6);
     expect(delegations.filter((e) => e.payload.ok)).toHaveLength(4);
@@ -163,13 +177,14 @@ describe('G4.2 breadth and inference concurrency (scripted, total-task cap canno
       notMet(
         `peak concurrency was only ${peak}: 8 workers and ${snapshot.tasks.length} tasks never overlapped, so the cap was not exercised`,
       );
-    expect(peak, 'peak in-flight chat completions at the provider').toBeLessThanOrEqual(
-      SPEC_MAX_IN_FLIGHT,
-    );
+    expect(
+      peak,
+      'peak in-flight chat completions at the provider',
+    ).toBeLessThanOrEqual(SPEC_MAX_IN_FLIGHT);
   }, 360_000);
 
-  it('G4.2z cleanup', async () => {
+  afterAll(async () => {
     const s = memo ? await memo.catch(() => null) : null;
     if (s) await finish(s.sys.api, s.mission.id, s.tail);
-  });
+  }, 60_000);
 });

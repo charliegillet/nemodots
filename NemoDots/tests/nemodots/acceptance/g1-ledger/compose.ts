@@ -67,7 +67,9 @@ export function composeDeps(w: World): PublishDeps {
       replanCap: 3,
     },
     events: createEventSink(),
-    supportValidator: createSupportValidator(),
+    // Harness self-check ONLY (ACC1_SELFCHECK_BYPASS_SUPPORT=1): proves the tests turn red when the final
+    // version check is bypassed in the publication path while ledger/support.ts itself is untouched.
+    supportValidator: process.env.ACC1_SELFCHECK_BYPASS_SUPPORT === '1' ? { assertCurrent: async () => [] } : createSupportValidator(),
     ledger: {
       async recordModelCall(client, input) {
         await ledgerRecordModelCall(client, {

@@ -11,7 +11,7 @@
 // children accepted (total cap), the extra-capability and planner delegations
 // refused (schema/role), so 7 tasks exist and at least 6 delegations fail.
 
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import { treeShape } from './analysis.js';
 import { waitForMission } from './api.js';
 import { G4 } from './config.js';
@@ -328,9 +328,9 @@ describe('G4.2 server-side caps and permissions (scripted over-eager model)', ()
     ).toHaveLength(0);
   }, 360_000);
 
-  it('G4.2z cleanup', async () => {
+  afterAll(async () => {
     await finishLater();
-  });
+  }, 60_000);
 });
 
 async function finishLater() {

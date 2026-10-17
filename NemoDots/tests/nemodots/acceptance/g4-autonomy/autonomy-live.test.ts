@@ -10,13 +10,15 @@
 // Honest limits: the model is nondeterministic. A structural precondition the
 // run did not produce (for example no preserved finished branch) is reported
 // as NOT_MET and fails the case rather than being forced.
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   affectedTaskIds,
-  findLeaks,
-  nonSystemTexts,
   ofKind,
   preservedTaskIds,
+  rolesMentioning,
+  scanRequestsForLeaks,
   supersessions,
   treeShape,
 } from './analysis.js';
@@ -28,9 +30,46 @@ import {
   NEUTRAL_GOAL,
   requireLive,
 } from './config.js';
-import { alternateValue, finish, launchMission, lazySystem } from './flow.js';
-import { committedActionRows, readConfig, type System } from './system.js';
-import { ROLE_CAPABILITIES } from '../../../../src/server/nemodots/contracts/index.js';
+import {
+  alternateValue,
+  finish,
+  launchMission,
+  lazySystem,
+  notMet,
+} from './flow.js';
+import { completionOf } from './provider.js';
+import { SPEC_MAX_BREADTH, SPEC_ROLE_CAPABILITIES } from './spec.js';
+import {
+  committedActionRows,
+  injectConfig,
+  readConfig,
+  type System,
+} from './system.js';
+
+interface PlanLike {
+  tasks: { title: string; role: string }[];
+}
+function parsePlan(content: string): PlanLike | null {
+  const candidates = [content.trim()];
+  const open = content.indexOf('{');
+  const close = content.lastIndexOf('}');
+  if (open >= 0 && close > open)
+    candidates.push(content.slice(open, close + 1));
+  for (const text of candidates) {
+    try {
+      const parsed = JSON.parse(text) as { tasks?: unknown };
+      if (Array.isArray(parsed.tasks))
+        return {
+          tasks: (parsed.tasks as any[])
+            .filter((t) => typeof t?.title === 'string')
+            .map((t) => ({ title: String(t.title), role: String(t.role) })),
+        };
+    } catch {
+      /* try the next candidate */
+    }
+  }
+  return null;
+}
 
 const SETTLED = [
   'awaiting_acceptance',
@@ -141,12 +180,66 @@ describe('LIVE G4.1 goal-only mission on Crusoe Nemotron', () => {
       tools.some((t) => t.payload.receiptId !== null),
       'at least one tool call produced an evidence receipt',
     ).toBe(true);
-    const proxied = a.provider.calls.filter((c) => c.status === 200).length;
-    const recorded = ofKind(a.events, 'model_call.recorded').length;
+    // ---- every recorded call is a request the proxy saw, and vice versa (X-Request-Id) ----
+    const recordedIds = new Set(
+      ofKind(a.events, 'model_call.recorded').map(
+        (e) => e.payload.modelCallId as string,
+      ),
+    );
+    const proxySeen = new Set(
+      a.provider.calls.map((c) => c.requestId).filter(Boolean) as string[],
+    );
+    for (const id of recordedIds)
+      expect(
+        proxySeen.has(id),
+        `model_call.recorded ${id} was seen by the proxy under that X-Request-Id`,
+      ).toBe(true);
+    const completed = new Set(
+      a.provider.calls
+        .filter((c) => c.status === 200 && c.requestId)
+        .map((c) => c.requestId as string),
+    );
+    const unrecorded = [...completed].filter((id) => !recordedIds.has(id));
     expect(
-      recorded,
-      'every recorded model call is backed by a request the proxy saw',
-    ).toBeLessThanOrEqual(proxied);
+      unrecorded.length,
+      'every completed proxied call is recorded, except orphaned (lease-lost) calls the telemetry counts',
+    ).toBeLessThanOrEqual(a.snapshot.telemetry.orphanedCalls);
+
+    // ---- the plan is the model's: every root appears in a proxied planner response ----
+    const plans = a.provider.calls
+      .filter((c) => c.kind === 'structured' && c.status === 200)
+      .map((c) => parsePlan(completionOf(c).content))
+      .filter((p): p is PlanLike => p !== null);
+    expect(
+      plans.length,
+      'the proxy saw a parseable planner response',
+    ).toBeGreaterThanOrEqual(1);
+    for (const root of roots)
+      expect(
+        plans.some((plan) =>
+          plan.tasks.some(
+            (t) => t.title.trim() === root.title.trim() && t.role === root.role,
+          ),
+        ),
+        `root "${root.title}" (${root.role}) appears in a proxied planner response`,
+      ).toBe(true);
+
+    // ---- every child is a delegate_task tool call the model emitted ----
+    const delegations = a.provider.calls
+      .filter((c) => c.kind === 'worker' && c.status === 200)
+      .flatMap((c) => completionOf(c).toolCalls)
+      .filter((t) => t.name === 'delegate_task')
+      .map((t) => t.args as { title?: string; role?: string });
+    for (const child of a.snapshot.tasks.filter((t) => t.parentId !== null))
+      expect(
+        delegations.some(
+          (d) =>
+            typeof d.title === 'string' &&
+            d.title.trim() === child.title.trim() &&
+            d.role === child.role,
+        ),
+        `child "${child.title}" matches a delegate_task call in a proxied worker response`,
+      ).toBe(true);
     expect(
       a.provider.calls.every((c) => c.body.model === mergedEnv().OPENAI_MODEL),
       'no vendor or model switch',
@@ -192,13 +285,14 @@ describe('LIVE G4.1 goal-only mission on Crusoe Nemotron', () => {
     const a = await (runA ??= executeA());
     const shape = treeShape(a.snapshot);
     expect(shape.maxDepth).toBeLessThanOrEqual(a.mission.budgets.maxDepth);
-    expect(shape.maxBreadth).toBeLessThanOrEqual(a.mission.budgets.maxBreadth);
+    expect(a.mission.budgets.maxBreadth, 'spec breadth').toBe(SPEC_MAX_BREADTH);
+    expect(shape.maxBreadth).toBeLessThanOrEqual(SPEC_MAX_BREADTH);
     expect(shape.total).toBeLessThanOrEqual(a.mission.budgets.maxTasks);
     const byId = new Map(a.snapshot.tasks.map((t) => [t.id, t]));
     for (const t of a.snapshot.tasks) {
       expect(
         (t.capabilities as string[]).every((c) =>
-          (ROLE_CAPABILITIES[t.role] as readonly string[]).includes(c),
+          (SPEC_ROLE_CAPABILITIES[t.role] as readonly string[]).includes(c),
         ),
       ).toBe(true);
       if (t.parentId)
@@ -251,7 +345,8 @@ async function executeB() {
   const live = await readConfig(sys, read.key);
   const next = alternateValue(read.key, live.value);
   const editedAt = Date.now();
-  await sys.api.editSource(read.key, next, live.version);
+  // out of band: the injector role, not an app route, so only the watcher can find it
+  const change = await injectConfig(sys, read.key, next);
   let discoveredMs: number | null = null;
   try {
     await tail.until(
@@ -259,7 +354,8 @@ async function executeB() {
         ofKind(e, 'receipt.registered').some(
           (x) =>
             x.id > idBefore &&
-            x.payload.sourceKey === `checkout.config/${read!.key}`,
+            x.payload.sourceKey === `checkout.config/${read!.key}` &&
+            x.payload.sourceRevision >= change.version,
         ),
       30_000,
       'watcher registers the change',
@@ -306,25 +402,43 @@ async function executeB() {
     callsAfter,
     settledTimedOut,
     next,
+    change,
   };
 }
 
 describe('LIVE G4.3 / G4.4 changed evidence after a live branch read', () => {
-  it('G4.3-live the watcher discovers the change and the team receives no diagnosis', async () => {
+  it('G4.3-live the watcher discovers an out-of-band change and the team receives no diagnosis', async () => {
     requireLive();
     const b = await (runB ??= executeB());
-    expect(b.discoveredMs, 'receipt registered by the watcher').not.toBeNull();
+    expect(
+      b.discoveredMs,
+      'receipt registered after the injector write',
+    ).not.toBeNull();
     expect(b.discoveredMs!).toBeLessThan(15_000);
     const pairs = supersessions(b.snapshot).filter(
       (p) => p.old.id === b.read.id,
     );
     expect(pairs, 'the read receipt was superseded').toHaveLength(1);
     expect(pairs[0].next, 'successor receipt exists').not.toBeNull();
-    const texts = b.callsAfter.flatMap((c) => nonSystemTexts(c.body));
-    expect(findLeaks(texts), 'model-visible text after the change').toEqual([]);
+    const successor = b.snapshot.receipts.find(
+      (r) => r.id === pairs[0].next!.id,
+    )!;
+    if (successor.provenance.kind !== 'watcher')
+      notMet(
+        `the successor receipt was registered with provenance ${successor.provenance.kind}: a worker read the source before the watcher polled, so watcher discovery was not demonstrated in this run`,
+      );
+    expect(successor.provenance.kind).toBe('watcher');
+    const registered = ofKind(b.events, 'receipt.registered').find(
+      (e) => e.payload.receiptId === successor.id,
+    );
+    expect(registered?.payload.provenanceKind).toBe('watcher');
+    expect(
+      scanRequestsForLeaks(b.callsAfter.map((c) => c.body)),
+      'every role of every request after the change',
+    ).toEqual([]);
   }, 1_200_000);
 
-  it('G4.4-live stale intents are blocked, the repair uses fresh context, and finished independent branches are not repeated', async () => {
+  it('G4.4-live stale intents are blocked, repairs use fresh context, and finished independent branches are not repeated', async () => {
     requireLive();
     const b = await (runB ??= executeB());
     const invalidation = ofKind(b.events, 'invalidation.recorded').find(
@@ -344,31 +458,33 @@ describe('LIVE G4.3 / G4.4 changed evidence after a live branch read', () => {
         `derived affected task ${id} is in the recorded closure`,
       ).toBe(true);
 
-    // stale intents: none may commit after the change with the old receipt in its vector
+    // ---- stale intents: the case needs at least one, else it is NOT_MET ----
     const staleIntents = b.snapshot.actions.filter((a) =>
       a.dependencyVector.some((d) => d.receiptId === b.read.id),
     );
-    const committedAfter = ofKind(b.events, 'action.committed').filter(
-      (e) =>
-        e.id > b.idBefore &&
-        staleIntents.some((a) => a.id === e.payload.actionId),
-    );
+    if (staleIntents.length === 0)
+      notMet(
+        'no intent depended on the changed receipt in this live run, so a stale-intent block cannot be shown',
+      );
     const blocked = staleIntents.filter((a) => a.status === 'blocked');
     const committedBefore = ofKind(b.events, 'action.committed').filter(
       (e) =>
-        e.id <= b.idBefore &&
+        e.id < invalidation!.id &&
+        staleIntents.some((a) => a.id === e.payload.actionId),
+    );
+    const committedAfter = ofKind(b.events, 'action.committed').filter(
+      (e) =>
+        e.id > invalidation!.id &&
         staleIntents.some((a) => a.id === e.payload.actionId),
     );
     expect(
-      committedAfter.filter((e) => e.id > invalidation!.id),
+      committedAfter,
       'no stale commit after the invalidation',
     ).toHaveLength(0);
-    // honest disjunction (ARCHITECTURE 11): blocked(stale) at admission/commit, or committed first and then re-verified
-    if (staleIntents.length > 0)
-      expect(
-        blocked.length + committedBefore.length + committedAfter.length,
-        'every stale-evidence intent has a recorded fate',
-      ).toBe(staleIntents.length);
+    expect(
+      blocked.length + committedBefore.length,
+      'every stale-evidence intent has a recorded fate (blocked, or committed before the change)',
+    ).toBe(staleIntents.length);
     for (const a of blocked)
       expect([
         'stale_version',
@@ -376,11 +492,35 @@ describe('LIVE G4.3 / G4.4 changed evidence after a live branch read', () => {
         'target_version_mismatch',
         'citation_out_of_scope',
       ]).toContain(a.blockReason);
-
-    // fresh context for repairs
-    const repairs = b.snapshot.attempts.filter(
-      (a) => a.kind === 'repair' && derivedAffected.has(a.taskId),
+    // honest disjunction (ARCHITECTURE 11): record which branch happened
+    const branch =
+      blocked.length > 0
+        ? 'blocked_stale_before_commit'
+        : 'committed_then_invalidated_and_repaired';
+    mkdirSync(G4.scratch, { recursive: true });
+    writeFileSync(
+      resolve(G4.scratch, 'g44-live-branch.json'),
+      JSON.stringify(
+        {
+          branch,
+          staleIntents: staleIntents.length,
+          blocked: blocked.length,
+          committedBefore: committedBefore.length,
+        },
+        null,
+        2,
+      ),
     );
+
+    // ---- repairs: the case needs at least one, else it is NOT_MET ----
+    const repairs = b.snapshot.attempts.filter(
+      (a) =>
+        ['repair', 'replan'].includes(a.kind) && derivedAffected.has(a.taskId),
+    );
+    if (repairs.length === 0)
+      notMet(
+        'no repair or replan attempt exists for an affected task in this live run, so fresh-context repair cannot be shown',
+      );
     for (const repair of repairs) {
       expect(
         repair.readSetReceiptIds as string[],
@@ -389,19 +529,34 @@ describe('LIVE G4.3 / G4.4 changed evidence after a live branch read', () => {
       expect(repair.repairOf?.invalidationEventId).toBe(
         invalidation!.payload.invalidationEventId,
       );
-    }
-    for (const call of b.callsAfter.filter((c) => c.kind === 'worker')) {
-      const toolText = (call.body.messages ?? [])
-        .filter((m: any) => m.role === 'tool')
-        .map((m: any) => String(m.content))
-        .join('\n');
       expect(
-        toolText.includes(b.read.id),
-        'no replay of the old receipt as a tool result',
-      ).toBe(false);
+        repair.inheritedDependencyVector.map((d) => d.receiptId),
+        'repair does not inherit the superseded receipt',
+      ).not.toContain(b.read.id);
     }
+    // the old receipt id and digest appear in NO message of ANY role of a repair's requests
+    const oldReceipt = b.snapshot.receipts.find((r) => r.id === b.read.id)!;
+    const needles = [b.read.id, oldReceipt.contentDigest];
+    const repairAttemptIds = new Set(repairs.map((r) => r.id as string));
+    const repairCallIds = new Set(
+      ofKind(b.events, 'model_call.recorded')
+        .filter((e) => repairAttemptIds.has(e.payload.attemptId as string))
+        .map((e) => e.payload.modelCallId as string),
+    );
+    const repairRequests = b.provider.calls.filter(
+      (c) => c.requestId && repairCallIds.has(c.requestId),
+    );
+    expect(
+      repairRequests.length,
+      'the repair attempts made proxied model calls',
+    ).toBeGreaterThanOrEqual(1);
+    for (const call of repairRequests)
+      expect(
+        rolesMentioning(call.body, needles),
+        `roles of repair request #${call.n} that replay the superseded receipt or digest`,
+      ).toEqual([]);
 
-    // independent branch: tasks finished before the invalidation and outside the closure
+    // ---- independent branch: finished before the invalidation, outside the closure ----
     const preserved = preservedTaskIds(b.snapshot, b.read.id);
     const finishedBefore = new Set(
       ofKind(b.events, 'task.status')
@@ -409,10 +564,10 @@ describe('LIVE G4.3 / G4.4 changed evidence after a live branch read', () => {
         .map((e) => e.payload.taskId as string),
     );
     const preservedDone = [...preserved].filter((id) => finishedBefore.has(id));
-    expect(
-      preservedDone.length,
-      'NOT_MET: no independent branch had finished before the change, so non-repetition cannot be shown',
-    ).toBeGreaterThanOrEqual(1);
+    if (preservedDone.length === 0)
+      notMet(
+        'no independent branch had finished before the change, so non-repetition cannot be shown',
+      );
     for (const id of preservedDone) {
       const newCalls = ofKind(b.events, 'model_call.recorded').filter(
         (e) => e.id > invalidation!.id && e.payload.taskId === id,

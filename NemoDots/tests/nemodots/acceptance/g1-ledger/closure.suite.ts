@@ -19,12 +19,16 @@ import {
   insertValues,
   withAccDatabase,
 } from './harness.js';
+import { barrier, withTimeout } from '../../helpers/barrier.js';
 import {
   T,
   applyAuthority,
+  deliverInvalidations,
   edgeApi,
+  fingerprintModelCalls,
   mapIds,
   observeClosure,
+  recordedEventsByMission,
   registerChange,
   seedGraph,
 } from './graph.js';
@@ -38,10 +42,28 @@ const tag = (covers: string[]) =>
 const sortedEq = (got: string[], want: string[]) =>
   JSON.stringify([...got].sort()) === JSON.stringify([...want].sort());
 
-async function runClosure(c: ClosureCase) {
+interface ClosureRun {
+  /** Findings about the ledger closure itself (rows, event JSON, per-mission subsets, intents). */
+  ledger: string[];
+  /** Oracle R5 on coordinator.events after the real recovery path received the ledger's events. */
+  r5: string[];
+}
+const runs = new Map<string, Promise<ClosureRun>>();
+/** One database run per case, shared by the ledger test and the R5 test of that case. */
+const runClosure = (c: ClosureCase): Promise<ClosureRun> => {
+  let run = runs.get(c.id);
+  if (!run) {
+    run = runClosureOnce(c);
+    runs.set(c.id, run);
+  }
+  return run;
+};
+
+async function runClosureOnce(c: ClosureCase): Promise<ClosureRun> {
   return withAccDatabase(async (db) => {
     const w = new World(db);
     const problems: string[] = [];
+    const r5: string[] = [];
     try {
       const seeded = await seedGraph(w, c.nodes, c.edges, {
         ensureExtraKey: c.changes.some((ch) => ch.via === 'collection_delete'),
@@ -49,12 +71,45 @@ async function runClosure(c: ClosureCase) {
       if (c.concurrent) {
         for (let i = 0; i < c.changes.length; i += 1)
           await applyAuthority(w, c, i);
+        // CL-5: "registered concurrently behind a barrier". Every registration parks after its preliminary read and
+        // before it locks its source row; none proceeds until all have arrived, so the closures overlap.
+        const n = c.changes.length;
+        const gate = barrier(n);
+        const log: string[] = [];
+        let hookCalls = 0;
+        const options = {
+          hooks: {
+            afterPreliminaryRead: async () => {
+              hookCalls += 1;
+              log.push('arrive');
+              await withTimeout(
+                gate.arrive(),
+                20_000,
+                `all ${n} registrations must reach the barrier`,
+              );
+            },
+          },
+        };
         const results = await Promise.all(
-          c.changes.map((_, i) => registerChange(w, c, i)),
+          c.changes.map((_, i) =>
+            registerChange(w, c, i, options).then((r) => (log.push('done'), r)),
+          ),
         );
         results.forEach((r, i) => {
           if (!r.ok) problems.push(`concurrent change ${i} failed: ${r.error}`);
         });
+        if (hookCalls !== n)
+          problems.push(
+            `the barrier hook ran ${hookCalls} time(s) for ${n} registrations: the simultaneous interleaving was NOT forced`,
+          );
+        if (gate.arrived !== n)
+          problems.push(
+            `only ${gate.arrived} of ${n} registrations reached the barrier`,
+          );
+        if (!log.slice(0, n).every((x) => x === 'arrive'))
+          problems.push(
+            `a registration finished before all had arrived at the barrier: ${log.join(',')}`,
+          );
       } else {
         for (let i = 0; i < c.changes.length; i += 1) {
           await applyAuthority(w, c, i);
@@ -64,6 +119,10 @@ async function runClosure(c: ClosureCase) {
       }
       const obs = await observeClosure(w, seeded);
       const e = c.expected;
+      // The ledger's closure must never rewrite model-call records (they carry no mark; their membership is in the event).
+      const mcAfter = await fingerprintModelCalls(w);
+      for (const [id, row] of seeded.modelCallFingerprint) if (mcAfter.get(id) !== row) problems.push(`model call record ${seeded.reverse.get(id) ?? id} was rewritten or removed by the closure`);
+      if (mcAfter.size !== seeded.modelCallFingerprint.size) problems.push(`model_call_records row count changed: ${seeded.modelCallFingerprint.size} -> ${mcAfter.size}`);
       const real = (ids: string[]) => mapIds(seeded, ids);
 
       if (obs.eventRows !== e.invalidationEvents)
@@ -122,6 +181,10 @@ async function runClosure(c: ClosureCase) {
             );
         }
 
+      // Every affected model call named by the event is a real ledger record of an attempt of the right mission.
+      for (const mc of obs.union.modelCallIds) {
+        if (!seeded.modelCallFingerprint.has(mc)) problems.push(`event names model call ${seeded.reverse.get(mc) ?? mc}, which has no ledger.model_call_records row`);
+      }
       const expectedMissions = new Set<string>();
       for (const pm of e.perMission) {
         const mid = seeded.missions.get(pm.missionId)!;
@@ -148,10 +211,11 @@ async function runClosure(c: ClosureCase) {
       }
       for (const [oracleMission, mid] of seeded.missions) {
         if (expectedMissions.has(mid)) continue;
+        // Oracle R5: a mission with no affected node receives no event at all (not even an empty subset).
         const leaked = obs.perMission.get(mid);
-        if (leaked && Object.values(leaked.affected).some((x) => x.length))
+        if (leaked)
           problems.push(
-            `unaffected mission ${oracleMission} received affected nodes in the event`,
+            `unaffected mission ${oracleMission} has a perMission entry in the invalidation event (R5: it must receive none)`,
           );
       }
       for (const r of e.receiptsStillCurrent ?? [])
@@ -164,6 +228,24 @@ async function runClosure(c: ClosureCase) {
           problems.push(
             `changed receipt ${ch.oldReceipt} should be superseded, is ${obs.receiptStatus.get(ch.oldReceipt)}`,
           );
+
+      // R5 on coordinator.events: deliver the ledger's events to the real recovery path and count invalidation.recorded per mission.
+      try {
+        await deliverInvalidations(w);
+        const recorded = await recordedEventsByMission(w);
+        const kinds = (await w.admin.query('SELECT kind, count(*)::int AS n FROM coordinator.events GROUP BY kind ORDER BY kind')).rows;
+        const present = `coordinator.events after delivery: ${kinds.map((k) => `${k.kind}=${k.n}`).join(', ') || 'none'}`;
+        if (recorded.size === 0 && expectedMissions.size > 0) r5.push(`R5: no invalidation.recorded event was written for any mission (${present})`);
+        for (const [oracleMission, mid] of seeded.missions) {
+          const got = recorded.get(mid) ?? 0;
+          const affected = expectedMissions.has(mid);
+          if (!affected && got !== 0) r5.push(`R5: unaffected mission ${oracleMission} received ${got} invalidation.recorded event(s)`);
+          if (affected && got < 1) r5.push(`R5: affected mission ${oracleMission} received no invalidation.recorded event`);
+          if (affected && c.changes.length === 1 && got !== 1) r5.push(`R5: affected mission ${oracleMission} received ${got} invalidation.recorded events for one changed receipt, expected 1`);
+        }
+      } catch (error) {
+        r5.push(`R5: delivering the invalidation events to coordinator recovery failed: ${(error as Error).message.split('\n')[0]}`);
+      }
 
       // G1.10 quantification: false invalidations (rows invalidated that the oracle preserves).
       const falseInvalidated = obs.tasksInvalidated.filter(
@@ -206,7 +288,7 @@ async function runClosure(c: ClosureCase) {
     } finally {
       await w.close();
     }
-    expect(problems, `${c.id} ${c.title}`).toEqual([]);
+    return { ledger: problems, r5 };
   });
 }
 
@@ -216,7 +298,17 @@ describe('gate 1 invalidation closures (frozen oracle CL-*)', () => {
       (c) => [`${tag(c.covers)} ${c.id} ${c.title}`, c] as const,
     ),
   )('%s', async (_name, c) => {
-    await runClosure(c);
+    expect((await runClosure(c)).ledger, `${c.id} ${c.title}`).toEqual([]);
+  });
+
+  // R5 is reported separately: it exercises the recovery path that must turn the ledger's event into one
+  // coordinator invalidation.recorded event per affected mission, which is not part of the ledger transaction.
+  it.each(
+    CLOSURE_CASES.map(
+      (c) => [`[G1.8] ${c.id} R5 coordinator events per affected mission`, c] as const,
+    ),
+  )('%s', async (_name, c) => {
+    expect((await runClosure(c)).r5, `${c.id} ${c.title}`).toEqual([]);
   });
 
   it('[G1.9] CL-3 is labelled conservative by the oracle: v1 invalidates the whole closure and has no representation of independent sufficient support', async () => {
@@ -239,93 +331,16 @@ describe('gate 1 invalidation closures (frozen oracle CL-*)', () => {
         await w.close();
       }
     });
-    await runClosure(cl3);
+    expect((await runClosure(cl3)).ledger).toEqual([]);
   });
 });
 
 // ------------------------------------------------------------- rejections
 
-const uuidFor = (i: number) =>
-  `00000000-0000-4000-8000-${i.toString(16).padStart(12, '0')}`;
-
 async function countRows(w: World, table: string) {
   if (!(await w.schema.exists(table))) return 0;
   return (await w.admin.query(`SELECT count(*)::int AS n FROM ${table}`))
     .rows[0].n as number;
-}
-
-/** RJ-1/RJ-2: plans with scheduling cycles, through the pure plan validator the planner path uses. */
-async function planRejection(
-  c: RejectionCase & { operation: { kind: 'plan' } },
-) {
-  const { validatePlan } =
-    await import('../../../../src/server/nemodots/coordinator/plan-validation.js');
-  const plan = {
-    tasks: c.operation.dependsOn.map((deps, i) => ({
-      title: `acc task ${i}`,
-      question: 'acceptance question',
-      role: 'investigator',
-      capabilities: ['observe'],
-      dependsOn: deps,
-    })),
-  };
-  const verdict = validatePlan(plan, { maxTasks: 50, existingTasks: 0 });
-  expect(verdict.ok, `${c.id}: the plan must be rejected`).toBe(false);
-  if (verdict.ok) return;
-  expect(
-    verdict.issues.join(' | ').toLowerCase(),
-    `${c.id}: the refusal must name the cycle`,
-  ).toMatch(/cycl|depend/);
-}
-
-/** RJ-3/RJ-4: delegated children that would close a scheduling cycle with a waiting ancestor. */
-async function delegationRejection(
-  c: RejectionCase & { operation: { kind: 'delegate' } },
-) {
-  const { validateDelegation } =
-    await import('../../../../src/server/nemodots/coordinator/plan-validation.js');
-  const op = c.operation;
-  const real = new Map(
-    op.existing.map((t, i) => [t.id, uuidFor(i + 1)] as const),
-  );
-  const tasks = op.existing.map((t) => ({
-    id: real.get(t.id)!,
-    parentId: t.parentTaskId ? real.get(t.parentTaskId)! : null,
-    prerequisites: t.waitsOn.map((id) => real.get(id)!),
-  }));
-  const issues = validateDelegation(
-    {
-      role: 'verifier',
-      title: 'acc child',
-      question: 'acceptance question',
-      justification: 'needs an independent check',
-      dependsOn: op.childDependsOn.map((id) => real.get(id)!),
-    } as never,
-    {
-      parent: {
-        id: real.get(op.parentTaskId)!,
-        role: 'investigator',
-        depth: 1,
-        capabilities: [
-          'observe',
-          'delegate',
-          'publish_finding',
-          'request_replan',
-        ],
-        maxChildren: 4,
-      },
-      limits: { maxDepth: 4, maxBreadth: 4, maxTasks: 50 },
-      totalTasks: tasks.length,
-      parentChildren: 0,
-      tasks,
-    } as never,
-    uuidFor(99) as never,
-  );
-  expect(
-    issues.length,
-    `${c.id}: the delegation must be rejected`,
-  ).toBeGreaterThan(0);
-  expect(issues.join(' | ').toLowerCase()).toContain('cycle');
 }
 
 async function edgeRejection(
@@ -582,10 +597,9 @@ async function generatedRejection(
 describe('gate 1 cycle and cap rejections (frozen oracle RJ-*)', () => {
   for (const c of REJECTION_CASES) {
     const name = `${tag(c.covers)} ${c.id} ${c.title}`;
-    if (c.operation.kind === 'plan') it(name, () => planRejection(c as never));
-    else if (c.operation.kind === 'delegate')
-      it(name, () => delegationRejection(c as never));
-    else if (c.operation.kind === 'edge')
+    // RJ-1..RJ-4 (plan and delegation cycles) run through the real publishPlan/delegate in publication.test.ts.
+    if (c.operation.kind === 'plan' || c.operation.kind === 'delegate') continue;
+    if (c.operation.kind === 'edge')
       it(name, () => edgeRejection(c as never));
     else it(name, () => generatedRejection(c as never), 300_000);
   }

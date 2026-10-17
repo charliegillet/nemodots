@@ -53,6 +53,7 @@ const FIXTURE = path.join(
 );
 
 let db: AccDb;
+let neighbour: AccDb | undefined;
 let redact: (t: string) => string;
 let needles: ReturnType<typeof collectNeedles>;
 const owned: ManagedProcess[] = [];
@@ -118,6 +119,7 @@ afterAll(async () => {
   } catch {
     /* redis already down: nothing of ours to clean */
   }
+  await neighbour?.drop().catch(() => undefined);
   await db?.drop().catch(() => undefined);
   for (const f of readdirSync(SCRATCH))
     if (/^app-.*\.sqlite(-shm|-wal)?$/.test(f))
@@ -490,8 +492,6 @@ describe('G0.4e seeded checkout API', () => {
     return d;
   };
 
-  let neighbour: AccDb;
-
   it('[G0.4] a neighbouring acc0 database (migrated and seeded) is readable and non-empty before the target is seeded', async () => {
     requireEntry(SEED, 'seed script');
     neighbour = await createAccDb();
@@ -530,7 +530,7 @@ describe('G0.4e seeded checkout API', () => {
   }, 400_000);
 
   it('[G0.4] seed populates the target with the documented data shape; the neighbour database, the main database and every Redis key outside the acc0 prefix are untouched', async () => {
-    expect(neighbour, 'neighbour database was not created').toBeDefined();
+    if (!neighbour) throw new Error('neighbour database was not created');
     const neighbourBefore = await digestDatabase(neighbour.name);
     expect(nonEmptyTables(neighbourBefore)).toBeGreaterThanOrEqual(5);
     let mainBefore: Record<string, TableDigest> | string;

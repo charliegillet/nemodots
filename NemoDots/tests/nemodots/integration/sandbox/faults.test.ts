@@ -182,7 +182,90 @@ describe('F3 pool starvation', () => {
   });
 });
 
+describe('/health capacity self-test', () => {
+  const polls = (s: Sandbox, n: number) =>
+    Promise.all(Array.from({ length: n }, () => s.request('/health')));
+
+  it('12 concurrent /health polls on a healthy checkout all report ok, round after round, and leave /metrics untouched', async () => {
+    await withSandbox(async (s) => {
+      for (let round = 0; round < 4; round += 1) {
+        const responses = await polls(s, 12);
+        expect(responses.map((r) => r.body.status)).toEqual(
+          Array(12).fill('ok'),
+        );
+        expect(responses.every((r) => r.status === 200)).toBe(true);
+        expect(responses.flatMap((r) => r.body.errors)).toEqual([]);
+        s.clock.advance(1_100); // let the shared self-test result expire
+      }
+      const metrics = (await s.request('/metrics')).body;
+      expect(metrics.errors.windowClasses).toEqual([]);
+      expect(metrics.errors.byClass).toEqual({});
+      expect(metrics.requests.total).toBe(0);
+    });
+  });
+
+  it('health polls alongside customer traffic never starve each other on a healthy pool', async () => {
+    await withSandbox(async (s) => {
+      for (let round = 0; round < 3; round += 1) {
+        const [health, ...customers] = await Promise.all([
+          polls(s, 6),
+          ...Array.from({ length: 4 }, () => s.request('/inventory/SKU-0001')),
+        ]);
+        expect(health.map((r) => r.body.status)).toEqual(Array(6).fill('ok'));
+        expect(customers.every((r) => r.status === 200)).toBe(true);
+        s.clock.advance(1_100);
+      }
+    });
+  });
+
+  it('with db.pool_max too small every concurrent poll still reports pool_exhausted, without writing pool_timeout into /metrics', async () => {
+    await withSandbox(async (s) => {
+      expect(
+        (await s.inject('pool_starvation', 1).then((r) => r.done)).status,
+      ).toBe('completed');
+      s.reloadConfig();
+      const responses = await polls(s, 8);
+      for (const response of responses) {
+        expect(response.status).toBe(503);
+        expect(response.body.status).toBe('degraded');
+        expect(response.body.errors).toContain('pool_exhausted');
+        expect(response.body.checks.pool).toBe(false);
+      }
+      // only customer traffic is written to the windows, never the self-test
+      const metrics = (await s.request('/metrics')).body;
+      expect(metrics.errors.windowClasses).toEqual([]);
+      // the repair is seen on the next poll although the earlier result was shared
+      await repair(s, 'db.pool_max', 10);
+      expect((await polls(s, 8)).map((r) => r.body.status)).toEqual(
+        Array(8).fill('ok'),
+      );
+    });
+  });
+});
+
 describe('F4 stale replica', () => {
+  it('is observable with zero customer traffic: the lagging replica already disagrees with the authority and the scarce SKU oversells', async () => {
+    await withSandbox(async (s) => {
+      const run = await s.inject('stale_replica', 1);
+      expect((await run.done).status).toBe('completed');
+      s.reloadConfig();
+      expect((await s.request('/health')).body.status).toBe('ok');
+      const view = await s.request('/inventory/SKU-0024');
+      expect(view.body).toEqual({
+        sku: 'SKU-0024',
+        quantity: 5,
+        source: 'replica_stale',
+      });
+      // two more units than the authority holds sell against the stale view
+      const sold = await order(s, 'SKU-0024', 4);
+      expect(sold.status).toBe(201);
+      const stock = await s.pools.verifier.query(
+        "SELECT quantity FROM checkout.inventory WHERE sku = 'SKU-0024'",
+      );
+      expect(stock.rows[0].quantity).toBe(-1);
+    });
+  });
+
   it('orders still succeed, /health stays ok, stock is oversold and visible to the verifier; the probe names the invariant; routing back to primary repairs it', async () => {
     await withSandbox(async (s) => {
       const probe = createProbe({
@@ -201,7 +284,7 @@ describe('F4 stale replica', () => {
       s.reloadConfig();
       expect((await s.request('/health')).body.status).toBe('ok');
 
-      // SKU-0024 has 1 unit left, the replica still says 3: two more units sell
+      // SKU-0024 has 1 unit left, the replica still says 5: two more units sell
       const first = await order(s, 'SKU-0024', 2);
       expect(first.status).toBe(201);
       const stock = await s.pools.verifier.query(
@@ -211,7 +294,7 @@ describe('F4 stale replica', () => {
       const view = await s.request('/inventory/SKU-0024');
       expect(view.body).toEqual({
         sku: 'SKU-0024',
-        quantity: 3,
+        quantity: 5,
         source: 'replica_stale',
       });
 

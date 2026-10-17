@@ -62,9 +62,10 @@ function replayer(call: ProviderCall): ProviderReply | null {
               value: n === 2 ? values.a : values.b,
               expectedCurrentValueDigest: values.digest,
             },
-            supportingReceiptIds: [receiptIdAt(call, 0), receiptIdAt(call, 1)].filter(
-              (id): id is string => Boolean(id),
-            ),
+            supportingReceiptIds: [
+              receiptIdAt(call, 0),
+              receiptIdAt(call, 1),
+            ].filter((id): id is string => Boolean(id)),
             rationale: `${ALPHA} proposes a schema version (turn ${n - 1}).`,
           },
         },
@@ -107,8 +108,13 @@ describe('G4.9 payload binding survives the tool loop', () => {
         180_000,
         'both replayed intents settle',
       );
-      const intents = snapshot.actions.filter((a) => a.toolCallId === REPLAY_ID);
-      expect(intents, 'two intents carry the replayed tool call id').toHaveLength(2);
+      const intents = snapshot.actions.filter(
+        (a) => a.toolCallId === REPLAY_ID,
+      );
+      expect(
+        intents,
+        'two intents carry the replayed tool call id',
+      ).toHaveLength(2);
       const payloadValue = (a: (typeof intents)[number]) =>
         (a.payload as { value?: unknown }).value;
       const live = intents.filter((a) =>
@@ -132,9 +138,9 @@ describe('G4.9 payload binding survives the tool loop', () => {
       const decided = ofKind(tail.events, 'action.decided').filter(
         (e) => e.payload.actionId === blocked[0].id,
       );
-      expect(decided.some((e) => e.payload.blockReason === 'idempotency_conflict')).toBe(
-        true,
-      );
+      expect(
+        decided.some((e) => e.payload.blockReason === 'idempotency_conflict'),
+      ).toBe(true);
 
       // effects: at most one, and never the conflicting value
       const rows = await committedActionRows(sys);
@@ -144,12 +150,14 @@ describe('G4.9 payload binding survives the tool loop', () => {
         'nothing was committed for the conflicting payload',
       ).toHaveLength(0);
       const liveValue = await readConfig(sys, 'cache.schema_version');
-      expect(liveValue.value, 'the conflicting value never reaches the authority').not.toBe(
-        values.b,
-      );
-      expect(live[0].status, 'the first, admissible proposal committed and verified').toBe(
-        'verified',
-      );
+      expect(
+        liveValue.value,
+        'the conflicting value never reaches the authority',
+      ).not.toBe(values.b);
+      expect(
+        live[0].status,
+        'the first, admissible proposal committed and verified',
+      ).toBe('verified');
       expect(rows).toHaveLength(1);
       expect(liveValue.value).toBe(values.a);
     } finally {

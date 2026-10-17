@@ -48,11 +48,27 @@ export interface ReaderDeps {
 
 // ------------------------------------------------------------ pure helpers
 
-/** Decile index 0..9 of a ratio in [0,1]; null when there is no denominator. */
-export function decile(numerator: number, denominator: number): number | null {
-  if (denominator <= 0) return null;
+/**
+ * Decile index 0..9 of a ratio in [0,1]; null when the denominator is below
+ * `minSamples` (default: any denominator > 0 counts).
+ */
+export function decile(
+  numerator: number,
+  denominator: number,
+  minSamples = 1,
+): number | null {
+  if (denominator <= 0 || denominator < minSamples) return null;
   return Math.min(9, Math.floor((numerator / denominator) * 10));
 }
+
+/**
+ * Below this many requests (or cache lookups) inside the metrics window the
+ * ratio deciles are `null`: an idle checkout and one with a trickle of traffic
+ * produce the same normalized value, so sparse traffic cannot mint revisions of
+ * `checkout.metrics` (finding D2). The error-class set and the decode-error
+ * schemas, which carry the diagnosis, are unaffected.
+ */
+export const MIN_DECILE_SAMPLES = 10;
 
 export type OrderCountBucket = '0' | '1-10' | '11-100' | '>100';
 export function orderCountBucket(count: number): OrderCountBucket {
@@ -113,10 +129,12 @@ export function normalizeMetrics(raw: unknown) {
     cacheHitRatioDecile: decile(
       num(cache.windowHits),
       num(cache.windowHits) + num(cache.windowMisses),
+      MIN_DECILE_SAMPLES,
     ),
     errorRateDecile: decile(
       num(requests.windowServerErrors),
       num(requests.window),
+      MIN_DECILE_SAMPLES,
     ),
   };
 }
@@ -135,6 +153,9 @@ export function normalizeRedisKeys(
   }
   return { reachable: true, activeNamespace, keyCounts };
 }
+
+/** Maximum authority/API/authority rounds of one inventory read. */
+const INVENTORY_PAIR_ATTEMPTS = 5;
 
 // ----------------------------------------------------------------- readers
 
@@ -215,7 +236,8 @@ export function createSourceReaders(deps: ReaderDeps): SourceReaderPort {
     };
   }
 
-  async function readInventory(sku: string): Promise<ReadResult> {
+  /** One snapshot of the authority row plus the probe-tagged reservations. */
+  async function authoritySnapshot(sku: string) {
     const authority = await deps.pg.query<{ quantity: number; probe: string }>(
       `SELECT i.quantity,
               COALESCE((SELECT sum(oi.quantity) FROM checkout.order_items oi
@@ -224,14 +246,40 @@ export function createSourceReaders(deps: ReaderDeps): SourceReaderPort {
          FROM checkout.inventory i WHERE i.sku = $1`,
       [sku],
     );
+    const row = authority.rows[0] ?? null;
+    return {
+      row,
+      quantity: row ? row.quantity : null,
+      probeReserved: row ? Number(row.probe) : 0,
+    };
+  }
+
+  /**
+   * The authority and the API view are read as a STABLE PAIR: authority, then
+   * the API, then the authority again, repeated (bounded) until both authority
+   * snapshots agree. An order that commits between the two sides therefore
+   * never shows up as `consistent: false`, and a probe-tagged order (which
+   * moves stock and the probe reservation together) never changes the
+   * normalized value. Under constant writes to one SKU the bound is hit and
+   * the last pair is reported (a documented limit: sustained traffic on a
+   * single SKU can still produce a transient inconsistent reading).
+   */
+  async function readInventory(sku: string): Promise<ReadResult> {
+    let before = await authoritySnapshot(sku);
+    let api: Record<string, unknown> = {};
+    for (let attempt = 1; ; attempt += 1) {
+      api = asRecord(await http(`/inventory/${encodeURIComponent(sku)}`));
+      const after = await authoritySnapshot(sku);
+      const stable =
+        before.quantity === after.quantity &&
+        before.probeReserved === after.probeReserved;
+      before = after;
+      if (stable || attempt >= INVENTORY_PAIR_ATTEMPTS) break;
+    }
     // Probe-tagged reservations are excluded from both sides (D2).
-    const probeReserved = authority.rows.length
-      ? Number(authority.rows[0].probe)
-      : 0;
-    const authorityQuantity = authority.rows.length
-      ? authority.rows[0].quantity + probeReserved
-      : null;
-    const api = asRecord(await http(`/inventory/${encodeURIComponent(sku)}`));
+    const probeReserved = before.probeReserved;
+    const authorityQuantity =
+      before.quantity === null ? null : before.quantity + probeReserved;
     const apiRaw =
       typeof api.quantity === 'number' ? (api.quantity as number) : null;
     // Only the primary view reflects probe reservations; the stale replica never does.
@@ -251,7 +299,7 @@ export function createSourceReaders(deps: ReaderDeps): SourceReaderPort {
           apiQuantity !== null &&
           authorityQuantity === apiQuantity,
       },
-      raw: { authority: authority.rows[0] ?? null, api },
+      raw: { authority: before.row, api },
       revisionHint: null,
     };
   }

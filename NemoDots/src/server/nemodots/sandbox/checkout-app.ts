@@ -47,10 +47,21 @@ import {
 import { CheckoutMetrics, type ErrorClass } from './checkout-metrics.js';
 import type { CheckoutSettings } from './config-schema.js';
 import { PROBE_SKU } from './constants.js';
-import { PROBE_HEADER, parseProbeHeader } from './probe-auth.js';
+import {
+  PROBE_HEADER,
+  parseProbeHeader,
+  type ProbeHeader,
+} from './probe-auth.js';
 
 /** Concurrency of the pool capacity self-test run by /health. */
 export const HEALTH_CAPACITY_CONCURRENCY = 10;
+/**
+ * The capacity self-test is single-flight and its result is shared for this
+ * long (per pool configuration), so concurrent or frequent /health polls (the
+ * watcher, the probe's window, the UI proxy, team reads) can never starve each
+ * other of connections and fake the pool-exhaustion symptom.
+ */
+export const HEALTH_CAPACITY_CACHE_MS = 1_000;
 
 export interface CheckoutDeps {
   /** NEMODOTS_PG_URL_CHECKOUT */
@@ -140,19 +151,27 @@ export function createCheckoutApp(deps: CheckoutDeps): CheckoutRuntime {
   void redis.connect().catch(() => {});
   const cache = new CheckoutCache(redis, deps.redisPrefix, now);
 
+  /**
+   * Cache-aside read. `tracked: false` keeps the read out of the metrics
+   * windows (probe traffic and the /health canary must not move the
+   * normalized `checkout.metrics` value; ARCHITECTURE 9.4, finding D2).
+   */
   async function cached<T>(
     settings: CheckoutSettings,
     name: string,
     loader: () => Promise<T>,
+    tracked = true,
   ): Promise<T> {
     try {
       const result = await cache.readThrough(settings, name, loader);
-      metrics.recordCache(result.hit);
+      if (tracked) metrics.recordCache(result.hit);
       return result.value;
     } catch (error) {
       if (error instanceof RedisUnavailableError) {
-        metrics.recordError('redis_unavailable');
-        metrics.recordCache(false);
+        if (tracked) {
+          metrics.recordError('redis_unavailable');
+          metrics.recordCache(false);
+        }
         return loader();
       }
       throw error;
@@ -210,13 +229,28 @@ export function createCheckoutApp(deps: CheckoutDeps): CheckoutRuntime {
     if (error.serverClass) metrics.recordError(error.serverClass, error.extra);
   }
 
+  interface RouteContext {
+    /** The authenticated probe tag of this request, if any. */
+    probe: ProbeHeader;
+    /** Probe traffic is evidence-neutral: it never enters the metrics windows. */
+    tracked: boolean;
+  }
+
   /** Runs a business route: configuration gate, error classification, metrics. */
   async function business(
     c: Context,
-    handler: (settings: CheckoutSettings) => Promise<Json>,
+    handler: (settings: CheckoutSettings, ctx: RouteContext) => Promise<Json>,
   ) {
     let status = 500;
+    let tracked = true;
     try {
+      const probe = parseProbeHeader(
+        deps.probeSecret,
+        c.req.header(PROBE_HEADER),
+      );
+      if (probe.kind === 'invalid')
+        throw new HttpError(403, 'probe_auth_failed', 'probe tag rejected');
+      tracked = probe.kind !== 'valid';
       const state = await config.get();
       if (!state.ok) {
         throw new HttpError(
@@ -228,19 +262,19 @@ export function createCheckoutApp(deps: CheckoutDeps): CheckoutRuntime {
           'config_invalid',
         );
       }
-      const result = await handler(state.settings);
+      const result = await handler(state.settings, { probe, tracked });
       status = result.status;
       return c.json(result.body as object, status as 200);
     } catch (raw) {
       const error = toHttpError(raw);
-      record(error);
+      if (tracked) record(error);
       status = error.status;
       return c.json(
         { error: error.errorClass, message: error.message, ...error.extra },
         status as 400,
       );
     } finally {
-      metrics.recordRequest(status);
+      if (tracked) metrics.recordRequest(status);
     }
   }
 
@@ -262,6 +296,62 @@ export function createCheckoutApp(deps: CheckoutDeps): CheckoutRuntime {
     }
   }
 
+  interface Capacity {
+    key: string;
+    at: number;
+    ok: boolean;
+    errors: string[];
+  }
+  let capacityDone: Capacity | null = null;
+  let capacityRun: { key: string; promise: Promise<Capacity> } | null = null;
+
+  /**
+   * Expected-concurrency self-test of the business pool: HEALTH_CAPACITY_CONCURRENCY
+   * units of work at once. Single-flight and cached per pool configuration
+   * (HEALTH_CAPACITY_CACHE_MS), and its failures are NOT written to the metrics
+   * windows: only customer traffic is, so health polling cannot create the F3
+   * symptom on a healthy pool or move the normalized metrics.
+   */
+  function poolCapacity(): Promise<Capacity> {
+    const key = `${pools.size}:${pools.statementTimeoutMs}`;
+    if (
+      capacityDone &&
+      capacityDone.key === key &&
+      now() - capacityDone.at < HEALTH_CAPACITY_CACHE_MS
+    )
+      return Promise.resolve(capacityDone);
+    if (capacityRun && capacityRun.key === key) return capacityRun.promise;
+    const promise: Promise<Capacity> = (async () => {
+      const attempts = await Promise.allSettled(
+        Array.from({ length: HEALTH_CAPACITY_CONCURRENCY }, () =>
+          pools.withClient(work),
+        ),
+      );
+      const errors = new Set<string>();
+      for (const attempt of attempts) {
+        if (attempt.status === 'fulfilled') continue;
+        const mapped = toHttpError(attempt.reason);
+        errors.add(
+          mapped.errorClass === 'pool_timeout'
+            ? 'pool_exhausted'
+            : mapped.errorClass,
+        );
+      }
+      const result: Capacity = {
+        key,
+        at: now(),
+        ok: errors.size === 0,
+        errors: [...errors].sort(),
+      };
+      capacityDone = result;
+      return result;
+    })().finally(() => {
+      if (capacityRun?.promise === promise) capacityRun = null;
+    });
+    capacityRun = { key, promise };
+    return promise;
+  }
+
   app.get('/health', async (c) => {
     const [postgres, redisOk, state] = await Promise.all([
       controlPing(),
@@ -278,9 +368,15 @@ export function createCheckoutApp(deps: CheckoutDeps): CheckoutRuntime {
     let cacheOk = false;
     let poolOk = false;
     if (postgres && redisOk && state.ok) {
-      // The cache canary goes through the same read-through path as /products.
+      // The cache canary goes through the same read-through path as /products
+      // but is not counted as a cache hit or miss.
       try {
-        await cached(state.settings, 'canary', async () => ({ canary: true }));
+        await cached(
+          state.settings,
+          'canary',
+          async () => ({ canary: true }),
+          false,
+        );
         cacheOk = true;
       } catch (error) {
         if (error instanceof CacheDecodeError) {
@@ -288,24 +384,9 @@ export function createCheckoutApp(deps: CheckoutDeps): CheckoutRuntime {
           errors.add('cache_decode_error');
         } else errors.add('redis_unreachable');
       }
-      // Expected-concurrency self-test of the business pool.
-      const attempts = await Promise.allSettled(
-        Array.from({ length: HEALTH_CAPACITY_CONCURRENCY }, () =>
-          pools.withClient(work),
-        ),
-      );
-      poolOk = true;
-      for (const attempt of attempts) {
-        if (attempt.status === 'fulfilled') continue;
-        poolOk = false;
-        const mapped = toHttpError(attempt.reason);
-        record(mapped);
-        errors.add(
-          mapped.errorClass === 'pool_timeout'
-            ? 'pool_exhausted'
-            : mapped.errorClass,
-        );
-      }
+      const capacity = await poolCapacity();
+      poolOk = capacity.ok;
+      for (const error of capacity.errors) errors.add(error);
     }
     const checks = {
       postgres,
@@ -349,26 +430,30 @@ export function createCheckoutApp(deps: CheckoutDeps): CheckoutRuntime {
   // ------------------------------------------------------------- catalog
 
   app.get('/products', (c) =>
-    business(c, async (settings) => {
-      const products = await cached(settings, 'products', () =>
-        pools.withClient(async (client) => {
-          await work(client);
-          const rows = await client.query<{
-            sku: string;
-            name: string;
-            category: string;
-            price_cents: number;
-          }>(
-            `SELECT sku, name, category, price_cents FROM checkout.products
+    business(c, async (settings, ctx) => {
+      const products = await cached(
+        settings,
+        'products',
+        () =>
+          pools.withClient(async (client) => {
+            await work(client);
+            const rows = await client.query<{
+              sku: string;
+              name: string;
+              category: string;
+              price_cents: number;
+            }>(
+              `SELECT sku, name, category, price_cents FROM checkout.products
               WHERE listed ORDER BY sku`,
-          );
-          return rows.rows.map((r) => ({
-            sku: r.sku,
-            name: r.name,
-            category: r.category,
-            priceCents: r.price_cents,
-          }));
-        }),
+            );
+            return rows.rows.map((r) => ({
+              sku: r.sku,
+              name: r.name,
+              category: r.category,
+              priceCents: r.price_cents,
+            }));
+          }),
+        ctx.tracked,
       );
       return {
         status: 200,
@@ -404,13 +489,7 @@ export function createCheckoutApp(deps: CheckoutDeps): CheckoutRuntime {
   // -------------------------------------------------------------- orders
 
   app.post('/orders', (c) =>
-    business(c, async (settings) => {
-      const probe = parseProbeHeader(
-        deps.probeSecret,
-        c.req.header(PROBE_HEADER),
-      );
-      if (probe.kind === 'invalid')
-        throw new HttpError(403, 'probe_auth_failed', 'probe tag rejected');
+    business(c, async (settings, { probe }) => {
       if (!settings.ordersWriteEnabled)
         throw new HttpError(
           503,

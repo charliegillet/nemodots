@@ -261,6 +261,7 @@ export interface Proxy {
 export async function startProxy(
   upstreamBase: string,
   handler?: (req: SeenRequest) => Action | Promise<Action>,
+  port = 0,
 ): Promise<Proxy> {
   let h = handler ?? (() => ({ kind: 'forward' }) as Action);
   const seen: SeenRequest[] = [];
@@ -319,11 +320,11 @@ export async function startProxy(
     sockets.add(s);
     s.on('close', () => sockets.delete(s));
   });
-  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
-  const port = (server.address() as import('node:net').AddressInfo).port;
+  await new Promise<void>((r) => server.listen(port, '127.0.0.1', r));
+  const bound = (server.address() as import('node:net').AddressInfo).port;
   return {
-    baseUrl: `http://127.0.0.1:${port}/v1`,
-    host: `127.0.0.1:${port}`,
+    baseUrl: `http://127.0.0.1:${bound}/v1`,
+    host: `127.0.0.1:${bound}`,
     seen,
     maxConcurrent: () => max,
     current: () => current,

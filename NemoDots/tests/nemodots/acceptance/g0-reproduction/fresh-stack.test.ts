@@ -2,7 +2,7 @@
 // NEW stack instance from empty storage with the stack script
 // (init, start, status, migrate, seed, checkout health, stop) instead of
 // reusing a pre-started one. The instance uses its own ports (PostgreSQL
-// 55443, Redis 56390, checkout 4602) and the instance name `acc0f`, so it
+// and Redis and checkout on free ports chosen at run time) and the instance name `acc0f`, so it
 // never touches the shared 55432/56379 stack, nor the user's 5432/6379.
 //
 // stack.mjs derives its data directory from its own location
@@ -10,6 +10,7 @@
 // is stopped and deleted at the end (only a directory whose instance.json
 // carries this exact name and was written by the stack script).
 import { existsSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { createServer } from 'node:net';
 import path from 'node:path';
 import pg from 'pg';
 import { createClient } from 'redis';
@@ -27,9 +28,11 @@ import {
 } from './helpers/common.js';
 
 const INSTANCE = 'acc0f';
-const PG_PORT = 55443;
-const REDIS_PORT = 56390;
-const CHECKOUT_PORT = 4602;
+// Ports are chosen from the free ones at run time: other agents start their own
+// instances (for example `demo`) on neighbouring fixed ports concurrently.
+let PG_PORT = 0;
+let REDIS_PORT = 0;
+let CHECKOUT_PORT = 0;
 const STACK = path.join(APP_ROOT, 'scripts/nemodots/stack.mjs');
 const INSTANCE_DIR = path.join(APP_ROOT, '.local', INSTANCE);
 const ROLES_FILE = path.join(INSTANCE_DIR, 'stack', 'roles.env');
@@ -64,7 +67,27 @@ async function readRoles() {
   return parseEnvText(readFileSync(ROLES_FILE, 'utf8'));
 }
 
+async function freePort() {
+  return new Promise<number>((resolve, reject) => {
+    const server = createServer();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const addr = server.address();
+      const port = typeof addr === 'object' && addr ? addr.port : 0;
+      server.close(() => resolve(port));
+    });
+  });
+}
+
 beforeAll(async () => {
+  // Distinct ephemeral ports; none may be 5432 or 6379 or one of the shared stack's.
+  const taken = new Set([5432, 6379, 55432, 56379, 4510, 4600, 4601]);
+  const picked: number[] = [];
+  while (picked.length < 3) {
+    const port = await freePort();
+    if (!taken.has(port) && !picked.includes(port)) picked.push(port);
+  }
+  [PG_PORT, REDIS_PORT, CHECKOUT_PORT] = picked;
   // A leftover instance from an earlier aborted run: stop it, then delete it.
   if (existsSync(INSTANCE_DIR)) {
     await stack(['stop']);

@@ -68,9 +68,14 @@ export interface ScenarioRun {
 export interface InjectorDeps {
   /** pool for role nemodots_injector */
   pool: pg.Pool;
-  /** connection string of the same role, for the dedicated LISTEN connection */
-  listenUrl: string;
+  /**
+   * connection string of the same role, for the dedicated LISTEN connection.
+   * A function is re-evaluated on every (re)connect.
+   */
+  listenUrl: string | (() => string);
   now?: () => number;
+  /** Bounded reconnect of the LISTEN connection (defaults: 5 attempts, 100 ms base). */
+  listenerReconnect?: { attempts?: number; baseDelayMs?: number };
 }
 
 /** Extracts the target config key from a nemodots_action_proposed payload. */
@@ -153,22 +158,83 @@ export class Injector {
 
     // LISTEN is established before anything is applied or returned, so a
     // proposal emitted right after start() resolves cannot be missed.
+    //
+    // If the LISTEN connection drops (backend restart, idle kill, network) it
+    // is re-established with bounded backoff while the run is live. The
+    // notifications that fell into the gap are unrecoverable, so the gap is
+    // recorded in control.scenario_runs.detail. When the connection cannot be
+    // restored, every still-waiting proposal step FAILS with `listener_lost`:
+    // it is never reported as `no_matching_proposal`.
+    type ProposalOutcome =
+      { kind: 'key'; key: string } | { kind: 'lost' } | { kind: 'none' };
     const waiters: ((key: string) => void)[] = [];
+    const lostWaiters = new Set<() => void>();
     let listener: pg.Client | null = null;
-    if (steps.some((s) => s.trigger === 'on_action_proposed')) {
-      listener = new pg.Client({
-        connectionString: this.deps.listenUrl,
+    let finishing = false;
+    let listenerLost = false;
+    let reconnects = 0;
+    const armed = steps.some((s) => s.trigger === 'on_action_proposed');
+    const reconnectAttempts = this.deps.listenerReconnect?.attempts ?? 5;
+    const reconnectBaseMs = this.deps.listenerReconnect?.baseDelayMs ?? 100;
+    const listenUrl = () =>
+      typeof this.deps.listenUrl === 'function'
+        ? this.deps.listenUrl()
+        : this.deps.listenUrl;
+
+    const connectListener = async () => {
+      const client = new pg.Client({
+        connectionString: listenUrl(),
         application_name: 'nemodots-injector-listen',
       });
-      listener.on('error', () => {});
-      await listener.connect();
-      listener.on('notification', (message) => {
+      let handled = false;
+      const dropped = () => {
+        if (handled || finishing || cancelled) return;
+        handled = true;
+        if (listener === client) listener = null;
+        void recoverListener();
+      };
+      client.on('error', dropped);
+      client.on('end', dropped);
+      client.on('notification', (message) => {
         if (message.channel !== ACTION_PROPOSED_CHANNEL) return;
         const key = parseProposedKey(message.payload);
         if (key) for (const waiter of [...waiters]) waiter(key);
       });
-      await listener.query(`LISTEN ${ACTION_PROPOSED_CHANNEL}`);
-    }
+      try {
+        await client.connect();
+        await client.query(`LISTEN ${ACTION_PROPOSED_CHANNEL}`);
+      } catch (error) {
+        handled = true; // the caller handles the failure
+        await client.end().catch(() => {});
+        throw error;
+      }
+      listener = client;
+    };
+
+    let recovering = false;
+    const recoverListener = async () => {
+      if (recovering) return;
+      recovering = true;
+      try {
+        for (let attempt = 1; attempt <= reconnectAttempts; attempt += 1) {
+          if (finishing || cancelled) return;
+          await sleep(reconnectBaseMs * 2 ** (attempt - 1));
+          if (finishing || cancelled) return;
+          try {
+            await connectListener();
+            reconnects += 1;
+            return;
+          } catch {
+            // try again with a longer pause
+          }
+        }
+        listenerLost = true;
+        for (const lost of [...lostWaiters]) lost();
+      } finally {
+        recovering = false;
+      }
+    };
+    if (armed) await connectListener();
 
     const settle = async (outcome: StepOutcome) => {
       outcomes.set(outcome.index, outcome);
@@ -204,22 +270,29 @@ export class Injector {
       });
 
     const waitForProposal = (step: ResolvedStep) =>
-      new Promise<string | null>((resolve) => {
+      new Promise<ProposalOutcome>((resolve) => {
+        if (listenerLost) return resolve({ kind: 'lost' });
         const targets = new Set(Object.keys(step.values ?? {}));
-        const finish = (key: string | null) => {
+        const finish = (outcome: ProposalOutcome) => {
           const at = waiters.indexOf(waiter);
           if (at >= 0) waiters.splice(at, 1);
+          lostWaiters.delete(lost);
           clearTimeout(timer);
           timers.delete(timer);
-          resolve(key);
+          resolve(outcome);
         };
         const waiter = (key: string) => {
-          if (targets.has(key)) finish(key);
+          if (targets.has(key)) finish({ kind: 'key', key });
         };
+        const lost = () => finish({ kind: 'lost' });
         waiters.push(waiter);
-        const timer = setTimeout(() => finish(null), step.timeoutMs);
+        lostWaiters.add(lost);
+        const timer = setTimeout(
+          () => finish({ kind: 'none' }),
+          step.timeoutMs,
+        );
         timers.add(timer);
-        void cancelGate.promise.then(() => finish(null));
+        void cancelGate.promise.then(() => finish({ kind: 'none' }));
       });
 
     // Applications are serialized in readiness order so that two steps that
@@ -283,6 +356,17 @@ export class Injector {
         error: reason,
       });
 
+    const fail = (step: ResolvedStep, reason: string) =>
+      settle({
+        index: step.index,
+        status: 'failed',
+        key: step.key,
+        versionBefore: null,
+        versionAfter: null,
+        settledAt: this.now(),
+        error: reason,
+      });
+
     const runStep = async (step: ResolvedStep) => {
       await Promise.all(step.after.map((i) => settledGates[i].promise));
       const prerequisitesApplied = step.after.every(
@@ -295,10 +379,11 @@ export class Injector {
         if (cancelled) return skip(step, 'cancelled');
       }
       if (step.trigger === 'on_action_proposed') {
-        const key = await waitForProposal(step);
+        const proposal = await waitForProposal(step);
         if (cancelled) return skip(step, 'cancelled');
-        if (!key) return skip(step, 'no_matching_proposal');
-        return apply(step, key, step.values![key]);
+        if (proposal.kind === 'lost') return fail(step, 'listener_lost');
+        if (proposal.kind === 'none') return skip(step, 'no_matching_proposal');
+        return apply(step, proposal.key, step.values![proposal.key]);
       }
       return apply(step, step.key!, step.value);
     };
@@ -308,7 +393,8 @@ export class Injector {
       const list = steps.map((s) => outcomes.get(s.index)!);
       const failed = list.some((o) => o.status === 'failed');
       const status = cancelled ? 'cancelled' : failed ? 'failed' : 'completed';
-      await listener?.end().catch(() => {});
+      finishing = true;
+      await (listener as pg.Client | null)?.end().catch(() => {});
       await this.deps.pool.query(
         `UPDATE control.scenario_runs
             SET status = $2, finished_at = now(), detail = $3::jsonb
@@ -322,6 +408,7 @@ export class Injector {
               status: o.status,
               error: o.error ?? null,
             })),
+            listener: armed ? { reconnects, lost: listenerLost } : undefined,
           }),
         ],
       );

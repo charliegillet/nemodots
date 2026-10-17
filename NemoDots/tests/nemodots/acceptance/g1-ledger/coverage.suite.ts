@@ -1,5 +1,5 @@
 // Gate 1 coverage guard: every TEST_PROMPT gate-1 item 1..13 must be named by at
-// least one test in this folder ([G1.n] in a test title) and every oracle case
+// least one test in this folder's suites ([G1.n] in a test title) and every oracle case
 // (LG-*, CL-*, RJ-*) must be executed here. A missing mapping fails; it is
 // never skipped.
 import { readFileSync, readdirSync } from 'node:fs';
@@ -11,7 +11,7 @@ import { LEDGER_CASES } from '../oracle/ledger.js';
 
 const dir = dirname(fileURLToPath(import.meta.url));
 const sources = readdirSync(dir)
-  .filter((f) => f.endsWith('.test.ts') && f !== 'coverage.test.ts')
+  .filter((f) => f.endsWith('.suite.ts') && f !== 'coverage.suite.ts')
   .map((f) => readFileSync(join(dir, f), 'utf8'))
   .join('\n');
 
@@ -44,6 +44,9 @@ describe('[G1] coverage of TEST_PROMPT gate 1', () => {
     expect(sources).toContain('LEDGER_CASES.map');
     expect(sources).toContain('CLOSURE_CASES.map');
     expect(sources).toContain('for (const c of REJECTION_CASES)');
+    // RJ-1..RJ-4 run through the real publishPlan/delegate in publication.suite.ts.
+    for (const kind of ['plan', 'delegate'])
+      expect(sources).toMatch(new RegExp(`REJECTION_CASES\\.filter\\(\\s*\\(c\\)\\s*=>\\s*c\\.operation\\.kind\\s*===\\s*'${kind}',?\\s*\\)`));
     expect(LEDGER_CASES.length).toBeGreaterThanOrEqual(16);
     expect(CLOSURE_CASES.length).toBeGreaterThanOrEqual(11);
     expect(REJECTION_CASES.length).toBeGreaterThanOrEqual(7);

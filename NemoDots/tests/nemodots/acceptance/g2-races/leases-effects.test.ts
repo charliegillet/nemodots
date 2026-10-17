@@ -58,7 +58,7 @@ const crashAt = (w: World, point: Parameters<World['onHook']>[0]) =>
     throw new Crash(point);
   });
 const crashed = (e: unknown) => errText(e).includes('CRASH_SIMULATED');
-const settle = async <T>(p: Promise<T>) =>
+const settle = async (p: Promise<unknown>) =>
   p.then(
     (v) => ({ ok: v }),
     (e) => ({ err: e as unknown }),
@@ -143,7 +143,9 @@ async function committedFlush(w: World, tc = 'tc-f', n = 4) {
 /** Recovery by another dispatcher instance: the current fence, or an expired-lease reclaim. */
 async function recoverDispatch(w: World, h: ActionsHandle, id: string) {
   const row = await w.intent(id);
-  const first = await settle(h.api.dispatch(id as never, Number(row.dispatch_fence)));
+  const first = await settle(
+    h.api.dispatch(id as never, Number(row.dispatch_fence)),
+  );
   if ('ok' in first) return first.ok as Rec;
   if (!isDispatchFenceError(first.err)) throw first.err;
   await w.expireDispatcherLease(id);
@@ -270,9 +272,7 @@ describe('G2 leases, duplicates, recovery: cases 9-12, 15', () => {
           expect(
             (
               await w.admin.query(sql, [
-                sql.includes('snapshots')
-                  ? call.snapshot.id
-                  : call.record.id,
+                sql.includes('snapshots') ? call.snapshot.id : call.record.id,
               ])
             ).rows[0].n,
             sql,
@@ -382,14 +382,29 @@ describe('G2 leases, duplicates, recovery: cases 9-12, 15', () => {
               dependencyVector: vec,
             }),
           );
-          await withTimeout(inTx, 10_000, 'publication never reached the tx');
+          await withTimeout(
+            Promise.race([
+              inTx,
+              first.then((r) => {
+                throw new Error(
+                  `the publication settled before reaching the validator: ${'err' in r ? errText(r.err) : 'ok'}`,
+                );
+              }),
+            ]),
+            10_000,
+            'publication never reached the tx',
+          );
           const cancel = settle(control.cancel(w.mission));
           expect(await isSettled(cancel, 400)).toBe(false);
           expect(await w.anyBlocked(), 'cancel waits on the publication').toBe(
             true,
           );
           release();
-          const [p1] = await Promise.all([first, cancel]);
+          const [p1, c1] = await Promise.all([first, cancel]);
+          expect(
+            'ok' in c1,
+            `cancel failed: ${'err' in c1 ? errText(c1.err) : ''}`,
+          ).toBe(true);
           w.deps.supportValidator = real;
           expect('ok' in p1, 'the in-flight publication commits').toBe(true);
           const mid = await w.footprint();
@@ -540,9 +555,9 @@ describe('G2 leases, duplicates, recovery: cases 9-12, 15', () => {
         await w.expireDispatcherLease(i.id);
         const r = await b.api.reclaim(i.id, 'dispatcher-2');
         expect(fence(r)).toBeGreaterThan(oldFence);
-        expect(threwDispatchFence(await settle(w.actions.commit(i.id, oldFence)))).toBe(
-          true,
-        );
+        expect(
+          threwDispatchFence(await settle(w.actions.commit(i.id, oldFence))),
+        ).toBe(true);
         expect(await w.actionRows()).toBe(0);
         await b.api.commit(i.id, fence(r));
         await checkOutcome(w, oracleOutcome('ADM-11a'), {
@@ -856,7 +871,10 @@ describe('G2 leases, duplicates, recovery: cases 9-12, 15', () => {
       ).toBe(true);
       await w.actions.commit(j.id, fence(r));
       expect((await w.intent(j.id)).status).toBe('committed');
-      expect(await w.cfg(TIMEOUT)).toMatchObject({ value: 120, causedBy: j.id });
+      expect(await w.cfg(TIMEOUT)).toMatchObject({
+        value: 120,
+        causedBy: j.id,
+      });
       expect(await w.actionRows()).toBe(2);
       expect(
         (await authSummary(w, j.id)).filter((x) => x.decision === 'committed'),

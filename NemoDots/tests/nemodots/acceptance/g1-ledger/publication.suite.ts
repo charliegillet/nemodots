@@ -12,10 +12,12 @@
 // A mutation that moves the final-version check out of the support validator
 // and into (or out of) the publication path must turn these tests red even
 // though ledger/support.ts#assertCurrent alone still passes its own tests.
+import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { describe, expect, it } from 'vitest';
 import { selectInheritedArtifacts, selectReceiptsForTask } from '../../../../src/server/nemodots/context/index.js';
 import { addReadSet, delegate, publishFinding, publishOutput, publishPlan, recordModelCall } from '../../../../src/server/nemodots/coordinator/publish.js';
+import { REJECTION_CASES } from '../oracle/closures.js';
 import { World, errorCode } from './driver.js';
 import { entry, withAccDatabase } from './harness.js';
 import {
@@ -99,9 +101,9 @@ async function publish(kind: Kind, w: World, a: SeededAttempt, refs: ReceiptRef[
   }
 }
 
-async function newAttemptFor(kind: Kind, w: World): Promise<SeededAttempt> {
+async function newAttemptFor(_kind: Kind, w: World): Promise<SeededAttempt> {
   // A non-root task so a refused publication's repair does not trigger the root replan path.
-  return seedAttempt(w, { role: 'investigator', child: true, capabilities: kind === 'child_enqueue' ? undefined : undefined });
+  return seedAttempt(w, { role: 'investigator', child: true });
 }
 
 async function rejectedPublicationFacts(w: World, kind: Kind, a: SeededAttempt, r1: ReceiptRef, before: Record<string, number>, tasksBefore: number, error: unknown, expectedReason: string) {
@@ -312,7 +314,7 @@ describe('[G1.2] a receipt of another environment, resource, owner or Space gran
           dependencyVector: vectorOfRefs([m1]),
         }).then(() => null, (e: unknown) => e);
         expect(outOfScope, `${name}: a finding citing an unread foreign receipt was accepted`).not.toBeNull();
-        expect(counts(w)).resolves.toEqual(before);
+        expect(await counts(w)).toEqual(before);
         expect((await w.admin.query('SELECT count(*)::int AS n FROM coordinator.findings')).rows[0].n).toBe(0);
       });
     });
@@ -460,8 +462,6 @@ function classifyRejection(error: unknown): string {
   return code;
 }
 
-import { REJECTION_CASES } from '../oracle/closures.js';
-
 describe('[G1.8] cycle rejections through the real plan and delegation publication path write nothing', () => {
   const planCases = REJECTION_CASES.filter((c) => c.operation.kind === 'plan');
   const delegateCases = REJECTION_CASES.filter((c) => c.operation.kind === 'delegate');
@@ -504,7 +504,7 @@ describe('[G1.8] cycle rejections through the real plan and delegation publicati
       await inDb(async (w) => {
         const missionId = await seedMission(w);
         const real = new Map<string, string>();
-        for (const t of op.existing) real.set(t.id, crypto.randomUUID());
+        for (const t of op.existing) real.set(t.id, randomUUID());
         // Parents first so the foreign key holds; prerequisites reference ids that already exist by the time they are read.
         const order = [...op.existing].sort((x, y) => (x.parentTaskId ? 1 : 0) - (y.parentTaskId ? 1 : 0));
         for (const t of order) {

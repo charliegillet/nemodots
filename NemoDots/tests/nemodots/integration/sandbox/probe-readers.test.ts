@@ -174,7 +174,14 @@ describe('readers: D2 stability', () => {
         consistent: boolean;
       };
       expect(value.consistent).toBe(false);
-      expect(value.apiQuantity - value.authorityQuantity).toBe(2);
+      // the API view is the frozen replica snapshot, the authority has moved on
+      const replica = await s.pools.verifier.query(
+        "SELECT quantity FROM checkout.inventory_replica WHERE sku = 'SKU-0004'",
+      );
+      expect(value.apiQuantity).toBe(replica.rows[0].quantity);
+      expect(
+        value.apiQuantity - value.authorityQuantity,
+      ).toBeGreaterThanOrEqual(2);
       expect(
         (await read(s, 'checkout.inventory/NOT-A-SKU')).normalizedValue,
       ).toMatchObject({

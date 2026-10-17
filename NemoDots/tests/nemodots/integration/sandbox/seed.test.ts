@@ -40,7 +40,21 @@ it('seeds 24 listed products, PROBE-SKU, 200 orders and the healthy baseline', a
       'PROBE-SKU',
     ]);
     expect(s.inventory).toHaveLength(25);
-    expect(s.replica).toEqual(s.inventory);
+    // the replica is a lagging snapshot: never below the primary, strictly
+    // above it for the SKUs the last seed orders touched, level for PROBE-SKU
+    expect(s.replica.map((r) => r.sku)).toEqual(s.inventory.map((r) => r.sku));
+    s.replica.forEach((row, i) => {
+      expect(row.quantity).toBeGreaterThanOrEqual(s.inventory[i].quantity);
+      if (row.sku === 'PROBE-SKU')
+        expect(row.quantity).toBe(s.inventory[i].quantity);
+    });
+    expect(
+      s.replica.filter((r, i) => r.quantity > s.inventory[i].quantity).length,
+    ).toBeGreaterThanOrEqual(10);
+    const scarce = (rows: { sku: string; quantity: number }[]) =>
+      rows.find((r) => r.sku === 'SKU-0024')!.quantity;
+    expect(scarce(s.inventory)).toBe(3);
+    expect(scarce(s.replica)).toBe(5);
     expect(s.orders).toHaveLength(200);
     expect(s.items.length).toBeGreaterThanOrEqual(200);
     expect(Object.fromEntries(s.config.map((c) => [c.key, c.value]))).toEqual(
@@ -101,13 +115,17 @@ it('does not rewind a changed config unless asked; --reset-config restores throu
 
 it('keeps stock and replica separate: the replica snapshot is never refreshed by a reseed', async () => {
   await withSandbox(async ({ pools }) => {
+    const gap = async () => {
+      const rows = await pools.verifier.query(
+        "SELECT i.quantity AS primary, r.quantity AS replica FROM checkout.inventory i JOIN checkout.inventory_replica r USING (sku) WHERE sku = 'SKU-0001'",
+      );
+      return rows.rows[0].replica - rows.rows[0].primary;
+    };
+    const seeded = await gap();
     await pools.checkout.query(
       "UPDATE checkout.inventory SET quantity = quantity - 5 WHERE sku = 'SKU-0001'",
     );
     await seedCheckout(pools.admin);
-    const rows = await pools.verifier.query(
-      "SELECT i.quantity AS primary, r.quantity AS replica FROM checkout.inventory i JOIN checkout.inventory_replica r USING (sku) WHERE sku = 'SKU-0001'",
-    );
-    expect(rows.rows[0].replica - rows.rows[0].primary).toBe(5);
+    expect(await gap()).toBe(seeded + 5);
   });
 });

@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import {
   POOL,
   REDIS_DB,
+  type Rec,
   SETUP_CONFIG,
   TIMEOUT,
   errText,
@@ -178,6 +179,62 @@ describe('G2 harness self-check', () => {
       expect(a2).not.toBeNull();
       expect(a2!.ctx.taskId).toBe(a1.ctx.taskId);
       expect(a2!.ctx.fencingToken).toBeGreaterThan(a1.ctx.fencingToken);
+    }, NONE);
+  });
+
+  it('H-7 propose plumbing: one attempt per tool call reading exactly what it cites, role by action kind, a recorded model call carrying the tool call, strict extras, no read of the foreign receipt', async () => {
+    await withWorld(async (w) => {
+      const seen: { input: Rec; ctx: Rec }[] = [];
+      const stub = {
+        propose: async (input: Rec, ctx: Rec) => {
+          seen.push({ input, ctx });
+          return { id: 'stub' };
+        },
+      } as never;
+      await w.proposeVia(stub, w.poolSpec('tc-a'));
+      await w.proposeVia(stub, w.poolSpec('tc-a')); // a replay reuses the attempt and the call
+      await w.proposeVia(stub, w.poolSpec('tc-b', 12, ['foreign', 'health']));
+      await w.proposeVia(stub, {
+        ...w.flushSpec('tc-f'),
+        extra: { policyVersion: 'x' },
+      });
+      expect(seen).toHaveLength(4);
+      expect(seen[1].ctx.attemptId).toBe(seen[0].ctx.attemptId);
+      expect(seen[1].ctx.modelCallId).toBe(seen[0].ctx.modelCallId);
+      expect(seen[2].ctx.attemptId).not.toBe(seen[0].ctx.attemptId);
+      expect(seen[0].ctx).toMatchObject({
+        toolCallId: 'tc-a',
+        role: 'database_specialist',
+      });
+      expect(seen[3].ctx.role).toBe('cache_specialist'); // propose_cache_flush is granted to that role only
+      expect(seen[0].input.supportingReceiptIds).toEqual([
+        w.receiptId('member:db.pool_max'),
+        w.receiptId('health'),
+      ]);
+      expect(seen[0].input.payload).toMatchObject({ key: POOL, value: 12 });
+      expect(seen[0].input.payload.expectedCurrentValueDigest).toMatch(
+        /^[0-9a-f]{64}$/,
+      );
+      expect(seen[3].input.policyVersion).toBe('x');
+      const readSet = async (attemptId: string) =>
+        (
+          await w.admin.query(
+            'SELECT read_set_receipt_ids FROM coordinator.task_attempts WHERE id=$1',
+            [attemptId],
+          )
+        ).rows[0].read_set_receipt_ids as string[];
+      expect((await readSet(seen[0].ctx.attemptId)).sort()).toEqual(
+        [w.receiptId('member:db.pool_max'), w.receiptId('health')].sort(),
+      );
+      expect(await readSet(seen[2].ctx.attemptId)).toEqual([
+        w.receiptId('health'),
+      ]);
+      const call = await w.admin.query(
+        'SELECT attempt_id, tool_calls FROM ledger.model_call_records WHERE id=$1',
+        [seen[0].ctx.modelCallId],
+      );
+      expect(call.rows[0].attempt_id).toBe(seen[0].ctx.attemptId);
+      expect(call.rows[0].tool_calls[0].toolCallId).toBe('tc-a');
     }, NONE);
   });
 });

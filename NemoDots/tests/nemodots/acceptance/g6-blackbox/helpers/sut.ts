@@ -3,6 +3,7 @@
 // the checkout API on 4720, the OpenDots app (with NemoDots) on 4721 and an
 // optional separate worker process. Only processes started here are stopped.
 import { spawn, type ChildProcess } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, openSync, rmSync } from 'node:fs';
 import net from 'node:net';
 import { resolve } from 'node:path';
@@ -108,6 +109,10 @@ export interface SutOptions {
   inferenceMode?: 'live' | 'blocked';
   /** false = checkout sandbox only (no OpenDots app, no worker); default true */
   withApp?: boolean;
+  /** extra environment for the app and worker (e.g. NEMODOTS_MUTATION, NEMODOTS_TEST_HOOKS) */
+  extraEnv?: Record<string, string>;
+  /** override of the Redis URL the app and worker use (a verifier-owned TCP proxy) */
+  appRedisUrl?: string;
 }
 
 export class Sut {
@@ -116,6 +121,8 @@ export class Sut {
   private readonly dir: string;
   private readonly children = new Map<string, ChildProcess>();
   private created = false;
+  private readerRole: string | null = null;
+  private readerPassword: string | null = null;
 
   private constructor(readonly options: SutOptions) {
     this.database = trialDatabaseName(options.trialId);
@@ -131,6 +138,30 @@ export class Sut {
         this.database,
       );
     return out;
+  }
+
+  /**
+   * Only the roles ARCHITECTURE section 3 says the OpenDots server process
+   * holds: app, injector and verifier. Never admin or checkout, and never the
+   * harness reader role.
+   */
+  private get appRoleEnv(): Record<string, string> {
+    const all = this.roleEnv;
+    return {
+      [ROLE_ENV.app]: all[ROLE_ENV.app],
+      [ROLE_ENV.injector]: all[ROLE_ENV.injector],
+      [ROLE_ENV.verifier]: all[ROLE_ENV.verifier],
+    };
+  }
+
+  /** Connection string of the harness-only read-only role (not in any child's environment). */
+  get readerUrl(): string {
+    if (!this.readerRole || !this.readerPassword)
+      throw new Error('reader role not provisioned');
+    const url = new URL(withDatabase(roleUrl('admin'), this.database));
+    url.username = this.readerRole;
+    url.password = this.readerPassword;
+    return url.toString();
   }
 
   private baseEnv(): Record<string, string> {
@@ -171,6 +202,7 @@ export class Sut {
     try {
       await sut.migrate();
       await sut.runOnce('seed', ENTRY_FILES.seed, sut.fullEnv());
+      await sut.provisionReader();
       sut.spawnChild('checkout', ENTRY_FILES.checkoutMain, {
         PATH: process.env.PATH ?? '',
         NEMODOTS_PG_URL_CHECKOUT: sut.roleEnv.NEMODOTS_PG_URL_CHECKOUT,
@@ -183,7 +215,8 @@ export class Sut {
       if (options.withApp !== false) {
         sut.spawnApp();
         await sut.waitForApp();
-        if (options.separateWorker) sut.startWorker();
+        // A separate worker is started by the caller, after it has proved that
+        // the app process itself hosts no workers (NEMODOTS_WORKERS=0).
       }
     } catch (error) {
       await sut.stop();
@@ -198,7 +231,13 @@ export class Sut {
 
   private appEnv(): Record<string, string> {
     return {
-      ...this.fullEnv(),
+      ...pick(PASS_THROUGH),
+      ...this.baseEnv(),
+      ...this.appRoleEnv,
+      ...(this.options.appRedisUrl
+        ? { NEMODOTS_REDIS_URL: this.options.appRedisUrl }
+        : {}),
+      ...(this.options.extraEnv ?? {}),
       HOST: G6.host,
       PORT: String(G6.appPort),
       OWNER_TOKEN: this.options.ownerToken,
@@ -223,11 +262,57 @@ export class Sut {
       if (!/^acc6_[a-z0-9_]+$/.test(name))
         throw new Error('unsafe database name');
       await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+      await admin.query(`DROP ROLE IF EXISTS ${this.readerRoleName()}`);
       await admin.query(`CREATE DATABASE ${name} OWNER nemodots_admin`);
       this.created = true;
     } finally {
       await admin.end();
     }
+  }
+
+  private readerRoleName() {
+    const name = this.database.replace(/^acc6_/, 'acc6_ro_');
+    if (!/^acc6_ro_[a-z0-9_]{1,45}$/.test(name))
+      throw new Error('unsafe reader role name');
+    return name;
+  }
+
+  /**
+   * A harness-only read-only role for invariant reads. It is created per trial,
+   * granted SELECT on the checkout, ledger and coordinator schemas only, and
+   * its password exists only in this process. Neither the app nor the worker
+   * environment contains it, so "separate verifier credential" is literal.
+   */
+  private async provisionReader() {
+    const role = this.readerRoleName();
+    const password = randomBytes(18).toString('hex');
+    const admin = new pg.Client({
+      connectionString: withDatabase(roleUrl('admin'), this.database),
+      application_name: 'acc6-admin',
+    });
+    await admin.connect();
+    try {
+      await admin.query(
+        `CREATE ROLE ${role} LOGIN PASSWORD '${password}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION`,
+      );
+      await admin.query(
+        `GRANT CONNECT ON DATABASE ${this.database} TO ${role}`,
+      );
+      await admin.query(
+        `GRANT USAGE ON SCHEMA checkout, ledger, coordinator TO ${role}`,
+      );
+      await admin.query(
+        `GRANT SELECT ON ALL TABLES IN SCHEMA checkout, ledger, coordinator TO ${role}`,
+      );
+    } catch (error) {
+      throw new BlockedError(
+        `cannot provision the harness reader role (needs CREATEROLE on the admin role): ${(error as Error).message.replace(password, '<redacted>')}`,
+      );
+    } finally {
+      await admin.end().catch(() => undefined);
+    }
+    this.readerRole = role;
+    this.readerPassword = password;
   }
 
   private async migrate() {
@@ -288,6 +373,36 @@ export class Sut {
 
   startWorker() {
     return this.spawnChild('worker', ENTRY_FILES.workerMain, this.appEnv());
+  }
+
+  /** pid of a child this harness started (app, worker, checkout), or null. */
+  pidOf(name: 'app' | 'worker' | 'checkout'): number | null {
+    const child = this.children.get(name);
+    return child && child.exitCode === null && child.pid ? child.pid : null;
+  }
+
+  /** SIGSTOP / SIGCONT / SIGKILL of a child this harness started (zombie-worker scenarios). */
+  signal(name: 'app' | 'worker', signal: NodeJS.Signals): boolean {
+    const child = this.children.get(name);
+    if (!child || child.exitCode !== null) return false;
+    return child.kill(signal);
+  }
+
+  /** SIGKILL the app (crash at a barrier) and wait for it to exit. */
+  async killApp(): Promise<boolean> {
+    const app = this.children.get('app');
+    if (!app || app.exitCode !== null) return false;
+    const exited = new Promise<void>((r) => app.once('exit', () => r()));
+    app.kill('SIGKILL');
+    await exited;
+    this.children.delete('app');
+    return true;
+  }
+
+  /** Restart the app against the same database and Redis prefix (recovery scenarios). */
+  async restartApp(): Promise<void> {
+    this.spawnApp();
+    await this.waitForApp();
   }
 
   /** Kills only the separate worker process this harness started. */
@@ -360,6 +475,7 @@ export class Sut {
         await admin.query(
           `DROP DATABASE IF EXISTS ${this.database} WITH (FORCE)`,
         );
+        await admin.query(`DROP ROLE IF EXISTS ${this.readerRoleName()}`);
       } catch {
         /* leftover acc6_ databases are removed on the next start */
       } finally {

@@ -7,6 +7,7 @@ import {
 } from '../../../../src/server/nemodots/coordinator/index.js';
 import type { TaskId } from '../../../../src/server/nemodots/contracts/index.js';
 import {
+  attemptRow,
   claimStart,
   count,
   plannedMission,
@@ -303,5 +304,56 @@ it('the reaper leaves live leases alone, skips attempts of finished missions and
       planned.taskIds[1] as TaskId,
     );
     expect(later.task.status).toBe('runnable');
+  });
+});
+
+it('claims racing a cancel never leave a running attempt behind: the claim is swept or never happens', async () => {
+  await withHarness(async (h) => {
+    for (const delayMs of [0, 2, 5, 10, 20]) {
+      const planned = await plannedMission(h, [
+        { role: 'investigator' },
+        { role: 'investigator' },
+      ]);
+      const [claims, mission] = await Promise.all([
+        Promise.all(
+          Array.from({ length: 4 }, (_, i) =>
+            h.coordinator.claimAttempt({
+              workerId: `racer-${i}`,
+              missionId: planned.missionId,
+            }),
+          ),
+        ),
+        sleep(delayMs).then(() =>
+          h.coordinator.control.cancel(planned.missionId),
+        ),
+      ]);
+      expect(mission.status).toBe('cancelled');
+      expect(
+        await count(
+          h,
+          'coordinator.task_attempts',
+          "mission_id = $1 AND status = 'running'",
+          [planned.missionId],
+        ),
+        `delay ${delayMs}`,
+      ).toBe(0);
+      const claimed = claims.filter((claim) => claim !== null);
+      // every attempt that was handed out was aborted by the cancel (status first) ...
+      for (const claim of claimed) {
+        const row = await attemptRow(h, claim!.context.attemptId);
+        expect(row.status).toBe('aborted');
+        expect(row.abort_reason).toBe('mission_cancelled');
+        await expect(
+          h.coordinator.startAttempt(claim!.context),
+        ).rejects.toBeInstanceOf(FenceError);
+      }
+      // ... and nothing can be claimed afterwards.
+      expect(
+        await h.coordinator.claimAttempt({
+          workerId: 'late',
+          missionId: planned.missionId,
+        }),
+      ).toBeNull();
+    }
   });
 });

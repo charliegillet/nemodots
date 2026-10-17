@@ -272,23 +272,28 @@ describe('G5.4 provider interruption: retry or block, never switch vendors, neve
     // Property-based: the error need not carry a particular class name, but it
     // must refuse to build and list the missing variable NAMES (CONTRACTS /
     // ARCHITECTURE section on live mode), never the secret.
-    const names = (e: (Error & { missingEnv?: string[] }) | undefined) =>
-      [
-        ...(Array.isArray(e?.missingEnv) ? e!.missingEnv : []),
-        ...(e?.message.match(/\b[A-Z][A-Z0-9_]{3,}\b/g) ?? []),
-      ];
+    const names = (e: (Error & { missingEnv?: string[] }) | undefined) => [
+      ...(Array.isArray(e?.missingEnv) ? e!.missingEnv : []),
+      ...(e?.message.match(/\b[A-Z][A-Z0-9_]{3,}\b/g) ?? []),
+    ];
     const noUrl = attempt({
       OPENAI_API_KEY: live.apiKey,
       OPENAI_MODEL: live.model,
     });
-    expect(noUrl, 'adapter must refuse to build without OPENAI_BASE_URL').toBeDefined();
+    expect(
+      noUrl,
+      'adapter must refuse to build without OPENAI_BASE_URL',
+    ).toBeDefined();
     expect(names(noUrl)).toContain('OPENAI_BASE_URL');
     expect(noUrl!.message).not.toContain(live.apiKey);
     const noKey = attempt({
       OPENAI_BASE_URL: live.baseUrl,
       OPENAI_MODEL: live.model,
     });
-    expect(noKey, 'adapter must refuse to build without OPENAI_API_KEY').toBeDefined();
+    expect(
+      noKey,
+      'adapter must refuse to build without OPENAI_API_KEY',
+    ).toBeDefined();
     expect(names(noKey)).toContain('OPENAI_API_KEY');
     expect(noKey!.message).not.toContain(live.apiKey);
   }, 120_000);
@@ -391,7 +396,12 @@ describe('TEST_PROMPT gate 5 bullet 4 timeout class', () => {
     expect(r.attempts.length).toBeGreaterThanOrEqual(2);
     expect(r.attempts[0].error?.class).toBe('timeout');
     expect(r.attempts[0].httpStatus).toBeNull();
-    expect(Object.values(r.attempts[0].usage)).toEqual([null, null, null, null]);
+    expect(Object.values(r.attempts[0].usage)).toEqual([
+      null,
+      null,
+      null,
+      null,
+    ]);
     expect(r.outcome).toBe('completed');
     expect(r.provider.host).toBe(proxy.host);
   }, 170_000);

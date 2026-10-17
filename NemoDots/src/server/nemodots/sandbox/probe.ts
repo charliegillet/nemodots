@@ -18,6 +18,17 @@
 // The probe assumes no other business writes while it runs (it is run against a
 // quiescent checkout); a concurrent customer order would show up as
 // business_data_unchanged = false, which is the honest outcome.
+//
+// Probe runs are SERIALIZED: within a process by a queue, across processes
+// (the CLI probe next to an in-process run, two missions) by a session-level
+// advisory lock on a dedicated verifier connection. Two overlapping runs would
+// otherwise each see the other's PROBE-SKU decrement and both fail on a
+// healthy checkout.
+//
+// Every probe request (POST /orders, GET /orders/:id, GET /inventory/...)
+// carries the authenticated probe header, so the checkout keeps them out of its
+// metrics windows: running the acceptance probe never changes the normalized
+// `checkout.metrics` value (ARCHITECTURE 9.4, finding D2).
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import type { MissionId } from '../contracts/ids.js';
@@ -54,9 +65,15 @@ export function acceptanceNormalizedValue(result: ProbeResult) {
   };
 }
 
+/** Advisory-lock key serializing probe runs across processes. */
+const PROBE_LOCK_KEY = 'nemodots.acceptance-probe';
+
 export interface ProbeDeps {
-  /** SELECT on checkout.* (role nemodots_verifier). */
-  verifier: Pick<pg.Pool, 'query'>;
+  /**
+   * SELECT on checkout.* (role nemodots_verifier). With `connect` (a Pool) the
+   * probe also serializes across processes with an advisory lock.
+   */
+  verifier: Pick<pg.Pool, 'query'> & Partial<Pick<pg.Pool, 'connect'>>;
   checkoutUrl: string;
   probeSecret: string;
   /** NEMODOTS_PROBE_WINDOW_MS (default 20000). */
@@ -72,6 +89,9 @@ export interface ProbeDeps {
     result: ProbeResult,
   ) => Promise<ObservationReceipt>;
 }
+
+/** Tail of the in-process probe queue. */
+let queue: Promise<void> = Promise.resolve();
 
 const sleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -130,16 +150,16 @@ export function createProbe(deps: ProbeDeps): ProbePort & {
 
   async function execute(): Promise<ProbeResult> {
     const runId = `probe-${randomUUID()}`;
+    const tag = {
+      'x-nemodots-probe': probeHeaderValue(deps.probeSecret, runId),
+    };
     const ordered = 1;
     const before = await authorityQuantity();
     const hashBefore = await businessHash();
 
     const created = await call('/orders', {
       method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-nemodots-probe': probeHeaderValue(deps.probeSecret, runId),
-      },
+      headers: { 'content-type': 'application/json', ...tag },
       body: JSON.stringify({
         customer: 'nemodots-probe',
         items: [{ sku: PROBE_SKU, quantity: ordered }],
@@ -153,7 +173,7 @@ export function createProbe(deps: ProbeDeps): ProbePort & {
 
     let readbackOk = false;
     if (orderId) {
-      const read = await call(`/orders/${orderId}`);
+      const read = await call(`/orders/${orderId}`, { headers: tag });
       const items = Array.isArray(read.body?.items) ? read.body.items : [];
       readbackOk =
         read.status === 200 &&
@@ -170,7 +190,7 @@ export function createProbe(deps: ProbeDeps): ProbePort & {
       before !== null &&
       after !== null &&
       before - after === ordered;
-    const view = await call(`/inventory/${PROBE_SKU}`);
+    const view = await call(`/inventory/${PROBE_SKU}`, { headers: tag });
     const viewConsistent =
       after !== null && view.status === 200 && view.body?.quantity === after;
     const negatives = await deps.verifier.query<{ n: string }>(
@@ -221,14 +241,48 @@ export function createProbe(deps: ProbeDeps): ProbePort & {
     };
   }
 
+  // In-process queue: one run at a time per probe instance family (module level
+  // so several createProbe() instances in one process also serialize).
+  async function serialized(): Promise<ProbeResult> {
+    const previous = queue;
+    let release!: () => void;
+    queue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    let lock: pg.PoolClient | undefined;
+    try {
+      if (deps.verifier.connect) {
+        lock = await deps.verifier.connect();
+        await lock.query('SELECT pg_advisory_lock(hashtext($1))', [
+          PROBE_LOCK_KEY,
+        ]);
+      }
+      return await execute();
+    } finally {
+      if (lock) {
+        try {
+          await lock.query('SELECT pg_advisory_unlock(hashtext($1))', [
+            PROBE_LOCK_KEY,
+          ]);
+          lock.release();
+        } catch (error) {
+          // destroying the connection releases a session-level lock
+          lock.release(error as Error);
+        }
+      }
+      release();
+    }
+  }
+
   return {
-    execute,
+    execute: serialized,
     async run(missionId: MissionId) {
       if (!deps.register)
         throw new Error(
           'probe: no receipt registrar wired (createProbe deps.register)',
         );
-      return deps.register(missionId, await execute());
+      return deps.register(missionId, await serialized());
     },
   };
 }

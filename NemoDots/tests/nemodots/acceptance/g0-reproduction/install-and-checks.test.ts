@@ -363,13 +363,9 @@ describe('G0.3 upstream verification commands on the clean install', () => {
       outsideFormat: outsideFormat.length,
     });
     expect(
-      outsideLint,
-      `NemoDots-owned files outside the lint globs: ${byDir(outsideLint)}`,
-    ).toEqual([]);
-    expect(
-      outsideFormat,
-      `NemoDots-owned files outside the check-format globs: ${byDir(outsideFormat)}`,
-    ).toEqual([]);
+      { outsideLint, outsideFormat },
+      `NemoDots-owned files outside the lint globs: ${byDir(outsideLint) || 'none'}; outside the check-format globs: ${byDir(outsideFormat) || 'none'}`,
+    ).toEqual({ outsideLint: [], outsideFormat: [] });
   });
 
   it('[G0.3] prettier --check passes directly on scripts/nemodots and evals', async () => {

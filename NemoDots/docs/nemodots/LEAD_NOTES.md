@@ -53,6 +53,10 @@ History, for honest reporting:
 - Composio, voice, Slack, Automatic Learning, web-search browser, computers: disabled for the incident scope.
 - No public deployment, no pushing, no messages.
 
+## Interface notes from lead fixes
+
+- Inference streaming (`src/server/nemodots/inference/client.ts`): a retried stream restarts from the beginning. `StreamObserver(delta, attempt)` now receives the 1-based attempt number, and `CompleteContext.onAttemptReset(nextAttempt)` fires before a retry whenever the failed attempt had already delivered deltas. **Any consumer that buffers or forwards deltas (team worker loop, SSE/UI streaming, telemetry) must pass `onAttemptReset` and clear what it buffered, or reset when the attempt number changes**; otherwise retried text is duplicated.
+
 ## Product name in the UI
 
 The user-facing product name is **NemoDots** (page title, wordmark, unlock screen, user-facing messages and any new UI copy). Say "OpenDots" only for upstream attribution, upstream doc links (github.com/CopilotKit/OpenDots/...), and the CopilotKit telemetry identity, which stay unchanged.

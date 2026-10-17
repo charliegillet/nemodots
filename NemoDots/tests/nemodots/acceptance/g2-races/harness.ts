@@ -533,7 +533,6 @@ async function build(c: {
   const loadActions = lazy<(d: Rec) => Rec>('actions/index.ts', [
     'createActionAdmission',
   ]);
-  const loadHooks = lazy<Rec>('actions/test-hooks.ts', ['setHook']);
   const loadCacheKey = lazy<(p: string, ns: string, n: string) => string>(
     'actions/dispatch.ts',
     ['cacheKey'],
@@ -755,6 +754,9 @@ async function build(c: {
       });
     },
     async recordArtifact(client, a) {
+      // The graph has no finding node kind (findings are model claims, not
+      // graph artifacts); task outputs and delegated tasks get evidence edges.
+      if (a.kind === 'finding') return;
       const to = {
         kind: a.kind,
         id: a.id,
@@ -791,6 +793,12 @@ async function build(c: {
         ? (await primary()).api.cancelQueued(m as never, g)
         : [],
   };
+  const hasIntents = async (client: Rec) =>
+    (
+      await client.query(
+        "SELECT to_regclass('coordinator.action_intents') IS NOT NULL AS ok",
+      )
+    ).rows[0].ok as boolean;
   const deps = {
     pool: app,
     config: {
@@ -825,8 +833,11 @@ async function build(c: {
         }),
       );
     },
+    // IntentReader over coordinator.action_intents (owned by the actions
+    // migration). Before that table exists there are no intents to report.
     intents: {
       async find(client: Rec, id: string) {
+        if (!(await hasIntents(client))) return null;
         const r = await client.query(
           'SELECT id, mission_id, task_id, attempt_id, status FROM coordinator.action_intents WHERE id=$1',
           [id],
@@ -843,6 +854,7 @@ async function build(c: {
           : null;
       },
       async statuses(client: Rec, ids: string[]) {
+        if (!(await hasIntents(client))) return [];
         const r = await client.query(
           'SELECT id, status FROM coordinator.action_intents WHERE id = ANY($1::uuid[])',
           [ids],
@@ -850,6 +862,7 @@ async function build(c: {
         return r.rows;
       },
       async committedEffects(client: Rec, missionId: string) {
+        if (!(await hasIntents(client))) return [];
         const r = await client.query(
           "SELECT id FROM coordinator.action_intents WHERE mission_id=$1 AND status IN ('committed','dispatched','verified','outcome_unknown')",
           [missionId],
@@ -1366,10 +1379,9 @@ async function build(c: {
     async watcher() {
       const factory = await loadWatcher();
       const recovery = createRecovery(deps);
-      const h = await primary();
       return (watcherCache ??= await factory({
         pool: app,
-        redis: h.redis,
+        redis: c.redis,
         redisPrefix: prefix,
         recovery,
         clock: () => new Date(),
