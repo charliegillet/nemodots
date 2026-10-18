@@ -1,0 +1,6 @@
+# Required by the loader. Built-in Bots would use this; the Ratchet coworker is agent-bot, whose model
+# comes from AGENT_BOT_MODEL. The OpenAI key it names is the placeholder the Crusoe proxy ignores.
+model:
+  provider: openai
+  credential_secret_ref: openai-api-key
+  default_model: nvidia/Nemotron-3.5-Lightning-30B-A3B

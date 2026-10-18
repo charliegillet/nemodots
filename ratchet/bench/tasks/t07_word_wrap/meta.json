@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "split": "train",
+  "tags": ["strings", "formatting", "edge-cases"],
+  "timeout_s": 20,
+  "pitfalls": [
+    "textwrap.wrap drops blank lines and joins paragraphs, so blank lines are not preserved.",
+    "Long words: not breaking them, or breaking without first finishing the current line.",
+    "Off-by-one on the fit check (len + 1 + len(word) <= width)."
+  ]
+}

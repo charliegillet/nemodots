@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "split": "train",
+  "tags": ["parsing", "comparison", "spec-following"],
+  "timeout_s": 20,
+  "pitfalls": [
+    "String comparison of version parts ('1.10.0' < '1.9.0').",
+    "Prerelease precedence: release > prerelease, numeric < alphanumeric, numeric identifiers compared as ints.",
+    "Not ignoring build metadata, or accepting malformed versions / leading zeros."
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "split": "train",
+  "tags": ["parsing", "validation", "edge-cases"],
+  "timeout_s": 20,
+  "pitfalls": [
+    "Assuming a fixed d-h-m-s order or no whitespace between number and unit.",
+    "Silently accepting garbage: regex findall skips bad characters, negatives, decimals and repeated units.",
+    "Treating '0s' or an all-zero duration as invalid."
+  ]
+}

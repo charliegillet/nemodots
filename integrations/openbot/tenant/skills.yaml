@@ -1,0 +1,9 @@
+# The Ratchet playbook as an OpenBot skill. `setup.sh --stack` replaces the instructions below with
+# the incumbent playbook (runs/versions/vN/playbook.md from runs/history.json, else playbooks/v0.md).
+# At run time OpenBotWorker keeps it current with POST /api/plugins/skills (an upsert on the slug).
+skills:
+  - slug: ratchet-playbook
+    title: Ratchet playbook
+    summary: How the Ratchet coworker solves Python tasks; rewritten by Ratchet and kept only if it wins on the sealed holdout.
+    instructions: |-
+      {{PLAYBOOK}}

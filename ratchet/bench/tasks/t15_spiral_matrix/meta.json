@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "split": "holdout",
+  "tags": ["matrices", "iteration", "boundaries"],
+  "timeout_s": 20,
+  "pitfalls": [
+    "Non-square matrices: missing the top <= bottom / left <= right re-checks duplicates the middle row or column.",
+    "Single row, single column and empty ([], [[]]) matrices.",
+    "Destructive implementations that pop rows from the caller's matrix."
+  ]
+}

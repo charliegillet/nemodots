@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "split": "holdout",
+  "tags": ["dates", "arithmetic", "edge-cases"],
+  "timeout_s": 20,
+  "pitfalls": [
+    "Not clamping to the month end (date(2023, 2, 31) raises) or clamping to a fixed 28.",
+    "Leap years (1900 vs 2000), and month arithmetic with negative offsets (use divmod on a month index).",
+    "timedelta(days=30*n) approximations; out-of-range years not raising ValueError."
+  ]
+}

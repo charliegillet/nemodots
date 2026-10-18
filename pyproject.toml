@@ -1,0 +1,32 @@
+[project]
+name = "ratchet"
+version = "0.1.0"
+description = "Self-improving agent playbooks gated by a sealed holdout set (Crusoe Recursive Agents hackathon)"
+requires-python = ">=3.12"
+dependencies = [
+  "openai>=1.50,<4",
+  "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-timeout>=2.3"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["ratchet*"]
+
+[tool.setuptools.package-data]
+"ratchet.bench" = ["tasks/*/*", "split.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q -p no:cacheprovider"
+timeout = 120
+markers = [
+  "network: needs Crusoe/You.com network access (never run in CI; opt in with RATCHET_NETWORK_TESTS=1)",
+  "docker: needs a running docker daemon (opt in with RATCHET_DOCKER_TESTS=1)",
+]

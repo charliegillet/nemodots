@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "split": "holdout",
+  "tags": ["recursion", "dicts", "edge-cases"],
+  "timeout_s": 20,
+  "pitfalls": [
+    "Empty nested dicts silently disappear when recursion produces no keys.",
+    "Flattening lists/tuples or dropping falsy values with `if value:` checks.",
+    "Collisions between 'a.b' and {'a': {'b': ...}} silently overwrite instead of raising."
+  ]
+}

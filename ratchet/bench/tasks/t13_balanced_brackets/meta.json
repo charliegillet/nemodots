@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "split": "holdout",
+  "tags": ["parsing", "stack", "state-machine"],
+  "timeout_s": 20,
+  "pitfalls": [
+    "A plain stack counter treats brackets inside string literals as code.",
+    "Escaped quotes (\\\") and escaped backslashes (\\\\) inside strings change where a string ends.",
+    "Unterminated strings must make the result False."
+  ]
+}

@@ -1,3 +1,21 @@
 .env
 .env.*
 !.env.example
+!integrations/openbot/.env.openbot.example
+vendor/
+.venv/
+__pycache__/
+.pytest_cache/
+runs/
+*.pyc
+
+# local Claude Code MCP config (not part of the product)
+.mcp.json
+
+# raw research dumps (crawls, search JSON, paper text); the synthesized notes in docs/research/*.md are kept
+docs/research/raw/
+
+# build and tool caches
+*.egg-info/
+.ruff_cache/
+.DS_Store

@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "split": "train",
+  "tags": ["parsing", "validation", "round-trip"],
+  "timeout_s": 20,
+  "pitfalls": [
+    "from_roman that sums symbols without checking canonical form accepts IIII, VX or IC.",
+    "Forgetting lowercase input, or the 1..3999 range checks on to_roman."
+  ]
+}

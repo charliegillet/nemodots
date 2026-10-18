@@ -1,0 +1,20 @@
+# Ratchet tenant package for OpenBot (stack mode). Rendered into vendor/openbot/examples/ratchet by
+# `bash integrations/openbot/setup.sh --stack`; the server loads it via TENANT_PACKAGE_DIR.
+#
+# The coworker is OpenBot's shipped agent-bot, addressed exactly the way the fintech example addresses
+# it: an AG-UI endpoint read from MANAGED_AGENT_AG_UI_URL. Its model is the Ratchet worker model
+# (AGENT_BOT_MODEL, default nvidia/Nemotron-3.5-Lightning-30B-A3B), answered by Crusoe through
+# integrations/openbot/crusoe_proxy.py.
+agents:
+  - id: ratchet-coworker
+    name: Ratchet Coworker
+    title: Python Tasks
+    role_description: >-
+      Solve small Python coding tasks in your workspace. Read the task, write solution.py, test your
+      own work, and call submit when you are done. Follow the ratchet-playbook skill: it is the team's
+      current playbook, rewritten after failures and kept only when it wins on a sealed holdout set.
+    avatar_seed: ratchet-coworker
+    type: remote-ag-ui
+    endpoint: ${MANAGED_AGENT_AG_UI_URL:-http://localhost:4200/ag-ui}
+    skills:
+      - ratchet-playbook

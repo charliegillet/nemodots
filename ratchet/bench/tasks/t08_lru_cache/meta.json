@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "split": "train",
+  "tags": ["data-structures", "classes", "edge-cases"],
+  "timeout_s": 20,
+  "pitfalls": [
+    "Capacity 0: evicting from an empty dict raises, or the entry is stored anyway.",
+    "put on an existing key must refresh recency (and must not evict); __contains__ must not.",
+    "Stored None values confused with misses (`if self.data.get(key)`)."
+  ]
+}

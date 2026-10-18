@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "split": "train",
+  "tags": ["strings", "unicode", "edge-cases"],
+  "timeout_s": 20,
+  "pitfalls": [
+    "Without NFKD normalization accented letters vanish ('crme-brle') instead of being transliterated.",
+    "Naive text[:max_length] cuts words in half or leaves a trailing separator.",
+    "The first-word-too-long exception and multi-character separators in the length budget."
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "split": "holdout",
+  "tags": ["parsing", "scheduling", "spec-following"],
+  "timeout_s": 20,
+  "pitfalls": [
+    "Python weekday() is Monday=0; cron is Sunday=0 and 7 is also Sunday.",
+    "When both day-of-month and day-of-week are restricted, cron ORs them instead of ANDing.",
+    "Steps (*/15, a-b/s), inclusive ranges and validation of out-of-range values."
+  ]
+}

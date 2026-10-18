@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "split": "holdout",
+  "tags": ["parsing", "units", "numeric-precision"],
+  "timeout_s": 20,
+  "pitfalls": [
+    "Treating GB and GiB the same (1000 vs 1024).",
+    "float(x) * unit then int() truncates 4349999.999 instead of exact 4350000; round() uses banker's rounding.",
+    "Accepting single-letter units, signs, or thousands separators."
+  ]
+}

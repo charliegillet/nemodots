@@ -1,0 +1,31 @@
+{
+  "holdout": [
+    "t11_add_months",
+    "t12_human_size",
+    "t13_balanced_brackets",
+    "t14_top_k_frequent",
+    "t15_spiral_matrix",
+    "t16_camel_snake",
+    "t17_flatten_dict",
+    "t18_cron_match",
+    "t19_money_split",
+    "t20_dedent_lines",
+    "t21_insert_position",
+    "t22_json_path_get",
+    "t23_anagram_groups",
+    "t24_format_elapsed"
+  ],
+  "schema": 1,
+  "train": [
+    "t01_slugify",
+    "t02_parse_duration",
+    "t03_merge_intervals",
+    "t04_roman_numerals",
+    "t05_csv_split_line",
+    "t06_semver_compare",
+    "t07_word_wrap",
+    "t08_lru_cache",
+    "t09_query_string",
+    "t10_run_length"
+  ]
+}

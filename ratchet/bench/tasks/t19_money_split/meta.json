@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "split": "holdout",
+  "tags": ["arithmetic", "money", "rounding"],
+  "timeout_s": 20,
+  "pitfalls": [
+    "divmod on a negative total gives [-3, -3, -4] instead of mirroring the positive split.",
+    "allocate: handing leftover cents to the first parties instead of the largest remainders.",
+    "Float arithmetic loses cents on large totals; n == 0 / empty or zero-sum weights must raise."
+  ]
+}

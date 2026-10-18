@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "split": "holdout",
+  "tags": ["parsing", "nested-data", "defaults"],
+  "timeout_s": 20,
+  "pitfalls": [
+    "Strings are indexable in Python, so 'text[0]' returns 'x' unless index steps are limited to lists/tuples.",
+    "Returning default for a present None (`or default`), or treating 'a.0' as a list index.",
+    "Lenient parsers that skip empty steps instead of raising on malformed paths; parsing lazily so bad paths only raise when data exists."
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "split": "holdout",
+  "tags": ["counting", "sorting", "ordering"],
+  "timeout_s": 20,
+  "pitfalls": [
+    "Sorting by (-count, item) breaks ties alphabetically instead of by first occurrence.",
+    "heapq.nlargest / set iteration lose the first-occurrence tie order.",
+    "k > n, k == 0 and negative k."
+  ]
+}

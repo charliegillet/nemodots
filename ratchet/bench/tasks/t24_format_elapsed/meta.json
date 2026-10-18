@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "split": "holdout",
+  "tags": ["formatting", "rounding", "time"],
+  "timeout_s": 20,
+  "pitfalls": [
+    "round() is banker's rounding (2.5 -> 2); int() truncates (59.5 -> 59s instead of 1m).",
+    "Printing zero units ('1h 0m 5s') or returning '' instead of '0s' for zero.",
+    "Rounding must happen before splitting into units so 59.5 carries into a minute."
+  ]
+}

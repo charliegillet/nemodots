@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "split": "holdout",
+  "tags": ["binary-search", "sorting", "performance"],
+  "timeout_s": 20,
+  "pitfalls": [
+    "bisect has no descending mode; key=lambda v: -v fails for strings.",
+    "left/right handling of duplicates in the descending case.",
+    "Linear scans or list(a) copies violate the read budget on large sequences."
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "split": "holdout",
+  "tags": ["hashing", "strings", "ordering"],
+  "timeout_s": 20,
+  "pitfalls": [
+    "Returning lowercased / space-stripped strings instead of the originals.",
+    "Sorting groups or words, or using sets (loses duplicates and order).",
+    "Removing all whitespace or punctuation instead of only spaces."
+  ]
+}

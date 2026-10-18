@@ -1,0 +1,4 @@
+# Required by OpenBot's tenant package loader (server/src/tenant-package.ts).
+tenant:
+  id: ratchet
+  product_name: Ratchet

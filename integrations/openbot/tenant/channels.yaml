@@ -1,0 +1,6 @@
+channels:
+  - id: ratchet
+    name: Ratchet
+    description: Python tasks for the Ratchet coworker.
+    permitted_agents: [ratchet-coworker]
+    allowed_groups: [all]

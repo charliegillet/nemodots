@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "split": "train",
+  "tags": ["encoding", "round-trip", "escaping"],
+  "timeout_s": 20,
+  "pitfalls": [
+    "Digits inside the input make the naive '<count><char>' format ambiguous without escaping.",
+    "Single-digit counts only (breaks at runs of 10+), or omitting count 1.",
+    "Decoder that silently accepts malformed input instead of raising ValueError."
+  ]
+}

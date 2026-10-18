@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "split": "holdout",
+  "tags": ["strings", "regex", "naming"],
+  "timeout_s": 20,
+  "pitfalls": [
+    "One-regex solutions turn HTTPServer into h_t_t_p_server or httpserver.",
+    "Digits: v2Beta -> v2_beta but base64 must not become base_64.",
+    "Doubling underscores on foo_Bar; to_camel not lowercasing the rest of each part."
+  ]
+}

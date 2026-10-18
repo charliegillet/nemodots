@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "split": "train",
+  "tags": ["parsing", "web", "encoding"],
+  "timeout_s": 20,
+  "pitfalls": [
+    "urllib.parse.parse_qs returns lists for every key and drops keys without values.",
+    "Decoding before splitting turns %26 / %3D into separators; decoding %2B before '+' gives a space.",
+    "Keys without '=' and repeated keys (string vs list) handled inconsistently."
+  ]
+}

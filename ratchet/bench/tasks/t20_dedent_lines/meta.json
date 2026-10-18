@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "split": "holdout",
+  "tags": ["strings", "text-processing", "edge-cases"],
+  "timeout_s": 20,
+  "pitfalls": [
+    "Whitespace-only lines counted when computing the common prefix (prefix becomes empty).",
+    "Treating tabs as spaces (expandtabs) or comparing indentation by length instead of characters.",
+    "textwrap.dedent alone keeps the leading newline; removing more than one leading newline."
+  ]
+}
