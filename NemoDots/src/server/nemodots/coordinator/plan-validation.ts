@@ -207,5 +207,16 @@ export function childCapabilities(
   role: TaskRole,
   parentCapabilities: readonly Capability[],
 ): Capability[] {
+  // Demo branch (nemodots-demo): a specialist delegated by a task that may
+  // delegate keeps its role's propose capabilities, so the investigator ->
+  // specialist -> verifier path can remediate. Every other child is still the
+  // intersection of its role defaults and the parent's capabilities.
+  if (
+    (role === 'cache_specialist' ||
+      role === 'database_specialist' ||
+      role === 'routing_specialist') &&
+    parentCapabilities.includes('delegate')
+  )
+    return allowedCapabilities(role, null);
   return allowedCapabilities(role, parentCapabilities);
 }

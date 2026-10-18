@@ -464,7 +464,19 @@ export function createActions(deps: ActionsDeps) {
       if (mission.rows[0]?.status !== 'running')
         return block(client, row, 'commit', 'mission_not_running', 'mission is not running', [], 0);
       let checked: CheckedVector = [];
+      // Target row FOR UPDATE first: the version the proposal was bound to
+      // must still be the live one, checked in the transaction that writes.
       const live = await liveTargetVersion(client, row.target_source_key);
+      if (live !== Number(row.expected_target_version))
+        return block(
+          client,
+          row,
+          'commit',
+          'stale_version',
+          `${row.target_source_key}: proposal bound to v${row.expected_target_version}, live v${live} (checked under FOR UPDATE in the commit transaction)`,
+          [],
+          live,
+        );
       try {
         checked = await checkVector(client, vector);
       } catch (error) {

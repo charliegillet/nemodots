@@ -537,6 +537,16 @@ export async function createNemoDotsRuntime(env = process.env) {
   return {
     routes,
     async start() {
+      // Missions left running by a previous server process are cancelled:
+      // this demo runtime does not resume them.
+      const leftovers = await app.query<{ id: string }>(
+        "SELECT id FROM coordinator.missions WHERE status IN ('running','paused','awaiting_acceptance')",
+      );
+      for (const row of leftovers.rows)
+        await coordinator.control
+          .cancel(row.id as MissionId)
+          .then(() => log(`cancelled leftover mission ${row.id}`))
+          .catch(() => {});
       await coordinator.outbox.start();
       watcher.start();
       host.start();

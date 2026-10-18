@@ -88,7 +88,9 @@ export function createWatcher(deps: WatcherDeps) {
     const scope = deps.scopeFor(missionId);
     const read = await deps.readers.read(sourceKey, scope);
     const result = await withTransaction(deps.pool, async (client) => {
-      const registered = await registerObservation(client, {
+      const registered = await registerObservation(
+        client,
+        {
         source: {
           key: sourceKey,
           sourceType: 'controlled_config',
@@ -101,7 +103,11 @@ export function createWatcher(deps: WatcherDeps) {
           causedByActionId: causedByActionId as never,
           selfWrite: causedByActionId ? 'verified' : 'none',
         },
-      });
+        },
+        // Demo: a verified self-write (our own committed action) settles the
+        // action's postcondition instead of invalidating the proposer.
+        causedByActionId ? { marker: null } : {},
+      );
       await emitReceipt(deps.events, client, missionId, registered);
       return registered;
     });
@@ -113,7 +119,8 @@ export function createWatcher(deps: WatcherDeps) {
             : ''
         }`,
       );
-    if (result.invalidation) await deps.onInvalidation(result.invalidation);
+    if (result.invalidation && !causedByActionId)
+      await deps.onInvalidation(result.invalidation);
     if (causedByActionId)
       await deps.onSelfWrite(
         causedByActionId,

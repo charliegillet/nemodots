@@ -72,7 +72,11 @@ const ROLE_TEXT: Record<string, string> = {
 Roles you can use: investigator (observe, delegate, publish_finding), cache_specialist / database_specialist / routing_specialist (observe, delegate to a verifier, propose bounded config changes or cache flushes), verifier (observe, publish_finding).
 Give each task only the capabilities its role allows (subset of: observe, delegate, publish_finding, request_replan, propose_config_change, propose_cache_flush). Prefer investigators for root tasks: they diagnose and delegate fixes to specialists. One root task should diagnose and restore the failing checkout path; another should independently check that customer data (orders, inventory) stays intact. Use dependsOn only when a task truly needs another's output (indices into the list). Reply with the JSON plan only.`,
   investigator: `You are an investigator. Diagnose your task's question from live sources (health, metrics, config, cache stats). You cannot change anything yourself. If the evidence shows the checkout is degraded or failing and the cause is in your area, your task is NOT done until a specialist has handled it: call delegate_task with role cache_specialist, database_specialist or routing_specialist and a precise question naming the sources and receipt ids, then call wait_for_children, then report what the specialist and its verifier found. Only report without delegating when your area shows no fault.`,
-  cache_specialist: `You are the cache specialist. Confirm the diagnosis from live sources (re-observe the config keys you would change), then propose_action with the smallest bounded remediation. For set_config copy valueDigest from your observe_source result of that key into expectedCurrentValueDigest. If the action is committed, delegate_task to a verifier to independently confirm checkout health, wait_for_children, then report. If it is blocked, re-observe the sources and decide again.`,
+  cache_specialist: `You are the cache specialist and the only agent allowed to change cache configuration. Steps, in order:
+1. Observe the evidence you need (checkout.metrics, redis.stats, and the checkout.config/<key> you will change). Do not delegate yet.
+2. Read the remediation-policy runbook, then call propose_action with the smallest bounded remediation that fixes the diagnosed fault (set_config on one key, or flush_cache_namespace). For set_config copy valueDigest from your latest observe_source of that key into expectedCurrentValueDigest. Publishing a finding is NOT a fix.
+3. If the result is "blocked", the evidence changed: re-observe the key and propose again based on the new value.
+4. Only after an action is "committed" or "verified": delegate_task to a verifier asking it to confirm checkout health from live sources, call wait_for_children, then reply with your summary.`,
   database_specialist: `You are the database specialist. Confirm from live sources, propose_action only if a config change is clearly needed (copy valueDigest from observe_source into expectedCurrentValueDigest), and after a committed action delegate_task to a verifier, wait_for_children, then report.`,
   routing_specialist: `You are the routing specialist. Confirm from live sources, propose_action only if a config change is clearly needed (copy valueDigest from observe_source into expectedCurrentValueDigest), and after a committed action delegate_task to a verifier, wait_for_children, then report.`,
   verifier: `You are a verifier. Independently observe the live sources needed to answer your question (health, metrics, recent orders, inventory). Publish a finding with the receipt ids that support it, then report pass or fail with reasons.`,
@@ -353,9 +357,11 @@ export function createTeamHandler(deps: TeamDeps): AttemptHandler {
           const tool = call.name as TeamToolName;
           if (!tools.includes(tool))
             throw new Error(`tool ${call.name} is not available to you`);
-          const args = TEAM_TOOL_INPUTS[tool].parse(
-            JSON.parse(call.arguments || '{}'),
-          );
+          const raw = JSON.parse(call.arguments || '{}');
+          // Children run independently in the demo: dependsOn is not used.
+          if (tool === 'delegate_task' && raw && typeof raw === 'object')
+            raw.dependsOn = [];
+          const args = TEAM_TOOL_INPUTS[tool].parse(raw);
           const ran = await runTool(tool, args, {
             claimed,
             modelCallId,
@@ -409,23 +415,31 @@ export function createTeamHandler(deps: TeamDeps): AttemptHandler {
           throw new Error('that source is not observable with this tool');
         const scope = deps.scopeFor(context.missionId);
         const read = await deps.readers.read(key, scope);
+        const controlled = sourceRef(key).authority === 'controlled';
         const registered = await withTransaction(deps.pool, async (client) => {
-          const result = await registerObservation(client, {
-            source: { key, ...sourceRef(key), scope },
-            normalizedValue: read.normalizedValue,
-            provenance: {
-              kind: 'tool_call',
-              toolCallId: ctx.toolCallId,
-              modelCallId: ctx.modelCallId,
-              attemptId: context.attemptId,
+          const result = await registerObservation(
+            client,
+            {
+              source: { key, ...sourceRef(key), scope },
+              normalizedValue: read.normalizedValue,
+              provenance: {
+                kind: 'tool_call',
+                toolCallId: ctx.toolCallId,
+                modelCallId: ctx.modelCallId,
+                attemptId: context.attemptId,
+              },
             },
-          });
-          await recordReadSet(client, {
-            missionId: context.missionId,
-            taskId: context.taskId,
-            attemptId: context.attemptId,
-            receiptIds: [result.receipt.id],
-          });
+            // Demo: observed endpoints are context, not dependencies; only
+            // controlled config receipts drive invalidation closures.
+            controlled ? {} : { marker: null },
+          );
+          if (controlled)
+            await recordReadSet(client, {
+              missionId: context.missionId,
+              taskId: context.taskId,
+              attemptId: context.attemptId,
+              receiptIds: [result.receipt.id],
+            });
           await emitReceipt(deps.events, client, context.missionId, result);
           return result;
         });
@@ -435,7 +449,7 @@ export function createTeamHandler(deps: TeamDeps): AttemptHandler {
           sourceRevision: receipt.sourceRevision,
           receiptId: receipt.id,
         };
-        await coordinator.addReadSet(context, [entry]);
+        if (controlled) await coordinator.addReadSet(context, [entry]);
         const value = read.normalizedValue as { value?: unknown };
         return {
           output: {
@@ -447,7 +461,7 @@ export function createTeamHandler(deps: TeamDeps): AttemptHandler {
               ? { valueDigest: configValueDigest(value.value as never) }
               : {}),
           },
-          entries: [entry],
+          entries: controlled ? [entry] : [],
         };
       }
       case 'list_runbooks':
@@ -467,7 +481,7 @@ export function createTeamHandler(deps: TeamDeps): AttemptHandler {
           title: args.title,
           role: args.role,
           question: args.question,
-          dependsOn: args.dependsOn ?? [],
+          dependsOn: [],
           justification: args.justification,
           dependencyVector: ctx.vector,
           createdByModelCallId: ctx.modelCallId,
@@ -531,7 +545,9 @@ export function createTeamHandler(deps: TeamDeps): AttemptHandler {
       case 'publish_finding': {
         const published = await coordinator.publishFinding(context, {
           claim: args.claim,
-          supportingReceiptIds: args.supportingReceiptIds,
+          supportingReceiptIds: args.supportingReceiptIds.filter((id: string) =>
+            ctx.vector.some((entry) => entry.receiptId === id),
+          ),
           confidence: args.confidence,
           dependencyVector: ctx.vector,
         });
