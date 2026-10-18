@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import {
+  CONFIG_MEMBER_KEY_PATTERN,
   SOURCE_KEY_PATTERNS,
   type Environment,
   type MissionId,
@@ -149,12 +150,40 @@ export async function loadHeads(
         key: row.key,
         sourceType: row.source_type,
         authority: row.authority,
-        revision: row.source_revision === null ? null : Number(row.source_revision),
+        revision:
+          row.source_revision === null ? null : Number(row.source_revision),
         status: row.status,
         receiptId: row.id,
       },
     ]),
   );
+}
+
+/** The head receipt of one source (null when it has none), whatever its status. */
+export async function loadHead(
+  client: PgClient,
+  scope: WatchScope,
+  key: string,
+): Promise<{ revision: number; status: string; receiptId: string } | null> {
+  const { rows } = await client.query<{
+    source_revision: number;
+    status: string;
+    id: string;
+  }>(
+    `SELECT r.source_revision, r.status, r.id
+       FROM ledger.observation_receipts r
+       JOIN ledger.sources s ON s.id = r.source_id
+      WHERE s.owner_id = $1 AND s.environment = $2 AND s.resource = $3 AND s.key = $4
+      ORDER BY r.source_revision DESC LIMIT 1`,
+    [scope.ownerId, scope.environment, scope.resource, key],
+  );
+  return rows[0]
+    ? {
+        revision: Number(rows[0].source_revision),
+        status: rows[0].status,
+        receiptId: rows[0].id,
+      }
+    : null;
 }
 
 export interface Authority {
@@ -179,9 +208,7 @@ export async function loadAuthority(
   ]);
   return {
     collectionVersion: Number(collection.rows[0]?.version ?? 0),
-    members: new Map(
-      members.rows.map((row) => [row.key, Number(row.version)]),
-    ),
+    members: new Map(members.rows.map((row) => [row.key, Number(row.version)])),
   };
 }
 
@@ -212,6 +239,11 @@ export function parseSourceChanged(payload: string): SourceChanged | null {
   const parsed = SourceChangedSchema.safeParse(json);
   if (!parsed.success) return null;
   const key = parsed.data.key;
-  if (key !== COLLECTION_KEY && memberKeyOf(key) === null) return null;
+  const member = memberKeyOf(key);
+  if (
+    key !== COLLECTION_KEY &&
+    (member === null || !CONFIG_MEMBER_KEY_PATTERN.test(member))
+  )
+    return null;
   return { key, membershipChanged: parsed.data.membershipChanged === true };
 }

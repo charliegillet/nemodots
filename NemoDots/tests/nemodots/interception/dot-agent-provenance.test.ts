@@ -43,7 +43,10 @@ describe('provenance snapshot recording', () => {
     expect(ModelCallRecordSchema.safeParse(record).success).toBe(true);
     expect(ContextSnapshotSchema.safeParse(snapshot).success).toBe(true);
     expect(record.contextSnapshotId).toBe(snapshot.id);
-    expect(record.provider).toEqual({ host: 'unused.invalid', mode: 'fixture' });
+    expect(record.provider).toEqual({
+      host: 'unused.invalid',
+      mode: 'fixture',
+    });
     expect(record.model).toEqual({
       requested: 'custom-model',
       returned: 'custom-model',
@@ -251,7 +254,9 @@ describe('incident Dot tool refusal', () => {
     );
     expect(
       events.find((e) => e.type === EventType.TOOL_CALL_RESULT),
-    ).toMatchObject({ content: expect.stringContaining('Refused by NemoDots') });
+    ).toMatchObject({
+      content: expect.stringContaining('Refused by NemoDots'),
+    });
   });
 
   it('still lets an incident Dot read pages', async () => {
@@ -259,7 +264,9 @@ describe('incident Dot tool refusal', () => {
     const page = attachPage(f);
     setActivePolicy(createToolPolicy({ incidentDotIds: [f.dot.id] }));
     vi.spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce(toolCallResponse('read_space_page', { id: page.id }))
+      .mockResolvedValueOnce(
+        toolCallResponse('read_space_page', { id: page.id }),
+      )
       .mockResolvedValueOnce(textResponse('Read it.'));
     const events = await run(f);
     expect(
@@ -292,16 +299,18 @@ describe('zero impact when NemoDots is absent or idle', () => {
       const network = vi
         .spyOn(globalThis, 'fetch')
         .mockResolvedValueOnce(
-          toolCallResponse('create_space_page', { title: 'Same', content: 'x' }),
+          toolCallResponse('create_space_page', {
+            title: 'Same',
+            content: 'x',
+          }),
         )
         .mockResolvedValueOnce(textResponse('Created.'));
       const events = await run(f);
       return {
         events: events.map((e) => {
-          const { timestamp: _t, ...rest } = e as BaseEvent & {
-            messageId?: string;
-          };
-          return rest;
+          const rest: Record<string, unknown> = { ...e };
+          delete rest.timestamp;
+          return rest as { type: string };
         }),
         // Space and page ids are random per fixture; everything else must match.
         bodies: network.mock.calls.map((c) =>
@@ -340,13 +349,15 @@ describe('client tools stay client tools (I7)', () => {
     setActivePolicy(createToolPolicy({ incidentDotIds: [f.dot.id] }));
     const { runtime, calls } = recordingRuntime();
     setInterceptionRuntime(runtime);
-    const network = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      toolCallResponse(
-        'review_space_page',
-        { title: 'Draft', content: '# Draft', spaceId: f.dot.spaceId },
-        'review-1',
-      ),
-    );
+    const network = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        toolCallResponse(
+          'review_space_page',
+          { title: 'Draft', content: '# Draft', spaceId: f.dot.spaceId },
+          'review-1',
+        ),
+      );
     const before = f.workspace.pages.list(f.dot.spaceId);
     const events = await run(f, {
       ...f.input,
@@ -364,7 +375,9 @@ describe('client tools stay client tools (I7)', () => {
       ]),
     );
     // Nothing executed it server-side: no result, no refusal, no page.
-    expect(events.some((e) => e.type === EventType.TOOL_CALL_RESULT)).toBe(false);
+    expect(events.some((e) => e.type === EventType.TOOL_CALL_RESULT)).toBe(
+      false,
+    );
     expect(f.workspace.pages.list(f.dot.spaceId)).toEqual(before);
     expect(calls).toHaveLength(1);
     expect(calls[0].info.refusals).toEqual([]);
@@ -426,8 +439,7 @@ describe('per-turn services consult the module-level policy (I5)', () => {
       .mockResolvedValueOnce(textResponse('Refused.'));
     const events = await run(f);
     const result = events.find((e) => e.type === EventType.TOOL_CALL_RESULT) as
-      | { content: string }
-      | undefined;
+      { content: string } | undefined;
     expect(result?.content).toContain('Refused by NemoDots policy');
     // No MCP request left the process: only the two model requests happened.
     expect(network).toHaveBeenCalledTimes(2);
@@ -448,8 +460,7 @@ describe('per-turn services consult the module-level policy (I5)', () => {
       .mockResolvedValueOnce(textResponse('Refused.'));
     const events = await run(f);
     const result = events.find((e) => e.type === EventType.TOOL_CALL_RESULT) as
-      | { content: string }
-      | undefined;
+      { content: string } | undefined;
     expect(result?.content).toContain('Refused by NemoDots policy');
     for (const call of network.mock.calls)
       expect(String(call[0])).not.toContain('supervisor.invalid');

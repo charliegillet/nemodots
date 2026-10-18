@@ -23,7 +23,7 @@ export class ToolPolicyError extends Error {
 
 interface ToolLike {
   name: string;
-  execute?: ((args: any, context?: any) => any) | undefined;
+  execute?: ((args: never, context?: never) => unknown) | undefined;
 }
 
 export interface WithToolPolicyOptions {
@@ -44,7 +44,8 @@ export function withToolPolicy<T extends ToolLike>(
   return tools.map((tool) => {
     const execute = tool.execute;
     if (!execute) return tool;
-    const wrapped: T = {
+    const run = execute as (args: unknown, context?: unknown) => unknown;
+    const wrapped = {
       ...tool,
       execute: async (args: unknown, context?: unknown) => {
         const decision = options.policy().decideTool({
@@ -57,9 +58,9 @@ export function withToolPolicy<T extends ToolLike>(
           options.onRefusal?.({ toolName: tool.name, decision });
           throw new ToolPolicyError(tool.name, decision);
         }
-        return execute(args, context);
+        return run(args, context);
       },
-    };
+    } as T;
     return wrapped;
   });
 }

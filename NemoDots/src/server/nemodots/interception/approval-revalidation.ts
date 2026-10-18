@@ -16,8 +16,7 @@ import type {
 // execute on evidence nobody can check.
 
 export type EvidenceCheck =
-  | { ok: true }
-  | { ok: false; receiptId?: string; detail: string };
+  { ok: true } | { ok: false; receiptId?: string; detail: string };
 
 export interface ApprovalRevalidatorOptions {
   isIncidentDot: (dotId: string) => boolean;

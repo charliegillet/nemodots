@@ -96,9 +96,7 @@ export const textResponse = (content: string) =>
   completion({ role: 'assistant', content });
 
 /** A recording sink plus a resolver that gives every page/memory version a stable receipt. */
-export function recordingRuntime(
-  overrides: Partial<InterceptionRuntime> = {},
-) {
+export function recordingRuntime(overrides: Partial<InterceptionRuntime> = {}) {
   const calls: Array<{ input: ModelCallSinkInput; info: ModelCallSinkTurn }> =
     [];
   const errors: Array<{ error: unknown; where: string }> = [];

@@ -69,7 +69,10 @@ export interface IntentSettlementPort {
  * coordinator.control.pause and may ignore "mission is not pausable").
  */
 export interface WatcherRecovery extends RecoveryPort {
-  pauseMission(missionId: MissionId, reason: 'closure_cap_exceeded'): Promise<void>;
+  pauseMission(
+    missionId: MissionId,
+    reason: 'closure_cap_exceeded',
+  ): Promise<void>;
 }
 
 export interface WatcherConfig {
@@ -114,7 +117,11 @@ export type WatcherEvent =
       observed: number;
       current: number;
     }
-  | { type: 'self_write_settled'; actionId: string; outcome: 'verified' | 'failed' }
+  | {
+      type: 'self_write_settled';
+      actionId: string;
+      outcome: 'verified' | 'failed';
+    }
   | {
       type: 'closure_cap';
       sourceKey: string;
@@ -122,7 +129,12 @@ export type WatcherEvent =
       missionIds: string[];
     }
   | { type: 'member_removed'; sourceKey: string; invalidationId: string | null }
-  | { type: 'history_gap'; sourceKey: string; ledgerRevision: number; headVersion: number }
+  | {
+      type: 'history_gap';
+      sourceKey: string;
+      ledgerRevision: number;
+      headVersion: number;
+    }
   | { type: 'redelivered'; invalidationId: string }
   | { type: 'error'; where: string; message: string };
 

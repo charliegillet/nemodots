@@ -101,10 +101,20 @@ const PAGE_TOOLS = new Set([
 export function safeDigest(value: unknown): string {
   try {
     const plain =
-      value === undefined ? null : (JSON.parse(JSON.stringify(value)) as unknown);
+      value === undefined
+        ? null
+        : (JSON.parse(JSON.stringify(value)) as unknown);
     return digest(plain);
   } catch {
     return sha256Hex(String(value));
+  }
+}
+
+function jsonSchemaOf(schema: unknown): unknown {
+  try {
+    return convertSchemaToJsonSchema(schema as never) ?? null;
+  } catch {
+    return null;
   }
 }
 
@@ -116,19 +126,11 @@ export function toolSchemaHash(
   }[],
 ): string {
   const described = tools
-    .map((tool) => {
-      let schema: unknown = null;
-      try {
-        schema = convertSchemaToJsonSchema(tool.inputSchema as never) ?? null;
-      } catch {
-        schema = null;
-      }
-      return {
-        name: tool.name,
-        description: tool.description ?? '',
-        inputSchema: schema,
-      };
-    })
+    .map((tool) => ({
+      name: tool.name,
+      description: tool.description ?? '',
+      inputSchema: jsonSchemaOf(tool.inputSchema),
+    }))
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   return safeDigest(described);
 }
@@ -172,7 +174,7 @@ export function createProvenanceMiddleware(
   const receiptCache = new Map<string, DependencyEntry | null>();
   const started = new Map<string, { at: number; argumentsDigest: string }>();
   let baseUnresolved: string[] = [];
-  let readUnresolved: string[] = [];
+  const readUnresolved: string[] = [];
   let current: CallState | undefined;
   let localCall = 0;
 
@@ -204,7 +206,8 @@ export function createProvenanceMiddleware(
     const system = config.systemPrompts.map(promptText);
     const prefix = system.join('\n\n');
     const messages = config.messages.map(
-      (message) => JSON.parse(JSON.stringify(message)) as Record<string, unknown>,
+      (message) =>
+        JSON.parse(JSON.stringify(message)) as Record<string, unknown>,
     );
     const hash = toolSchemaHash(config.tools);
     const unresolved: string[] = [];
@@ -279,7 +282,8 @@ export function createProvenanceMiddleware(
       entries.push(...deps);
       historyItems.push({
         role,
-        digest: itemDigest as ContextSnapshot['injected']['historyItems'][number]['digest'],
+        digest:
+          itemDigest as ContextSnapshot['injected']['historyItems'][number]['digest'],
         dependencyReceiptIds: deps.map(
           (entry) => entry.receiptId,
         ) as ContextSnapshot['injected']['historyItems'][number]['dependencyReceiptIds'],
@@ -298,8 +302,7 @@ export function createProvenanceMiddleware(
     syncUnresolved();
     addToScopeVector(scope, dependencyVector);
 
-    const contextLength =
-      prefix.length + safeStringify(messages).length;
+    const contextLength = prefix.length + safeStringify(messages).length;
     const snapshot = {
       id: randomUUID(),
       contextSchemaVersion: 'v1',
@@ -345,7 +348,12 @@ export function createProvenanceMiddleware(
       finishedAt: now().toISOString(),
       httpStatus: null,
       usage: state.aborted
-        ? { promptTokens: null, completionTokens: null, cachedTokens: null, reasoningTokens: null }
+        ? {
+            promptTokens: null,
+            completionTokens: null,
+            cachedTokens: null,
+            reasoningTokens: null,
+          }
         : usage,
       finishReason: state.aborted ? 'cancelled' : state.finishReason,
       error: null,
@@ -360,8 +368,15 @@ export function createProvenanceMiddleware(
     const state = current;
     current = undefined;
     if (!state || !runtime) return;
-    const exchanges = telemetry ? await telemetry.takeCall(state.callIndex) : [];
-    if (exchanges.length === 0 && !state.runFinished && !state.usage && !state.error)
+    const exchanges = telemetry
+      ? await telemetry.takeCall(state.callIndex)
+      : [];
+    if (
+      exchanges.length === 0 &&
+      !state.runFinished &&
+      !state.usage &&
+      !state.error
+    )
       return; // onConfig fired but no model call followed (init pass).
     try {
       const attempts = attemptsOf(state, exchanges);
@@ -369,24 +384,30 @@ export function createProvenanceMiddleware(
       const returned =
         [...exchanges].reverse().find((e) => e.modelReturned)?.modelReturned ??
         null;
-      const toolCalls = [...state.toolCalls.entries()].map(([toolCallId, call]) => {
-        let args: unknown = call.input;
-        if (args === undefined) {
-          try {
-            args = call.args ? JSON.parse(call.args) : {};
-          } catch {
-            args = call.args;
+      const toolCalls = [...state.toolCalls.entries()].map(
+        ([toolCallId, call]) => {
+          let args: unknown = call.input;
+          if (args === undefined) {
+            try {
+              args = call.args ? JSON.parse(call.args) : {};
+            } catch {
+              args = call.args;
+            }
           }
-        }
-        return {
-          toolCallId,
-          name: call.name,
-          argumentsDigest: safeDigest(args) as ModelCallRecord['toolCalls'][number]['argumentsDigest'],
-        };
-      });
+          return {
+            toolCallId,
+            name: call.name,
+            argumentsDigest: safeDigest(
+              args,
+            ) as ModelCallRecord['toolCalls'][number]['argumentsDigest'],
+          };
+        },
+      );
       const failed =
         !!state.error ||
-        (!!last.error && last.error.class !== 'cancelled' && !state.runFinished);
+        (!!last.error &&
+          last.error.class !== 'cancelled' &&
+          !state.runFinished);
       const outcome: ModelCallOutcome = state.aborted
         ? 'aborted'
         : failed

@@ -295,7 +295,10 @@ export class ConnectionService {
       via,
     });
     if (!decision.allow)
-      return { isError: true, text: `Refused by NemoDots policy: ${decision.reason}` };
+      return {
+        isError: true,
+        text: `Refused by NemoDots policy: ${decision.reason}`,
+      };
     try {
       return await this.session(
         this.store.credentials(exposed.connection.id),

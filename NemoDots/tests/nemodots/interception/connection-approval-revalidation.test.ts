@@ -65,7 +65,9 @@ function world(options: { incident?: boolean } = {}) {
   // The Dot is incident or not; approvals are always revalidated.
   const superseded = new Set<string>();
   const checks: string[][] = [];
-  const checkCurrent = async (ids: readonly string[]): Promise<EvidenceCheck> => {
+  const checkCurrent = async (
+    ids: readonly string[],
+  ): Promise<EvidenceCheck> => {
     checks.push([...ids]);
     const bad = ids.find((id) => superseded.has(id));
     return bad
@@ -129,7 +131,8 @@ async function approvalThroughExecutor(
   const request = events.find(
     (e) =>
       e.type === EventType.TOOL_CALL_START &&
-      (e as { toolCallName?: string }).toolCallName === connectionActionTool.name,
+      (e as { toolCallName?: string }).toolCallName ===
+        connectionActionTool.name,
   ) as { toolCallId: string } | undefined;
   // The approval id the model was handed.
   const approvalId = (
@@ -206,7 +209,11 @@ describe('approval created through the tool executor path', () => {
         .run({
           ...f.input,
           tools: [
-            { name: connectionActionTool.name, description: '', parameters: {} },
+            {
+              name: connectionActionTool.name,
+              description: '',
+              parameters: {},
+            },
           ],
         })
         .pipe(toArray()),
@@ -218,7 +225,9 @@ describe('approval created through the tool executor path', () => {
     ).db
       .prepare('SELECT id FROM mcp_approvals')
       .all()[0];
-    expect(f.workspace.connections.approval(row.id)!.dependencyVector).toBeNull();
+    expect(
+      f.workspace.connections.approval(row.id)!.dependencyVector,
+    ).toBeNull();
   });
 });
 
@@ -226,7 +235,8 @@ describe('revalidation in front of the approval callback', () => {
   it('returns 409 stale_evidence when a bound receipt was superseded, runs nothing and claims nothing', async () => {
     const w = world();
     const { approvalId } = await approvalThroughExecutor(w);
-    const vector = w.workspace.connections.approval(approvalId)!.dependencyVector!;
+    const vector =
+      w.workspace.connections.approval(approvalId)!.dependencyVector!;
     w.superseded.add(vector[0].receiptId);
 
     const response = await w.post('approve-1', approvalId);
@@ -234,8 +244,12 @@ describe('revalidation in front of the approval callback', () => {
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({ error: 'stale_evidence' });
     expect(w.sent).not.toHaveBeenCalled();
-    expect(w.workspace.connections.action('thread', 'approve-1')).toBeUndefined();
-    expect(w.workspace.connections.actionForApproval(approvalId)).toBeUndefined();
+    expect(
+      w.workspace.connections.action('thread', 'approve-1'),
+    ).toBeUndefined();
+    expect(
+      w.workspace.connections.actionForApproval(approvalId),
+    ).toBeUndefined();
     // The approval record itself is untouched.
     expect(w.workspace.connections.approval(approvalId)).toBeDefined();
   });
@@ -264,7 +278,8 @@ describe('revalidation in front of the approval callback', () => {
     const w = world();
     const { approvalId } = await approvalThroughExecutor(w);
     expect((await w.post('approve-1', approvalId)).status).toBe(200);
-    const vector = w.workspace.connections.approval(approvalId)!.dependencyVector!;
+    const vector =
+      w.workspace.connections.approval(approvalId)!.dependencyVector!;
     w.superseded.add(vector[0].receiptId);
     const retry = await w.post('approve-1', approvalId);
     expect(retry.status).toBe(200);
@@ -305,7 +320,9 @@ describe('revalidation in front of the approval callback', () => {
     expect(response.status).toBe(503);
     expect(JSON.stringify(await response.json())).not.toContain('ledger');
     expect(w.sent).not.toHaveBeenCalled();
-    expect(w.workspace.connections.action('thread', 'approve-1')).toBeUndefined();
+    expect(
+      w.workspace.connections.action('thread', 'approve-1'),
+    ).toBeUndefined();
   });
 
   it('passes straight through when no policy is installed (upstream behaviour)', async () => {

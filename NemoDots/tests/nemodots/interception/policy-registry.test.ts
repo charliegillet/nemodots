@@ -15,10 +15,7 @@ import {
   setActivePolicy,
   TOOL_POLICY_ENTRIES,
 } from '../../../src/server/nemodots/interception/index.js';
-import {
-  dotFixture,
-  textResponse,
-} from './helpers.js';
+import { dotFixture, textResponse } from './helpers.js';
 
 describe('registry completeness', () => {
   it('maps every page tool OpenDots registers', () => {
@@ -172,7 +169,11 @@ describe('registry completeness', () => {
           ...f.input,
           tools: [
             { name: pageReviewTool.name, description: '', parameters: {} },
-            { name: connectionActionTool.name, description: '', parameters: {} },
+            {
+              name: connectionActionTool.name,
+              description: '',
+              parameters: {},
+            },
           ],
         })
         .pipe(toArray()),

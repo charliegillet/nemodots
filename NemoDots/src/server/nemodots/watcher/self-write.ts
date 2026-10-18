@@ -1,13 +1,6 @@
-import type {
-  ActionId,
-  PgClient,
-  SelfWrite,
-} from '../contracts/index.js';
+import type { ActionId, PgClient, SelfWrite } from '../contracts/index.js';
 import { checkoutSchema, type LedgerOptions } from '../ledger/index.js';
-import {
-  memberSourceKey,
-  type HeadRow,
-} from './sources.js';
+import { memberSourceKey, type HeadRow } from './sources.js';
 import type {
   ExpectedWrite,
   IntentSettlementPort,
@@ -155,7 +148,12 @@ export async function walkHistory(
   },
 ): Promise<Classification> {
   if (input.headVersion <= input.ledgerRevision)
-    return { selfWrite: 'none', causedByActionId: null, settlements: [], gap: false };
+    return {
+      selfWrite: 'none',
+      causedByActionId: null,
+      settlements: [],
+      gap: false,
+    };
   const rows = await readHistory(
     client,
     input.key,
@@ -165,7 +163,9 @@ export async function walkHistory(
   );
   const ids = [
     ...new Set(
-      rows.flatMap((row) => (row.causedByActionId ? [row.causedByActionId] : [])),
+      rows.flatMap((row) =>
+        row.causedByActionId ? [row.causedByActionId] : [],
+      ),
     ),
   ];
   const expected = ids.length
@@ -198,7 +198,10 @@ export async function applySettlements(
   for (const settlement of settlements) {
     if (settlement.alreadySettled) continue;
     try {
-      await recovery.onSelfWriteSettled(settlement.actionId, settlement.outcome);
+      await recovery.onSelfWriteSettled(
+        settlement.actionId,
+        settlement.outcome,
+      );
       done.push({ actionId: settlement.actionId, outcome: settlement.outcome });
       emit({
         type: 'self_write_settled',

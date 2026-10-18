@@ -51,21 +51,26 @@ Nothing prints a value from `roles.env` or `.env`. Do not copy role URLs into `.
 
 ```sh
 cp .env.example .env
+chmod 600 .env
 ```
 
-Set your Crusoe key without it appearing on screen, in shell history or in a process list (`read -s` does not echo; `printf` is a shell builtin):
+`cp` creates `.env` with your default umask (usually 0644, readable by every user on the machine), so the `chmod 600` matters: `.env` will hold your Crusoe key.
+
+Set your Crusoe key without it appearing on screen, in shell history or in a process list. The prompt below uses `stty -echo` and `printf`, which behave the same in zsh (the macOS default) and bash. Do not use `read -p`: in zsh `-p` means "read from a coprocess" and the key is silently lost. If the key is empty the node step prints `empty key: .env not changed`, exits non-zero and writes nothing, and you do not see `key saved to .env`.
 
 ```sh
-read -rs -p 'Crusoe API key (hidden): ' KEY; echo
+printf 'Crusoe API key (hidden): '; stty -echo; IFS= read -r KEY; stty echo; echo
 printf '%s' "$KEY" | node -e '
 const fs = require("fs");
 const key = fs.readFileSync(0, "utf8").trim();
+if (!key) { console.error("empty key: .env not changed"); process.exit(1); }
 let text = fs.readFileSync(".env", "utf8");
 const line = /^OPENAI_API_KEY=.*$/m;
 text = line.test(text)
   ? text.replace(line, () => "OPENAI_API_KEY=" + key)
   : text + "\nOPENAI_API_KEY=" + key + "\n";
-fs.writeFileSync(".env", text, { mode: 0o600 });'
+fs.writeFileSync(".env", text);
+fs.chmodSync(".env", 0o600);' && echo 'key saved to .env'
 unset KEY
 ```
 
@@ -117,6 +122,8 @@ npm run nemodots:seed
 
 ## 5. Run
 
+> **NOT YET VERIFIED, depends on W5.1.** The bootstrap that mounts the NemoDots router in `src/server/index.ts` (package W5.1: `bootstrap.ts`, `health.ts`, `worker-main.ts`, `scripts/nemodots/dev.mjs`) was not in the tree when this page was last checked. Until it lands: `GET /api/nemodots/health` returns 404; `npm run dev` does not read `roles.env` by itself; `npm run nemodots:worker` is not defined in `package.json`; `npm run nemodots:evals` (needs `src/server/nemodots/evals/cli.ts`) and `npm run nemodots:report` (needs `scripts/nemodots/report.mjs`) fail because those files are missing. What this page says about them is written from the design documents, not from running code. What has been run end to end is sections 1 to 4 and the checkout `/health` on port 4510. Re-verify sections 5 and 6, the role-URL table and the tests table after W5.1 lands.
+
 ```sh
 npm run dev
 ```
@@ -134,6 +141,8 @@ The in-process worker host and the separate worker process use the same handler.
 A built app instead of the dev servers: `npm run build && npm start`, then open `http://127.0.0.1:4310`.
 
 ## 6. Health checks
+
+> Not yet verified against running code: see the W5.1 note under section 5.
 
 ```sh
 npm run nemodots:stack -- status
@@ -160,6 +169,8 @@ Use the Dot ids from the OpenDots UI or its API. Comma-separated, whitespace is 
 
 ## Which process holds which role URL
 
+> Not yet verified against running code: see the W5.1 note under section 5.
+
 The database has five roles with separate passwords: `nemodots_admin`, `nemodots_app`, `nemodots_checkout`, `nemodots_injector`, `nemodots_verifier`. Their URLs and `NEMODOTS_PROBE_SECRET` live in `.local/<instance>/stack/roles.env`.
 
 | Process                                                                            | Receives                                                                                                                                                                              |
@@ -172,6 +183,8 @@ The database has five roles with separate passwords: `nemodots_admin`, `nemodots
 The honest limit: because the one server process holds the app, injector and verifier URLs, the rule that fault-injection and verifier data never reach model context is **code discipline plus payload-scan tests**, not PostgreSQL grants alone. The grants still matter (the checkout API and the app role cannot read injector control tables), but they do not isolate the server process from itself.
 
 ## Tests and modes
+
+> Not yet verified against running code: see the W5.1 note under section 5.
 
 | Command                                              | Needs                             | What it covers                                                                                                                                   |
 | ---------------------------------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |

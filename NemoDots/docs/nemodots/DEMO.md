@@ -2,6 +2,8 @@
 
 This is a script for showing one behaviour: **a repair that rests on evidence that has since changed is not applied as written; the team notices, discards or re-does only the affected work, and an independent probe decides whether checkout works again.** Follow [SETUP.md](SETUP.md) first so the health check passes in live mode.
 
+> **Not yet verified.** The `/api/nemodots/health` check, the mission UI flow and `nemodots:worker` depend on package W5.1, which was not in the tree when this script was written; the script has not been run live. See the note in SETUP.md section 5.
+
 ## What you will see, and what is staged
 
 NemoDots runs a team of Nemotron agents (model `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B` on Crusoe) against a small checkout app that this repository ships. A planner splits the goal into tasks; an investigator reads evidence and cannot change anything itself; only specialist roles can propose a configuration change. Every observation becomes a **receipt** in an evidence ledger, and every proposed change cites the receipts it rests on.
@@ -98,16 +100,16 @@ You can drive the same pieces by hand.
 
 **Manual source edit** (Scenario controls, **Manual source edit**): pick a source, a value type and a new value, and submit. It goes through the same version authority as any writer and requires the source's current version, so an edit made while another has landed is rejected with a conflict. Use it to make your own change land during the admission window.
 
-**Injector scenarios from a terminal** (the injector role; secrets stay in `roles.env`):
+**Injector scenarios from a terminal** (the injector role; secrets stay in `roles.env`). Run `inject` in terminal 1 and `notify-proposed` in terminal 2:
 
 ```sh
 npm run nemodots:stack -- run src/server/nemodots/sandbox/cli.ts scenarios
-npm run nemodots:stack -- run src/server/nemodots/sandbox/cli.ts inject --scenario dependent_change_after_proposal --seed 1
+npm run nemodots:stack -- run src/server/nemodots/sandbox/cli.ts inject --scenario dependent_change_after_proposal --seed 1 --timeout-ms 300000
 npm run nemodots:stack -- run src/server/nemodots/sandbox/cli.ts notify-proposed --key cache.schema_version
 npm run nemodots:stack -- run src/server/nemodots/sandbox/cli.ts probe
 ```
 
-`inject` blocks until its steps settle or `--timeout-ms` (default 120 000) passes and prints a step summary. `notify-proposed` emits the notification the injector's second step waits for; use it to test a scenario without a model, never during a live demonstration. `--seed` selects which of a step's value choices is used.
+`inject` blocks until its steps settle or `--timeout-ms` passes, and prints a step summary. The default is 120 000 ms, but the dependent step waits up to 300 000 ms, so always pass `--timeout-ms 300000` (or longer) for `dependent_change_after_proposal`. **A timeout cancels every step still waiting** ("inject: timed out; remaining steps were cancelled") and a later `notify-proposed` then has no effect. Because `inject` blocks, run `inject` in one terminal and, while it is waiting, the mission (or `notify-proposed`) from a second terminal; running them one after the other in a single terminal does not work. `notify-proposed` emits the notification the injector's second step waits for; use it to test a scenario without a model, never during a live demonstration. `--seed` selects which of a step's value choices is used.
 
 Other scenarios to contrast: `cache_schema_mismatch` (the fault alone), `benign_change` (changes only `ui.banner_text`, which must not invalidate anything), `second_change_during_repair`, `stale_replica`, `pool_starvation`, `writes_disabled`. Reset to the healthy configuration between runs with the `seed --reset-config` command above.
 

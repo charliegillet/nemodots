@@ -5,10 +5,7 @@ import { Platform } from '../../../src/server/platform.js';
 import { Runner } from '../../../src/server/runner.js';
 import { createApp } from '../../../src/server/app.js';
 import { pageAccess, pageTools } from '../../../src/server/page-tools.js';
-import type {
-  PageRevisionEvent,
-  Pages,
-} from '../../../src/server/pages.js';
+import type { PageRevisionEvent, Pages } from '../../../src/server/pages.js';
 
 const cleanup: (() => void)[] = [];
 afterEach(() => cleanup.splice(0).forEach((fn) => fn()));
@@ -61,9 +58,7 @@ describe('Pages.onRevision', () => {
   it('fires for the agent tool path (create then edit), inside the write transaction', async () => {
     const f = fixture();
     f.ws.bindThread('t', f.dot.id, 'T');
-    const tools = pageTools(
-      pageAccess(f.ws, f.dot.spaceId, 't', () => {}),
-    );
+    const tools = pageTools(pageAccess(f.ws, f.dot.spaceId, 't', () => {}));
     const run = (name: string, input: unknown) =>
       tools.find((t) => t.name === name)!.execute!(input as never);
     const created = (await run('create_space_page', {
@@ -154,9 +149,7 @@ describe('Pages.onRevision', () => {
     f.events.length = 0;
     f.ws.pages.delete(space, parent.id);
     expect(f.events).toHaveLength(1);
-    expect(f.events[0].reparented).toEqual([
-      { pageId: child.id, revision: 2 },
-    ]);
+    expect(f.events[0].reparented).toEqual([{ pageId: child.id, revision: 2 }]);
     expect(f.ws.pages.get(space, child.id).revision).toBe(2);
   });
 
@@ -201,9 +194,13 @@ describe('Pages.onRevision', () => {
     const db = new DatabaseSync(':memory:');
     cleanup.push(() => db.close());
     const seen: string[] = [];
-    const pages = new PagesClass(db, () => true, (event) => {
-      seen.push(event.op);
-    });
+    const pages = new PagesClass(
+      db,
+      () => true,
+      (event) => {
+        seen.push(event.op);
+      },
+    );
     pages.create('space', { title: 'X' });
     expect(seen).toEqual(['create']);
   });

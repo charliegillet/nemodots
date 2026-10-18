@@ -37,7 +37,11 @@ export interface HttpExchange {
   rawUsage: Record<string, unknown> | null;
   usage: Usage;
   finishReason: FinishReason | null;
-  error: { class: InferenceErrorClass; code: string | null; errorId: string | null } | null;
+  error: {
+    class: InferenceErrorClass;
+    code: string | null;
+    errorId: string | null;
+  } | null;
   retryAfterMs: number | null;
 }
 
@@ -89,9 +93,20 @@ function retryAfterMs(response: Response): number | null {
   const header = response.headers.get('retry-after');
   if (!header) return null;
   const seconds = Number(header);
-  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
+  if (Number.isFinite(seconds) && seconds >= 0)
+    return Math.round(seconds * 1000);
   const date = Date.parse(header);
   return Number.isNaN(date) ? null : Math.max(0, date - Date.now());
+}
+
+function errorCode(body: string): string | null {
+  try {
+    const detail = object(object(JSON.parse(body))?.error);
+    const raw = detail?.code ?? detail?.type;
+    return typeof raw === 'string' ? raw : null;
+  } catch {
+    return null;
+  }
 }
 
 const isAbort = (error: unknown) =>
@@ -218,17 +233,9 @@ export class FetchTelemetry {
     const errorId = response.headers.get('x-request-id');
     if (!response.ok) {
       const body = (await response.text()).slice(0, 4096);
-      let code: string | null = null;
-      try {
-        const detail = object(object(JSON.parse(body))?.error);
-        const raw = detail?.code ?? detail?.type;
-        code = typeof raw === 'string' ? raw : null;
-      } catch {
-        code = null;
-      }
       exchange.error = {
         class: statusClass(response.status),
-        code,
+        code: errorCode(body),
         errorId,
       };
       exchange.finishedAt = this.now().toISOString();
@@ -286,14 +293,19 @@ export class FetchTelemetry {
       exchange.modelReturned = parsed.model;
     const usage = object(parsed.usage);
     if (usage) exchange.rawUsage = usage;
-    const choice = object(Array.isArray(parsed.choices) ? parsed.choices[0] : null);
+    const choice = object(
+      Array.isArray(parsed.choices) ? parsed.choices[0] : null,
+    );
     if (!choice) return;
     const delta = object(choice.delta) ?? object(choice.message);
     if (
       chunk &&
       !exchange.firstContentAt &&
       delta &&
-      (delta.content || delta.reasoning || delta.reasoning_content || delta.tool_calls)
+      (delta.content ||
+        delta.reasoning ||
+        delta.reasoning_content ||
+        delta.tool_calls)
     )
       exchange.firstContentAt = this.now().toISOString();
     const reason = choice.finish_reason;
@@ -315,7 +327,8 @@ export function toInferenceAttempt(
   n: number,
 ): InferenceAttempt {
   const cancelled =
-    exchange.finishReason === 'cancelled' || exchange.error?.class === 'cancelled';
+    exchange.finishReason === 'cancelled' ||
+    exchange.error?.class === 'cancelled';
   return {
     n,
     startedAt: exchange.startedAt,

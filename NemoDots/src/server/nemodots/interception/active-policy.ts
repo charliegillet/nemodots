@@ -19,8 +19,7 @@ export type PolicyDenialCode =
   | 'agent_action_refused';
 
 export type PolicyDecision =
-  | { allow: true }
-  | { allow: false; code: PolicyDenialCode; reason: string };
+  { allow: true } | { allow: false; code: PolicyDenialCode; reason: string };
 
 export const ALLOW: PolicyDecision = Object.freeze({ allow: true });
 

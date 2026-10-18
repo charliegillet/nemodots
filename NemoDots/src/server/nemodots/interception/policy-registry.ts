@@ -25,10 +25,7 @@ import {
 
 export type ToolClass = 'read' | 'mutate' | 'unknown';
 export type ToolTreatment =
-  | 'instrumented'
-  | 'policy-checked'
-  | 'disabled'
-  | 'n/a-blocked';
+  'instrumented' | 'policy-checked' | 'disabled' | 'n/a-blocked';
 
 export interface PolicyClassification {
   /** Registry entry id; 'deny_unknown' when nothing matched. */
@@ -224,9 +221,7 @@ export function classifyTool(
 }
 
 export type IncidentDotIds =
-  | ReadonlySet<string>
-  | readonly string[]
-  | (() => Iterable<string>);
+  ReadonlySet<string> | readonly string[] | (() => Iterable<string>);
 
 /** NEMODOTS_INCIDENT_DOT_IDS: comma-separated Dot ids; empty/absent means none. */
 export function parseIncidentDotIds(raw: string | undefined): string[] {
@@ -265,7 +260,8 @@ const deny = (
 const record = (value: unknown): Record<string, unknown> =>
   value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
 
-const text = (value: unknown) => (typeof value === 'string' ? value : undefined);
+const text = (value: unknown) =>
+  typeof value === 'string' ? value : undefined;
 
 export function createToolPolicy(options: ToolPolicyOptions): ActivePolicy {
   const incidentIds = (): ReadonlySet<string> => {
@@ -338,7 +334,9 @@ export function createToolPolicy(options: ToolPolicyOptions): ActivePolicy {
       );
     },
     revalidateApproval: options.revalidateApproval
-      ? (request: ApprovalRevalidationRequest): ApprovalVerdict | Promise<ApprovalVerdict> =>
+      ? (
+          request: ApprovalRevalidationRequest,
+        ): ApprovalVerdict | Promise<ApprovalVerdict> =>
           options.revalidateApproval!(request)
       : undefined,
   };

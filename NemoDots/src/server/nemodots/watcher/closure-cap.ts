@@ -89,7 +89,9 @@ export async function buildCoarseInvalidation(
       taskIds: [...affectedTasks].sort(),
     } as unknown as Affected;
     const preserved = tasks.rows
-      .filter((row) => row.mission_id === missionId && !affectedTasks.has(row.id))
+      .filter(
+        (row) => row.mission_id === missionId && !affectedTasks.has(row.id),
+      )
       .map((row) => row.id as TaskId);
     return {
       missionId: missionId as MissionId,
@@ -146,7 +148,8 @@ export async function registerAfterClosureCap(
       );
     } catch (error) {
       // A mission that is already paused or finished has nothing left to pause.
-      if ((error as { name?: string })?.name !== 'MissionStateError') throw error;
+      if ((error as { name?: string })?.name !== 'MissionStateError')
+        throw error;
     }
   }
   const result = await withTransaction(deps.pool, (client) =>

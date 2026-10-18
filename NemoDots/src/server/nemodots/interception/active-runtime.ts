@@ -135,7 +135,9 @@ export function defaultTurnIdentity(turn: TurnDescriptor): TurnIdentity {
   return {
     scope: {
       ownerId: 'opendots',
-      missionId: derivedUuid(`opendots-dot:${turn.dotId}`) as Scope['missionId'],
+      missionId: derivedUuid(
+        `opendots-dot:${turn.dotId}`,
+      ) as Scope['missionId'],
       spaceId: null,
       environment: 'dev',
       resource: `opendots.dot/${turn.dotId}`,

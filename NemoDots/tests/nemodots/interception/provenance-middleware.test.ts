@@ -94,10 +94,13 @@ describe('model call outcomes through DotAgent', () => {
     setInterceptionRuntime(runtime);
     vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ error: { code: 'max_requests_limit' } }), {
-          status: 429,
-          headers: { 'retry-after': '0', 'x-request-id': 'req-1' },
-        }),
+        new Response(
+          JSON.stringify({ error: { code: 'max_requests_limit' } }),
+          {
+            status: 429,
+            headers: { 'retry-after': '0', 'x-request-id': 'req-1' },
+          },
+        ),
       )
       .mockResolvedValueOnce(textResponse('Second try worked.'));
     await lastValueFrom(f.agent.run(f.input).pipe(toArray()));
@@ -124,12 +127,50 @@ describe('model call outcomes through DotAgent', () => {
           status: 500,
         }),
     );
-    await lastValueFrom(f.agent.run(f.input).pipe(toArray()));
+    // The upstream agent surfaces the provider failure to its subscriber.
+    await expect(
+      lastValueFrom(f.agent.run(f.input).pipe(toArray())),
+    ).rejects.toThrow('500');
     expect(calls.length).toBeGreaterThanOrEqual(1);
     const last = calls[calls.length - 1].input.record;
     expect(last.outcome).toBe('failed');
     expect(last.attempts.every((a) => a.httpStatus === 500)).toBe(true);
     expect(last.attempts[0].error?.class).toBe('provider_error');
+  });
+
+  it('records an aborted call with cancelled attempts and null usage when the owner pauses work', async () => {
+    const f = dotFixture();
+    const { runtime, calls } = recordingRuntime();
+    setInterceptionRuntime(runtime);
+    const started = new Promise<void>((ready) => {
+      vi.spyOn(globalThis, 'fetch').mockImplementation(
+        (_url, init) =>
+          new Promise((_resolve, reject) => {
+            const signal = init?.signal;
+            if (!signal) throw new Error('Expected an abort signal');
+            signal.addEventListener('abort', () => reject(signal.reason), {
+              once: true,
+            });
+            ready();
+          }),
+      );
+    });
+    const finished = lastValueFrom(f.agent.run(f.input).pipe(toArray()));
+    await started;
+    f.store.updateSettings({ paused: true });
+    await finished;
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    const { record } = calls[0].input;
+    expect(record.outcome).toBe('aborted');
+    expect(record.attempts[0]).toMatchObject({
+      finishReason: 'cancelled',
+      usage: {
+        promptTokens: null,
+        completionTokens: null,
+        cachedTokens: null,
+        reasoningTokens: null,
+      },
+    });
   });
 
   it('marks the provider mode the runtime declares, never a guessed one', async () => {
@@ -172,7 +213,13 @@ describe('model call outcomes through DotAgent', () => {
 
   it('lets everything through under the allow-all policy', async () => {
     const handle = createProvenanceMiddleware({
-      turn: { dotId: 'd', threadId: 't', runId: 'r', model: 'm', providerHost: 'h' },
+      turn: {
+        dotId: 'd',
+        threadId: 't',
+        runId: 'r',
+        model: 'm',
+        providerHost: 'h',
+      },
       scope: createTurnScope({ dotId: 'd', threadId: 't', runId: 'r' }),
       policy: () => ALLOW_ALL_POLICY,
       pages: [],

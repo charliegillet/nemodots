@@ -167,7 +167,10 @@ describe('withToolPolicy (I7)', () => {
     const editExec = vi.fn(async () => 'edited');
     const refusals: string[] = [];
     const [read, edit] = withToolPolicy(
-      [server('read_space_page', readExec), server('edit_space_page', editExec)],
+      [
+        server('read_space_page', readExec),
+        server('edit_space_page', editExec),
+      ],
       {
         dotId: 'inc',
         policy: () => createToolPolicy({ incidentDotIds: ['inc'] }),
@@ -175,9 +178,9 @@ describe('withToolPolicy (I7)', () => {
       },
     );
     await expect(read.execute!({}, undefined)).resolves.toBe('page');
-    await expect(edit.execute!({ id: 'p' } as never, undefined)).rejects.toBeInstanceOf(
-      ToolPolicyError,
-    );
+    await expect(
+      edit.execute!({ id: 'p' } as never, undefined),
+    ).rejects.toBeInstanceOf(ToolPolicyError);
     expect(editExec).not.toHaveBeenCalled();
     expect(readExec).toHaveBeenCalledTimes(1);
     expect(refusals).toEqual(['edit_space_page']);
@@ -199,11 +202,16 @@ describe('withToolPolicy (I7)', () => {
         return { allow: false, code: 'disabled_for_incident', reason: 'no' };
       },
     };
-    await expect(mail.execute!({ to: 'x' } as never, undefined)).rejects.toThrow(
-      'Refused by NemoDots policy: no',
-    );
+    await expect(
+      mail.execute!({ to: 'x' } as never, undefined),
+    ).rejects.toThrow('Refused by NemoDots policy: no');
     expect(seen).toEqual([
-      { dotId: 'inc', toolName: 'mail__send', origin: 'mcp', args: { to: 'x' } },
+      {
+        dotId: 'inc',
+        toolName: 'mail__send',
+        origin: 'mcp',
+        args: { to: 'x' },
+      },
     ]);
   });
 

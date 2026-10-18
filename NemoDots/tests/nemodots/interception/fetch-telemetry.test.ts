@@ -69,7 +69,8 @@ describe('normalizeRawUsage', () => {
 describe('FetchTelemetry', () => {
   it('captures status, returned model, raw usage and timings from a stream without touching the response', async () => {
     const telemetry = createFetchTelemetry({
-      base: async () => sse([content, stop, usage], { 'x-request-id': 'req-1' }),
+      base: async () =>
+        sse([content, stop, usage], { 'x-request-id': 'req-1' }),
     });
     telemetry.beginCall();
     const response = await telemetry.fetch('https://example.invalid/v1/x', {
@@ -126,7 +127,9 @@ describe('FetchTelemetry', () => {
         new Response(
           JSON.stringify({
             model: 'm',
-            choices: [{ message: { content: 'x' }, finish_reason: 'tool_calls' }],
+            choices: [
+              { message: { content: 'x' }, finish_reason: 'tool_calls' },
+            ],
             usage: { prompt_tokens: 5, completion_tokens: 1 },
           }),
           { headers: { 'Content-Type': 'application/json' } },
@@ -146,10 +149,13 @@ describe('FetchTelemetry', () => {
   it('classifies HTTP failures and reads retry-after', async () => {
     const telemetry = createFetchTelemetry({
       base: async () =>
-        new Response(JSON.stringify({ error: { code: 'max_requests_limit' } }), {
-          status: 429,
-          headers: { 'retry-after': '2', 'x-request-id': 'req-9' },
-        }),
+        new Response(
+          JSON.stringify({ error: { code: 'max_requests_limit' } }),
+          {
+            status: 429,
+            headers: { 'retry-after': '2', 'x-request-id': 'req-9' },
+          },
+        ),
     });
     telemetry.beginCall();
     await telemetry.fetch('https://example.invalid/');
