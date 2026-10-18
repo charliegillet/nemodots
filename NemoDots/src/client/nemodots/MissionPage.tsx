@@ -8,14 +8,14 @@ import { ActionInspector, ActionList } from './components/ActionInspector';
 import { DependencyView } from './components/DependencyView';
 import { EvidenceLedger } from './components/EvidenceLedger';
 import { FindingList } from './components/FindingList';
-import { IntelligenceBadge, ModeBadge } from './components/ModeBadge';
+import { ModeBadge } from './components/ModeBadge';
 import { RecoveryTimeline } from './components/RecoveryTimeline';
 import { TaskTree } from './components/TaskTree';
 import { TelemetryPanel } from './components/TelemetryPanel';
 import { runMissionLifecycle } from './mission-api';
 import { selectDependencyEdges } from './mission-events';
 import { MissionCreateForm } from './MissionCreateForm';
-import { deriveIntelligenceBadge, deriveModeBadge } from './status';
+import { deriveModeBadge } from './status';
 import {
   useMission,
   useMissionList,
@@ -23,6 +23,7 @@ import {
   type UseNemoDotsHealthResult,
 } from './use-mission';
 import { AcceptanceConsole } from './views/AcceptanceConsole';
+import { DemoBar, Fold, RunDemoButton } from './views/DemoBar';
 import { MissionHeader } from './views/MissionHeader';
 import { MissionList } from './views/MissionList';
 import { SaveEvidencePage } from './views/SaveEvidencePage';
@@ -120,31 +121,52 @@ function MissionDetail({
           {error}
         </p>
       )}
+      {state.mission &&
+        ['created', 'running', 'blocked_provider'].includes(
+          state.mission.status,
+        ) && (
+          <DemoBar mission={state.mission} onChanged={() => void refresh()} />
+        )}
       <div className="nd-mission-grid">
+        <TaskTree
+          tasks={state.tasks}
+          attempts={state.attempts}
+          selectedTaskId={selectedTaskId}
+          onSelectTask={(taskId) =>
+            setSelectedTaskId((current) =>
+              current === taskId ? null : taskId,
+            )
+          }
+          loading={pending}
+          error={panelError}
+        />
         <div className="nd-col">
-          <TaskTree
-            tasks={state.tasks}
-            attempts={state.attempts}
-            selectedTaskId={selectedTaskId}
-            onSelectTask={(taskId) =>
-              setSelectedTaskId((current) =>
-                current === taskId ? null : taskId,
-              )
-            }
+          <ActionList
+            actions={state.actions}
+            selectedActionId={selectedAction?.id ?? null}
+            onSelectAction={setSelectedActionId}
             loading={pending}
             error={panelError}
           />
-          <FindingList findings={findings} />
-        </div>
-        <div className="nd-col">
-          <DependencyView
-            edges={selectDependencyEdges(state)}
+          <ActionInspector
+            action={selectedAction}
+            nowMs={now}
             loading={pending}
             error={panelError}
           />
         </div>
       </div>
-      <div className="nd-block-row">
+      <RecoveryTimeline
+        events={state.events}
+        invalidations={state.invalidations}
+        recoveries={state.recoveries}
+        loading={pending}
+        error={panelError}
+      />
+      <Fold
+        title="Evidence ledger"
+        meta={`${state.receipts.length} receipts`}
+      >
         <EvidenceLedger
           receipts={state.receipts}
           nowMs={now}
@@ -159,44 +181,46 @@ function MissionDetail({
             spaces={spaces}
           />
         )}
-      </div>
-      <div className="nd-mission-grid">
-        <ActionList
-          actions={state.actions}
-          selectedActionId={selectedAction?.id ?? null}
-          onSelectAction={setSelectedActionId}
+      </Fold>
+      <Fold title="Findings" meta={`${findings.length}`}>
+        <FindingList findings={findings} />
+      </Fold>
+      <Fold title="Dependencies">
+        <DependencyView
+          edges={selectDependencyEdges(state)}
           loading={pending}
           error={panelError}
         />
-        <ActionInspector
-          action={selectedAction}
-          nowMs={now}
+      </Fold>
+      <Fold
+        title="Acceptance & sandbox"
+        meta={
+          state.probe
+            ? `probe ${state.probe.verdict ?? 'running'}`
+            : undefined
+        }
+      >
+        <AcceptanceConsole
+          health={healthState.health}
+          checkout={healthState.checkout}
+          healthError={healthState.error}
+          healthLoading={healthState.loading}
+          receipts={state.receipts}
+          probe={state.probe}
+          acceptanceReceiptId={state.mission?.acceptanceReceiptId ?? null}
+          onChanged={() => void refresh()}
+        />
+      </Fold>
+      <Fold
+        title="Telemetry"
+        meta={state.telemetry ? `${state.telemetry.calls} model calls` : undefined}
+      >
+        <TelemetryPanel
+          telemetry={state.telemetry}
           loading={pending}
           error={panelError}
         />
-      </div>
-      <RecoveryTimeline
-        events={state.events}
-        invalidations={state.invalidations}
-        recoveries={state.recoveries}
-        loading={pending}
-        error={panelError}
-      />
-      <AcceptanceConsole
-        health={healthState.health}
-        checkout={healthState.checkout}
-        healthError={healthState.error}
-        healthLoading={healthState.loading}
-        receipts={state.receipts}
-        probe={state.probe}
-        acceptanceReceiptId={state.mission?.acceptanceReceiptId ?? null}
-        onChanged={() => void refresh()}
-      />
-      <TelemetryPanel
-        telemetry={state.telemetry}
-        loading={pending}
-        error={panelError}
-      />
+      </Fold>
     </div>
   );
 }
@@ -217,22 +241,31 @@ function ListView({
         <div>
           <span className="eyebrow">NEMODOTS</span>
           <h1>Missions</h1>
-          <p>
-            A team of Nemotron agents restores the checkout app and keeps its
-            evidence current.
-          </p>
         </div>
       </div>
       <p className="nd-badges">
         <ModeBadge badge={deriveModeBadge(health)} />
-        <IntelligenceBadge badge={deriveIntelligenceBadge(health)} />
       </p>
       {healthError && (
         <p className="nd-error" role="alert">
           {healthError}
         </p>
       )}
-      <div className="nd-mission-grid">
+      <RunDemoButton
+        onOpen={(id) => {
+          void list.reload();
+          onOpen(id);
+        }}
+      />
+      <MissionList
+        missions={list.missions
+          .filter((mission) => mission.status !== 'cancelled')
+          .slice(0, 6)}
+        loading={list.loading}
+        error={list.error}
+        onOpen={onOpen}
+      />
+      <Fold title="Custom mission">
         <MissionCreateForm
           health={health}
           onCreated={(mission) => {
@@ -240,13 +273,7 @@ function ListView({
             onOpen(mission.id);
           }}
         />
-        <MissionList
-          missions={list.missions}
-          loading={list.loading}
-          error={list.error}
-          onOpen={onOpen}
-        />
-      </div>
+      </Fold>
     </div>
   );
 }

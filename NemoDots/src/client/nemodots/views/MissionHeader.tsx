@@ -204,8 +204,13 @@ export function MissionHeader({
       </div>
       <p className="nd-badges">
         <ModeBadge badge={badge} />
-        <IntelligenceBadge badge={deriveIntelligenceBadge(health)} />
         {mission && <StatusPill status={mission.status} />}
+        {mission && (
+          <span className="nd-provider-chip">
+            {mission.provider.plannerModel.replace(/^nvidia\//, '')} ·{' '}
+            {mission.provider.host}
+          </span>
+        )}
       </p>
       {serverNote && (
         <p className="nd-note nd-server-mode-note">{serverNote}</p>
@@ -216,7 +221,14 @@ export function MissionHeader({
           model.
         </p>
       )}
+      {mission?.failureReason && (
+        <p className="nd-note">{mission.failureReason}</p>
+      )}
       {mission && (
+        <details className="nd-fold nd-fold-inline">
+          <summary>
+            <span>Mission details</span>
+          </summary>
         <dl className="nd-dl nd-mission-facts" aria-label="Mission facts">
           <dt>Provider host</dt>
           <dd>{mission.provider.host}</dd>
@@ -226,20 +238,17 @@ export function MissionHeader({
           <dd>{mission.provider.workerModel}</dd>
           <dt>admission.minAgeMs</dt>
           <dd>{formatCount(mission.admission.minAgeMs)} ms</dd>
-          {mission.failureReason && (
-            <>
-              <dt>Failure reason</dt>
-              <dd>{mission.failureReason}</dd>
-            </>
-          )}
         </dl>
+        </details>
       )}
       {actionError && (
         <p className="nd-error" role="alert">
           {actionError}
         </p>
       )}
-      <StreamStatusLine status={stream} detail={streamDetail} />
+      {stream === 'reconnecting' && (
+        <StreamStatusLine status={stream} detail={streamDetail} />
+      )}
     </header>
   );
 }

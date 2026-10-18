@@ -517,7 +517,8 @@ export async function createNemoDotsRuntime(env = process.env) {
   routes.get('/sandbox/checkout/health', async (c) => {
     const r = await fetch(`${config.checkout.url}/health`).catch(() => null);
     if (!r) return c.json({ error: 'checkout unreachable' }, 503);
-    const body = (await r.json()) as Record<string, unknown>;
+    const raw = (await r.json()) as Record<string, unknown>;
+    const body = { ...raw, ...((raw.checks as Record<string, unknown>) ?? {}) };
     return c.json({
       status: body.status,
       postgres: Boolean(body.postgres),
