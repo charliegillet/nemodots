@@ -115,15 +115,21 @@ describe('D5: an investigator cannot propose; the transcript shows the delegatio
       ok: false,
       error: 'justification_required',
     });
-    // child capabilities are the role defaults intersected with the parent's
-    const narrow = precheckDelegation(
+    // child capabilities: role defaults within the parent's, plus the rev3 D5
+    // grant of propose_* to a specialist delegated by a parent holding delegate
+    const granted = precheckDelegation(
       { role: 'investigator', capabilities: ['delegate', 'observe'] as never },
       'cache_specialist',
       'because',
     );
-    expect(narrow).toMatchObject({
+    expect(granted).toMatchObject({
       ok: true,
-      childCapabilities: ['observe', 'delegate'],
+      childCapabilities: [
+        'observe',
+        'delegate',
+        'propose_config_change',
+        'propose_cache_flush',
+      ],
     });
   });
 
