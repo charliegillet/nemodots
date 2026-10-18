@@ -39,7 +39,9 @@ function capabilityLine(role: TaskRole): string {
   if (caps.length === 0) return 'Capabilities: none (structured output only).';
   return `Capabilities of a ${role} task: ${caps
     .map((c) => CAPABILITY_TEXT[c] ?? c)
-    .join('; ')}. Your task may hold a subset of these; a tool you lack the capability for refuses.`;
+    .join(
+      '; ',
+    )}. Your task may hold a subset of these; a tool you lack the capability for refuses.`;
 }
 
 const PROPOSAL_TEXT = [
@@ -65,7 +67,11 @@ const ROLE_FOCUS: Readonly<Record<TaskRole, string>> = Object.freeze({
 
 export function roleInstructions(role: TaskRole): string {
   const parts = [ROLE_FOCUS[role], capabilityLine(role)];
-  if ((ROLE_CAPABILITIES[role] as readonly string[]).some((c) => c.startsWith('propose')))
+  if (
+    (ROLE_CAPABILITIES[role] as readonly string[]).some((c) =>
+      c.startsWith('propose'),
+    )
+  )
     parts.push(PROPOSAL_TEXT);
   if ((ROLE_CAPABILITIES[role] as readonly string[]).includes('delegate'))
     parts.push(
@@ -98,7 +104,8 @@ export const PLANNER_INSTRUCTIONS = [
       'verifier',
     ] as const
   ).map(
-    (role) => `- ${role}: ${(ROLE_CAPABILITIES[role] as readonly string[]).join(', ')}`,
+    (role) =>
+      `- ${role}: ${(ROLE_CAPABILITIES[role] as readonly string[]).join(', ')}`,
   ),
   '',
   'Your evidence is the mission goal, the current checkout health receipt and the list of configuration keys that exist (not their values). Everything else is for the tasks to find out. A plan that has no way to check its own outcome against the acceptance statement is incomplete.',

@@ -44,6 +44,7 @@ import {
   type ProposeInput,
   type ReceiptId,
   type SourceRef,
+  type SupportValidator,
   type TaskRole,
 } from '../../../../src/server/nemodots/contracts/index.js';
 import {
@@ -157,7 +158,12 @@ export interface World {
   /** Every 40P01 / 40001 any instrumented pool saw (before retries). */
   failures: SqlFailure[];
   deadlocks(): SqlFailure[];
-  coordinator(): Coordinator;
+  coordinator(options?: CoordinatorOptions): Coordinator;
+}
+
+export interface CoordinatorOptions {
+  /** Replaces the support validator (to park a publication inside its transaction). */
+  validator?: SupportValidator;
 }
 
 export interface WorldOptions {
@@ -168,6 +174,12 @@ export interface WorldOptions {
   redisTimeoutMs?: number;
   seed?: Record<string, ConfigScalar> | false;
   appPoolMax?: number;
+  /**
+   * Default isolation of every NEW session on the test database (ALTER DATABASE ...
+   * SET default_transaction_isolation). withTransaction issues a plain BEGIN, so
+   * this runs the production transactions at that level with no code change.
+   */
+  isolation?: 'read committed' | 'repeatable read' | 'serializable';
 }
 
 export const BASELINE: Record<string, ConfigScalar> = {
@@ -187,6 +199,16 @@ export async function withWorld<T>(
   const run = async (redis: TestRedis | null) =>
     withTestDatabase(async (db) => {
       const failures: SqlFailure[] = [];
+      if (options.isolation) {
+        const setup = createRolePool('admin', db.urls.admin, { max: 1 });
+        try {
+          await setup.query(
+            `ALTER DATABASE ${db.name} SET default_transaction_isolation TO '${options.isolation}'`,
+          );
+        } finally {
+          await setup.end();
+        }
+      }
       const app = instrument(
         createRolePool('app', db.urls.app, { max: options.appPoolMax ?? 8 }),
         'app',
@@ -225,7 +247,8 @@ export async function withWorld<T>(
           missionId,
           failures,
           deadlocks: () => failures.filter((item) => item.code === '40P01'),
-          coordinator() {
+          coordinator(options) {
+            if (options) return buildCoordinator(world, options);
             coordinator ??= buildCoordinator(world);
             return coordinator;
           },
@@ -257,7 +280,10 @@ const emptyTelemetry = {
   prefixGroups: [],
 };
 
-function buildCoordinator(world: World): Coordinator {
+function buildCoordinator(
+  world: World,
+  options: CoordinatorOptions = {},
+): Coordinator {
   const writer: LedgerWriterPort = {
     async recordModelCall(client, input) {
       await recordModelCall(client, {
@@ -303,7 +329,7 @@ function buildCoordinator(world: World): Coordinator {
       taskDefaults: { maxAttempts: 3, maxIterations: 12, maxTokens: 20_000 },
       replanCap: 3,
     },
-    supportValidator,
+    supportValidator: options.validator ?? supportValidator,
     ledger: writer,
     recordOrphanedAttempt: async () => {},
     intents: createIntentReader(),
@@ -1063,4 +1089,92 @@ export function countingRedis(counter: { scripts: number; other?: number }) {
     get: (key) => client.get(key),
     set: (key, value, options) => client.set(key, value, options),
   });
+}
+
+// --- watcher (C7, C14) -------------------------------------------------------------------------------
+
+import { createSqlIntentSettlement, createWatcher, type Watcher, type WatcherEvent } from '../../../../src/server/nemodots/watcher/index.js';
+import type { InvalidationEvent, SourceReaderPort } from '../../../../src/server/nemodots/contracts/index.js';
+import type { WatcherConfig } from '../../../../src/server/nemodots/watcher/index.js';
+
+/** Reads the REAL authority rows (controlled sources); observed sources return fixed values. */
+export function authorityReader(world: World): SourceReaderPort {
+  return {
+    async read(key) {
+      if (key === 'checkout.config') {
+        const keys = await world.admin.query<{ key: string }>(
+          'SELECT key FROM checkout.config_entries ORDER BY key',
+        );
+        const version = await collectionVersion(world);
+        return {
+          normalizedValue: { keys: keys.rows.map((r) => r.key), collectionVersion: version },
+          raw: null,
+          revisionHint: version,
+        };
+      }
+      if (key.startsWith('checkout.config/')) {
+        const member = key.slice('checkout.config/'.length);
+        const state = await configState(world, member);
+        return {
+          normalizedValue: { key: member, value: state.value, version: state.version },
+          raw: null,
+          revisionHint: state.version,
+        };
+      }
+      return { normalizedValue: { status: 'ok' }, raw: null, revisionHint: null };
+    },
+  };
+}
+
+export interface WatcherRig {
+  watcher: Watcher;
+  events: WatcherEvent[];
+  invalidations: InvalidationEvent[];
+  settled: { actionId: string; outcome: string }[];
+  paused: string[];
+}
+
+/**
+ * The real watcher over the real ledger. Wiring as the README requires:
+ * onSelfWriteSettled settles the intent through the real action service.
+ * pauseMission (closure-cap path) is a labelled SQL double.
+ */
+export function watcherRig(
+  world: World,
+  config: Partial<WatcherConfig> = {},
+): WatcherRig {
+  const events: WatcherEvent[] = [];
+  const invalidations: InvalidationEvent[] = [];
+  const settled: { actionId: string; outcome: string }[] = [];
+  const paused: string[] = [];
+  const watcher = createWatcher({
+    pool: world.app,
+    readers: authorityReader(world),
+    intents: createSqlIntentSettlement({ pool: world.app }),
+    recovery: {
+      async onInvalidation(event) {
+        invalidations.push(event);
+      },
+      async onSelfWriteSettled(actionId, outcome) {
+        settled.push({ actionId, outcome });
+        await world.service.settleFromHistory(actionId, outcome);
+      },
+      async pauseMission(missionId) {
+        paused.push(missionId);
+        await world.admin.query(
+          "UPDATE coordinator.missions SET status = 'paused' WHERE id = $1 AND status = 'running'",
+          [missionId],
+        );
+      },
+    },
+    config: {
+      ownerId: OWNER,
+      environment: 'test',
+      observedSources: [],
+      followRegisteredSources: false,
+      ...config,
+    },
+    onEvent: (event) => events.push(event),
+  });
+  return { watcher, events, invalidations, settled, paused };
 }

@@ -39,7 +39,8 @@ export class ToolError extends Error {
 /** The attempt ran out of a server-side budget (iterations, tokens, calls). */
 export class BudgetExhaustedError extends Error {
   constructor(
-    readonly scope: 'iterations' | 'task_tokens' | 'mission_tokens' | 'mission_calls',
+    readonly scope:
+      'iterations' | 'task_tokens' | 'mission_tokens' | 'mission_calls',
     readonly used: number,
     readonly limit: number,
   ) {

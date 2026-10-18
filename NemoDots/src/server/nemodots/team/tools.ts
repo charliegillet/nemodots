@@ -314,10 +314,7 @@ export function createTeamTools(deps: TeamToolsDeps = {}): TeamTools {
         };
       } catch (error) {
         if (error instanceof TaskNotFoundError)
-          throw new ToolError(
-            'task_not_found',
-            'no such task in this mission',
-          );
+          throw new ToolError('task_not_found', 'no such task in this mission');
         throw error;
       }
     },
@@ -466,7 +463,8 @@ export function createTeamTools(deps: TeamToolsDeps = {}): TeamTools {
 
     async propose_action(
       args: {
-        action: keyof typeof ADAPTER_POLICY & ('set_config' | 'flush_cache_namespace');
+        action: keyof typeof ADAPTER_POLICY &
+          ('set_config' | 'flush_cache_namespace');
         payload: unknown;
         supportingReceiptIds: ReceiptId[];
         rationale: string;
@@ -568,10 +566,7 @@ export function createTeamTools(deps: TeamToolsDeps = {}): TeamTools {
       try {
         args = JSON.parse(rawArgs);
       } catch {
-        throw new ToolError(
-          'invalid_json',
-          'the arguments are not valid JSON',
-        );
+        throw new ToolError('invalid_json', 'the arguments are not valid JSON');
       }
     }
     const parsed = TEAM_TOOL_INPUTS[tool].safeParse(args);

@@ -110,8 +110,9 @@ export function createLedgerWriter(): LedgerWriterPort {
     },
     async recordArtifact(client: PgClient, artifact) {
       if (artifact.kind === 'finding') return;
+      const kind: 'task' | 'task_output' = artifact.kind;
       const to = {
-        kind: artifact.kind,
+        kind,
         id: artifact.id,
         missionId: artifact.missionId,
         taskId: artifact.taskId,

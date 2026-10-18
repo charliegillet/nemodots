@@ -10,15 +10,15 @@ The checkout service sells a small product catalogue. One API process serves pro
 
 ## Configuration keys
 
-| Key                        | Controls                                                         |
-| -------------------------- | ---------------------------------------------------------------- |
-| `cache.namespace`          | which Redis key family the API reads and writes                  |
-| `cache.schema_version`     | which cache blob layout version the API expects                  |
-| `db.pool_max`              | maximum concurrent PostgreSQL connections the API opens          |
-| `db.statement_timeout_ms`  | how long one SQL statement may run before it is cancelled        |
-| `routing.inventory_source` | which data source answers inventory reads                        |
-| `orders.write_enabled`     | whether order placement is accepted                              |
-| `ui.banner_text`           | storefront banner text; cosmetic only, unrelated to reliability  |
+| Key                        | Controls                                                        |
+| -------------------------- | --------------------------------------------------------------- |
+| `cache.namespace`          | which Redis key family the API reads and writes                 |
+| `cache.schema_version`     | which cache blob layout version the API expects                 |
+| `db.pool_max`              | maximum concurrent PostgreSQL connections the API opens         |
+| `db.statement_timeout_ms`  | how long one SQL statement may run before it is cancelled       |
+| `routing.inventory_source` | which data source answers inventory reads                       |
+| `orders.write_enabled`     | whether order placement is accepted                             |
+| `ui.banner_text`           | storefront banner text; cosmetic only, unrelated to reliability |
 
 Detailed semantics and value domains: runbooks `cache-semantics`, `pool-sizing`, `inventory-routing`.
 

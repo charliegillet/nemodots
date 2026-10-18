@@ -15,6 +15,7 @@ import {
 import { UnknownScenarioError } from '../../../../src/server/nemodots/routes/index.js';
 import { withHarness } from '../coordinator/harness.js';
 import {
+  FIXTURE_ENV,
   LIVE_ENV,
   LIVE_SECRET_KEY,
   OWNER_TOKEN,
@@ -368,7 +369,13 @@ describe('snapshot and typed views', () => {
           },
         }),
       );
-      const withUrl = mountRoutes(h, { evalsReportPath: leaky });
+      const withUrl = mountRoutes(h, {
+        evalsReportPath: leaky,
+        env: {
+          ...FIXTURE_ENV,
+          NEMODOTS_APP_URL: 'postgres://nemodots_app:pw@127.0.0.1:55432/db',
+        },
+      });
       const a = await withUrl.get('/evals/report');
       expect(a.status).toBe(500);
       expect(await a.json()).toEqual({ error: 'Internal error.' });
@@ -623,6 +630,63 @@ describe('upstream /api middleware applies to every route', () => {
       });
       expect(response.status).toBe(415);
       r.close();
+    });
+  });
+});
+
+describe('review fixes', () => {
+  it('a goal that mentions a URL scheme round-trips through create, list, snapshot and views', async () => {
+    await withHarness(async (h) => {
+      const r = mountRoutes(h);
+      const text = 'checkout cannot reach redis://cache after deploy';
+      const mission = await created(r, { goal: text });
+      expect(mission.goal).toBe(text);
+      const list = (await (await r.get('/missions')).json()) as Mission[];
+      expect(list.map((m) => m.goal)).toEqual([text]);
+      const snap = await r.get(`/missions/${mission.id}`);
+      expect(snap.status).toBe(200);
+      expect((await snap.json()).mission.goal).toBe(text);
+      expect((await r.get(`/missions/${mission.id}/tasks`)).status).toBe(200);
+      r.close();
+    });
+  });
+
+  it('the guard still blocks the real role URLs from the environment', async () => {
+    await withHarness(async (h) => {
+      const url = 'redis://:hunter2hunter2@127.0.0.1:56379/0';
+      const r = mountRoutes(h, {
+        env: { ...FIXTURE_ENV, NEMODOTS_REDIS_URL: url },
+      });
+      const response = await r.post('/missions', { goal: `leak ${url}` });
+      expect(response.status).toBe(500);
+      expect(await response.text()).not.toContain('hunter2');
+      r.close();
+    });
+  });
+
+  it('a route env that disagrees with the coordinator mode is a 400, not a mislabelled mission', async () => {
+    await withHarness(async (h) => {
+      const r = mountRoutes(h, { env: LIVE_ENV });
+      for (const body of [goal, { ...goal, mode: 'live' }]) {
+        const response = await r.post('/missions', body);
+        expect(response.status).toBe(400);
+      }
+      const { rows } = await h.pool.query(
+        'SELECT count(*)::int AS n FROM coordinator.missions',
+      );
+      expect(rows[0].n).toBe(0);
+      r.close();
+    });
+  });
+
+  it('construction fails when ownerId differs from the coordinator owner', async () => {
+    await withHarness(async (h) => {
+      expect(() =>
+        mountRoutes(h, { coordinatorOwnerId: 'someone-else' }),
+      ).toThrow(/ownerId/);
+      expect(() =>
+        mountRoutes(h, { coordinatorOwnerId: 'owner' }),
+      ).not.toThrow();
     });
   });
 });

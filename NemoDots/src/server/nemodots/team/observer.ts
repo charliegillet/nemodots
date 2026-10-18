@@ -32,7 +32,9 @@ const COLLECTION_KEY = 'checkout.config';
 const MEMBER_PREFIX = 'checkout.config/';
 const MAX_RACE_ATTEMPTS = 3;
 
-function observedType(key: string): Extract<SourceType, 'observed_endpoint' | 'observed_store'> {
+function observedType(
+  key: string,
+): Extract<SourceType, 'observed_endpoint' | 'observed_store'> {
   return key === 'checkout.orders.recent' || key === 'redis.stats'
     ? 'observed_store'
     : 'observed_endpoint';
@@ -67,13 +69,12 @@ function toObserved(result: RegisterResult): ObservedReceipt {
   };
 }
 
-export function createLedgerObserver(deps: LedgerObserverDeps): ObservationPort {
+export function createLedgerObserver(
+  deps: LedgerObserverDeps,
+): ObservationPort {
   const clock = deps.clock ?? (() => new Date());
 
-  async function sourceRef(
-    scope: Scope,
-    key: SourceKey,
-  ): Promise<SourceRef> {
+  async function sourceRef(scope: Scope, key: SourceKey): Promise<SourceRef> {
     if (key === COLLECTION_KEY)
       return {
         key,

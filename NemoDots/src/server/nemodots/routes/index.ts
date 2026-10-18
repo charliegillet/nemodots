@@ -83,6 +83,12 @@ export interface NemoDotsRouteDeps {
    * token, API keys). A response containing one is replaced by a 500.
    */
   secrets?: readonly string[];
+  /**
+   * The owner id the coordinator stamps on new missions (its config.ownerId).
+   * When given it must equal ownerId, else construction throws, so reads and
+   * writes can never use different identities.
+   */
+  coordinatorOwnerId?: string;
   stream?: Partial<EventStreamOptions>;
   /** Class-name-only error reporting; payloads and messages are not passed. */
   onError?: (info: { name: string; route: string }) => void;
@@ -93,7 +99,8 @@ export interface NemoDotsRouteDeps {
   providerTtlMs?: number;
 }
 
-const URL_SCHEME = /\b(?:postgres(?:ql)?|redis|rediss):\/\//i;
+/** Env values that are role connection strings are secrets by their scheme. */
+const ROLE_URL_VALUE = /^(?:postgres(?:ql)?|redis|rediss):\/\//i;
 
 const MissionIdParam = MissionIdSchema;
 
@@ -108,7 +115,20 @@ export function nemodotsRoutes(deps: NemoDotsRouteDeps): Hono {
   const env = deps.env ?? process.env;
   const now = deps.now ?? (() => new Date());
   const probeTimeoutMs = deps.probeTimeoutMs ?? 3_000;
-  const secrets = (deps.secrets ?? []).filter((s) => s.length >= 8);
+  if (
+    deps.coordinatorOwnerId !== undefined &&
+    deps.coordinatorOwnerId !== deps.ownerId
+  )
+    throw new Error('nemodotsRoutes: ownerId differs from the coordinator.');
+  // Exact-substring matching of configured secrets and of the real role URLs
+  // in the environment. User-controlled text (a goal that mentions redis://)
+  // is never pattern-matched: it must round-trip.
+  const secrets = [
+    ...(deps.secrets ?? []),
+    ...Object.values(env).filter(
+      (v): v is string => typeof v === 'string' && ROLE_URL_VALUE.test(v),
+    ),
+  ].filter((s) => s.length >= 8);
   const streamOptions: EventStreamOptions = {
     ...DEFAULT_EVENT_STREAM_OPTIONS,
     ...deps.stream,
@@ -148,7 +168,7 @@ export function nemodotsRoutes(deps: NemoDotsRouteDeps): Hono {
   /** JSON response that refuses to carry role URLs or configured secrets. */
   const send = (c: Context, body: unknown, status: 200 | 201 = 200) => {
     const text = JSON.stringify(body);
-    if (URL_SCHEME.test(text) || secrets.some((s) => text.includes(s))) {
+    if (secrets.some((s) => text.includes(s))) {
       report(new Error('response guard'), 'guard');
       throw new RouteError(500, 'Internal error.');
     }
@@ -210,15 +230,19 @@ export function nemodotsRoutes(deps: NemoDotsRouteDeps): Hono {
     if (resolved.mode === 'blocked')
       throw new BlockedError(resolved.missingEnv);
     // The mission mode is always the server-resolved mode (I11): a body mode
-    // may only repeat it, and is not passed on.
+    // may only repeat it. The resolved mode is passed on, so the coordinator's
+    // own check against its config.mode runs as defence in depth (a route env
+    // and coordinator config that disagree is a 400, never a mislabelled
+    // mission).
     if (request.mode !== undefined && request.mode !== resolved.mode)
       throw new RouteError(
         400,
         'mode must equal the server mode or be omitted.',
       );
-    const { mode: _mode, ...rest } = request;
-    void _mode;
-    const mission = await deps.control.create(rest);
+    const mission = await deps.control.create({
+      ...request,
+      mode: resolved.mode,
+    });
     return send(c, mission, 201);
   });
 

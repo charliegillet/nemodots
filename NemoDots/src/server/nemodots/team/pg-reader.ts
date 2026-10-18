@@ -86,7 +86,9 @@ export function createPgTeamReader(pool: pg.Pool): TeamReader {
 
     async snapshotVector(modelCallId, context: AttemptContext) {
       if (!UUID.test(modelCallId)) return null;
-      const { rows } = await pool.query<{ dependency_vector: DependencyVector }>(
+      const { rows } = await pool.query<{
+        dependency_vector: DependencyVector;
+      }>(
         `SELECT s.dependency_vector
            FROM ledger.model_call_records m
            JOIN ledger.context_snapshots s ON s.id = m.context_snapshot_id

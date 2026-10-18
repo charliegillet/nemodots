@@ -95,10 +95,10 @@ export async function runModelCall(
     modelCallId,
     role: params.role,
   });
-  const stamp = (result as { provider?: { host: string; mode: 'live' | 'fixture' } })
-    .provider ?? { host: deps.inference.host(), mode: deps.inference.mode };
-  const failed =
-    result.outcome === 'failed' || result.outcome === 'aborted';
+  const stamp = (
+    result as { provider?: { host: string; mode: 'live' | 'fixture' } }
+  ).provider ?? { host: deps.inference.host(), mode: deps.inference.mode };
+  const failed = result.outcome === 'failed' || result.outcome === 'aborted';
   const record: ModelCallRecord = {
     id: modelCallId,
     scope: params.scope,

@@ -9,8 +9,6 @@ import { describe, expect, it } from 'vitest';
 import {
   admitAndCommit,
   configState,
-  createAttempt,
-  emitModelCall,
   externalChange,
   memberReceipt,
   observed,
@@ -104,10 +102,6 @@ describe('C10 inherited premise in the vector', () => {
       );
       expect(intent.status).toBe('blocked');
       expect(intent.blockReason).toBe('citation_out_of_scope');
-      // ...and a receipt of ANOTHER attempt's snapshot is equally foreign.
-      const other = await createAttempt(world);
-      const otherCall = await emitModelCall(world, other, [foreign]);
-      void otherCall;
     });
   });
 });
