@@ -70,20 +70,20 @@ async function starve<T>(
         receiptIds: [receiptId],
       }),
     );
-  await read(attempts[0]);
-  // One holder per round: attempt row k FOR UPDATE, remembered with its xid.
-  const holders: { release: () => Promise<void>; xid: string }[] = [];
-  for (let k = 0; k < ROUNDS; k += 1) {
+  // A holder keeps one attempt row FOR UPDATE, remembered with its xid. It is
+  // taken only after that attempt's reader committed its edge (the edge insert
+  // checks the attempt row and would wait for a holder).
+  const hold = async (attempt: Attempt) => {
     const client = await world.admin.connect();
     await client.query('BEGIN');
     await client.query(
       'SELECT 1 FROM coordinator.task_attempts WHERE id = $1 FOR UPDATE',
-      [attempts[k].attemptId],
+      [attempt.attemptId],
     );
     const { rows } = await client.query<{ xid: string }>(
       'SELECT pg_current_xact_id()::xid::text AS xid',
     );
-    holders.push({
+    return {
       xid: rows[0].xid,
       release: async () => {
         try {
@@ -92,8 +92,10 @@ async function starve<T>(
           client.release();
         }
       },
-    });
-  }
+    };
+  };
+  await read(attempts[0]);
+  const holders = [await hold(attempts[0])];
   const settled = register().then(
     (value) => ({ ok: true as const, value }),
     (error: Error & { code?: string }) => ({ ok: false as const, error }),
@@ -108,9 +110,11 @@ async function starve<T>(
       );
       return rows.length > 0;
     }, `registration blocked on holder ${k}`);
-    // ...so a new reader commits its edge while it holds no ledger lock...
+    // ...so a new reader commits its edge while it holds no ledger lock; the
+    // next round will have to wait for the new reader's attempt row...
     await read(attempts[k + 1]);
-    // ...and the round, once released, finds an attempt it did not lock.
+    if (k + 1 < ROUNDS) holders.push(await hold(attempts[k + 1]));
+    // ...and the released round finds an attempt it did not lock.
     await holders[k].release();
   }
   return settled;

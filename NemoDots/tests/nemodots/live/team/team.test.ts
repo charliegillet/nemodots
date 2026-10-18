@@ -133,7 +133,7 @@ describe('team on Crusoe', () => {
       );
       const investigatorId = await world.seedInvestigator(
         missionId,
-        'Establish whether the checkout service is healthy. If something is wrong, establish what, and make sure the necessary repair is carried out by someone able to do it.',
+        'Customers see intermittent 503 errors at checkout. Find the cause and get it repaired.',
       );
       const host = world.coordinator.createWorkerHost({
         workerId: 'live-workers',

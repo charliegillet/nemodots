@@ -312,33 +312,35 @@ describe('C13 through the real observe_source executor', () => {
               }
             : base.read(key, {} as never),
       });
-      const work: Promise<unknown>[] = pairs.map(
-        ({ attempt, call }, i) =>
-          new Promise<void>((resolve, reject) =>
-            setTimeout(
-              () => {
-                observe(observer, attempt, call, HEALTH).then(
-                  () => resolve(),
-                  reject,
-                );
+      // A starved superseding registration (finding CW-8, reproduced
+      // deterministically in c13-closure-unstable.test.ts) writes nothing and
+      // is the only rejection this race may produce.
+      const starved = { count: 0 };
+      const later = <T>(ms: number, run: () => Promise<T>) =>
+        new Promise<void>((resolve, reject) =>
+          setTimeout(() => {
+            run().then(
+              () => resolve(),
+              (error: { code?: string }) => {
+                if (error.code === 'closure_unstable') {
+                  starved.count += 1;
+                  resolve();
+                } else reject(error);
               },
-              (i * 3) % 11,
-            ),
-          ),
+            );
+          }, ms),
+        );
+      const work: Promise<unknown>[] = pairs.map(({ attempt, call }, i) =>
+        later((i * 3) % 11, () => observe(observer, attempt, call, HEALTH)),
       );
       for (let n = 1; n <= 6; n += 1)
         work.push(
-          new Promise<void>((resolve, reject) =>
-            setTimeout(
-              () => {
-                value = n;
-                registerObserved(world, 'checkout.health', {
-                  status: `v${n}`,
-                }).then(() => resolve(), reject);
-              },
-              (n * 5) % 13,
-            ),
-          ),
+          later((n * 5) % 13, () => {
+            value = n;
+            return registerObserved(world, 'checkout.health', {
+              status: `v${n}`,
+            });
+          }),
         );
       const settled = await Promise.allSettled(work);
       expect(
@@ -346,7 +348,15 @@ describe('C13 through the real observe_source executor', () => {
           .filter((r) => r.status === 'rejected')
           .map((r) => String((r as PromiseRejectedResult).reason)),
       ).toEqual([]);
+      // Whatever was starved, no running attempt rests on a superseded receipt
+      // and the head is a single supported receipt.
       expect(await unmarkedReaders(world)).toEqual([]);
+      const heads = await world.admin.query(
+        `SELECT 1 FROM ledger.observation_receipts r JOIN ledger.sources s ON s.id = r.source_id
+          WHERE s.key = $1 AND r.status = 'supported'`,
+        [HEALTH],
+      );
+      expect(heads.rows).toHaveLength(1);
       expect(world.deadlocks()).toEqual([]);
     });
   });
