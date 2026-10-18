@@ -150,6 +150,21 @@ export interface CoordinatorDeps {
   events: EventSinkPort;
   /** Wall clock for scheduling decisions made in JS (admission not-before). */
   clock: () => Date;
+  /**
+   * The recovery options this coordinator runs with (set by createCoordinator).
+   * Publication-rejection recovery and mission creation read the scope rule
+   * from here so every arm applies one rule everywhere.
+   */
+  recoveryOptions?: import('./recovery.js').RecoveryOptions;
+  /**
+   * Recovery scope rules by name (finding D8). `selective` is built in and
+   * cannot be replaced. A mission's rule is fixed at creation by the server
+   * (`control.create(request, { recoveryScopeRule })`), never by a client.
+   */
+  recoveryScopeRules?: Record<
+    string,
+    import('../contracts/index.js').RecoveryScopeRule
+  >;
 }
 
 /** What a worker handler sees: the server-built identity plus attempt facts. */

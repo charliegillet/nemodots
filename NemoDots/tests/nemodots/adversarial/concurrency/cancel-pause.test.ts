@@ -177,7 +177,10 @@ describe('lock order: commit vs pause vs closure registration', () => {
     }));
 });
 
-// FINDING C-06 (medium, liveness). Event writers that lock the INTENT first
+// C-06 (medium, liveness): REPRODUCED 2/2 (deadlocks=1, wait graph: pause on
+// the events advisory lock, settle on the missions tuple), then fixed in the
+// working tree (settle.ts, reconcile.ts, dispatch.ts recordOutcome use
+// lockMissionThenIntent, 06:21). Before the fix, event writers that locked the INTENT first
 // and never the mission (actions/settle.ts settleFromHistory / settleMismatch /
 // settleSuperseded, reconcile.ts, dispatch.ts recordOutcome) take the C6
 // events advisory lock (coordinator/events.ts append) and THEN the INSERT's
@@ -187,7 +190,7 @@ describe('lock order: commit vs pause vs closure registration', () => {
 // advisory lock, the settle waits for the mission row: 40P01. The window is
 // widened by holding the attempt row that pause locks after the mission.
 describe('lock order: intent-first event writers vs pause', () => {
-  it('FINDING C-06: settleFromHistory concurrent with a pause does not deadlock', () =>
+  it('C-06 regression: settleFromHistory concurrent with a pause does not deadlock', () =>
     withEnv(async (env) => {
       const sc = await proposeSetConfig(env);
       const fence = await fenceOf(env, sc.intent.id);
@@ -212,7 +215,7 @@ describe('lock order: intent-first event writers vs pause', () => {
         const settled = settle(
           env.actions.settleFromHistory(sc.intent.id as never, {
             afterDigest: after.afterDigest,
-            configVersion: after.targetVersionAfter,
+            configVersion: after.targetVersionAfter as number,
           }),
         );
         await waitForLockWaiters(env, 2);

@@ -91,7 +91,12 @@ export interface LiveRig {
   observer: SourceObserver;
   reads: TeamReads;
   scope(missionId: string): Scope;
-  proposals: { input: unknown; modelCallId: string; toolCallId: string }[];
+  proposals: {
+    input: unknown;
+    modelCallId: string;
+    toolCallId: string;
+    taskId: string;
+  }[];
 }
 
 export async function withLiveRig<T>(
@@ -102,6 +107,9 @@ export async function withLiveRig<T>(
     const config: CoordinatorConfig = {
       ...DEFAULT_CONFIG,
       mode: 'live',
+      // Tokens are counted input + output per attempt; the 20 000 default in
+      // bootstrap.ts predates that rule (see the W4.1 report for the measured need).
+      taskDefaults: { ...DEFAULT_CONFIG.taskDefaults, maxTokens: 400_000 },
       provider: {
         host: new URL(process.env.OPENAI_BASE_URL!).host,
         plannerModel: process.env.OPENAI_MODEL!,
@@ -317,6 +325,29 @@ export function instrument<
     }
   };
   return { adapter: wrapped, stats };
+}
+
+/** Peak number of simultaneous HTTP attempts, from the recorded attempt intervals. */
+export function peakConcurrency(
+  attempts: { startedAt: string; finishedAt: string | null }[],
+): number {
+  const edges = attempts.flatMap((a) =>
+    a.finishedAt
+      ? [
+          { at: Date.parse(a.startedAt), delta: 1 },
+          { at: Date.parse(a.finishedAt), delta: -1 },
+        ]
+      : [],
+  );
+  // at equal times a finish counts before a start
+  edges.sort((x, y) => x.at - y.at || x.delta - y.delta);
+  let current = 0;
+  let peak = 0;
+  for (const edge of edges) {
+    current += edge.delta;
+    peak = Math.max(peak, current);
+  }
+  return peak;
 }
 
 export type { pg };

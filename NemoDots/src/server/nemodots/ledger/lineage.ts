@@ -61,7 +61,8 @@ export async function verifiedSelfWriteAction(
  * The nodes of the acting lineage of intent `actionId`: the intent itself,
  * the attempt(s) and model call(s) that emitted it (evidence edges into the
  * intent, or the intent row), their tasks, and the outputs those attempts
- * published. Read-only.
+ * published, then the delegation ancestors of the acting task with their
+ * attempts and outputs. Read-only.
  */
 export async function selfWriteLineage(
   client: PgClient,
@@ -110,34 +111,95 @@ export async function selfWriteLineage(
       add('model_call', intent.rows[0].model_call_id);
     }
   }
-  if (attempts.size === 0) return [...nodes.values()];
-
   const ids = [...attempts];
-  const tasks = await client.query<{ task_id: string | null }>(
-    `SELECT DISTINCT task_id FROM ledger.dependency_nodes
-      WHERE kind = 'attempt' AND id = ANY($1::uuid[]) AND task_id IS NOT NULL`,
-    [ids],
-  );
-  for (const row of tasks.rows) add('task', row.task_id);
-  const outputs = await client.query<{ to_id: string }>(
-    `SELECT to_id FROM ledger.dependency_edges
-      WHERE from_kind = 'attempt' AND from_id = ANY($1::uuid[])
-        AND to_kind = 'task_output' AND kind = 'evidence'`,
-    [ids],
-  );
-  for (const row of outputs.rows) add('task_output', row.to_id);
-  const outputTable = await client.query<{ present: boolean }>(
-    'SELECT to_regclass($1) IS NOT NULL AS present',
-    [`${schema}.task_outputs`],
-  );
-  if (outputTable.rows[0]?.present) {
-    const published = await client
-      .query<{ id: string }>(
+  const taskIds = new Set<string>();
+  for (const node of nodes.values())
+    if (node.kind === 'task') taskIds.add(node.id);
+  if (ids.length > 0) {
+    const tasks = await client.query<{ task_id: string | null }>(
+      `SELECT DISTINCT task_id FROM ledger.dependency_nodes
+        WHERE kind = 'attempt' AND id = ANY($1::uuid[]) AND task_id IS NOT NULL`,
+      [ids],
+    );
+    for (const row of tasks.rows) {
+      add('task', row.task_id);
+      if (row.task_id) taskIds.add(row.task_id);
+    }
+    const outputs = await client.query<{ to_id: string }>(
+      `SELECT to_id FROM ledger.dependency_edges
+        WHERE from_kind = 'attempt' AND from_id = ANY($1::uuid[])
+          AND to_kind = 'task_output' AND kind = 'evidence'`,
+      [ids],
+    );
+    for (const row of outputs.rows) add('task_output', row.to_id);
+    if (await hasColumn(client, schema, 'task_outputs', 'attempt_id')) {
+      const published = await client.query<{ id: string }>(
         `SELECT id FROM ${schema}.task_outputs WHERE attempt_id = ANY($1::uuid[])`,
         [ids],
-      )
-      .catch(() => ({ rows: [] as { id: string }[] }));
-    for (const row of published.rows) add('task_output', row.id);
+      );
+      for (const row of published.rows) add('task_output', row.id);
+    }
+  }
+
+  // Delegation ancestors: the tasks that delegated, directly or transitively,
+  // to the acting task, with their attempts and outputs. Their premise became
+  // the expected revision through the delegated repair, so they are part of
+  // the acting lineage. Siblings (other children of an ancestor) and every
+  // branch whose support does not run through the delegation chain are not.
+  if (
+    taskIds.size > 0 &&
+    (await hasColumn(client, schema, 'tasks', 'parent_id'))
+  ) {
+    const ancestors = await client.query<{ id: string }>(
+      `WITH RECURSIVE up(id, parent_id) AS (
+         SELECT t.id, t.parent_id FROM ${schema}.tasks t WHERE t.id = ANY($1::uuid[])
+         UNION
+         SELECT p.id, p.parent_id FROM ${schema}.tasks p
+           JOIN up ON p.id = up.parent_id
+           JOIN ${schema}.tasks child ON child.id = up.id AND child.mission_id = p.mission_id
+       )
+       SELECT id FROM up WHERE NOT (id = ANY($1::uuid[]))`,
+      [[...taskIds]],
+    );
+    const ancestorIds = ancestors.rows.map((row) => row.id);
+    for (const id of ancestorIds) add('task', id);
+    if (ancestorIds.length > 0) {
+      const theirAttempts = await client.query<{ id: string }>(
+        `SELECT id FROM ledger.dependency_nodes
+          WHERE kind = 'attempt' AND task_id = ANY($1::uuid[])`,
+        [ancestorIds],
+      );
+      for (const row of theirAttempts.rows) add('attempt', row.id);
+      const theirOutputs = await client.query<{ to_id: string }>(
+        `SELECT e.to_id FROM ledger.dependency_edges e
+           JOIN ledger.dependency_nodes n ON n.kind = 'attempt' AND n.id = e.from_id
+          WHERE e.from_kind = 'attempt' AND e.to_kind = 'task_output'
+            AND e.kind = 'evidence' AND n.task_id = ANY($1::uuid[])`,
+        [ancestorIds],
+      );
+      for (const row of theirOutputs.rows) add('task_output', row.to_id);
+      if (await hasColumn(client, schema, 'task_outputs', 'task_id')) {
+        const published = await client.query<{ id: string }>(
+          `SELECT id FROM ${schema}.task_outputs WHERE task_id = ANY($1::uuid[])`,
+          [ancestorIds],
+        );
+        for (const row of published.rows) add('task_output', row.id);
+      }
+    }
   }
   return [...nodes.values()];
+}
+
+async function hasColumn(
+  client: PgClient,
+  schema: string,
+  table: string,
+  column: string,
+): Promise<boolean> {
+  const { rows } = await client.query(
+    `SELECT 1 FROM information_schema.columns
+      WHERE table_schema = $1 AND table_name = $2 AND column_name = $3`,
+    [schema, table, column],
+  );
+  return rows.length > 0;
 }

@@ -104,8 +104,6 @@ describe('readers: D2 stability', () => {
       expect((await read(s, 'checkout.metrics')).normalizedValue).toEqual({
         errorClasses: [],
         cacheDecodeError: null,
-        cacheHitRatioDecile: 9,
-        errorRateDecile: 0,
       });
     });
   });
@@ -120,9 +118,10 @@ describe('readers: D2 stability', () => {
       const inventoryBefore = await read(s, 'checkout.inventory/PROBE-SKU');
       expect(inventoryBefore.normalizedValue).toEqual({
         sku: 'PROBE-SKU',
-        authorityQuantity: 1_000_000,
-        apiQuantity: 1_000_000,
         consistent: true,
+        authorityStock: 'ok',
+        apiStock: 'ok',
+        divergence: 0,
       });
 
       const result = await probeFor(s).execute();
@@ -168,25 +167,27 @@ describe('readers: D2 stability', () => {
         await s.inject('stale_replica')
       ).done;
       s.reloadConfig();
-      const value = (await read(s, 'checkout.inventory/SKU-0004'))
-        .normalizedValue as {
-        authorityQuantity: number;
-        apiQuantity: number;
-        consistent: boolean;
-      };
+      const result = await read(s, 'checkout.inventory/SKU-0004');
+      const value = result.normalizedValue as InventoryValue;
       expect(value.consistent).toBe(false);
-      // the API view is the frozen replica snapshot, the authority has moved on
+      // the API view is the frozen replica snapshot, the authority has moved on:
+      // the digest carries the lag (divergence), the raw body the exact numbers
       const replica = await s.pools.verifier.query(
         "SELECT quantity FROM checkout.inventory_replica WHERE sku = 'SKU-0004'",
       );
-      expect(value.apiQuantity).toBe(replica.rows[0].quantity);
-      expect(
-        value.apiQuantity - value.authorityQuantity,
-      ).toBeGreaterThanOrEqual(2);
+      const raw = result.raw as {
+        authority: { quantity: number };
+        api: { quantity: number };
+      };
+      expect(raw.api.quantity).toBe(replica.rows[0].quantity);
+      expect(value.divergence).toBe(raw.api.quantity - raw.authority.quantity);
+      expect(value.divergence as number).toBeGreaterThanOrEqual(2);
       expect(
         (await read(s, 'checkout.inventory/NOT-A-SKU')).normalizedValue,
       ).toMatchObject({
-        authorityQuantity: null,
+        authorityStock: null,
+        apiStock: null,
+        divergence: null,
         consistent: false,
       });
     });
@@ -454,9 +455,10 @@ describe('acceptance probe', () => {
 
 type InventoryValue = {
   sku: string;
-  authorityQuantity: number | null;
-  apiQuantity: number | null;
   consistent: boolean;
+  authorityStock: 'negative' | 'zero' | 'low' | 'ok' | null;
+  apiStock: 'negative' | 'zero' | 'low' | 'ok' | null;
+  divergence: number | null;
 };
 const inventoryOf = async (s: Sandbox, sku: string) =>
   (await read(s, `checkout.inventory/${sku}`))
@@ -541,11 +543,27 @@ describe('readers: inventory is read as a stable pair', () => {
           }),
         ),
       );
-      const raced = (
-        await reader.read('checkout.inventory/SKU-0001' as SourceKey, scope)
-      ).normalizedValue as InventoryValue;
+      const result = await reader.read(
+        'checkout.inventory/SKU-0001' as SourceKey,
+        scope,
+      );
+      const raced = result.normalizedValue as InventoryValue;
       expect(raced.consistent).toBe(true);
-      expect(raced.authorityQuantity).toBe(before.authorityQuantity! - 2);
+      expect(raced.divergence).toBe(0);
+      // ordinary stock movement does not leave the band: no new revision
+      expect(raced).toEqual(before);
+      // the raw read still saw the committed order
+      expect(
+        (result.raw as { authority: { quantity: number } }).authority.quantity,
+      ).toBe(
+        Number(
+          (
+            await s.pools.verifier.query(
+              "SELECT quantity FROM checkout.inventory WHERE sku = 'SKU-0001'",
+            )
+          ).rows[0].quantity,
+        ),
+      );
     });
   });
 

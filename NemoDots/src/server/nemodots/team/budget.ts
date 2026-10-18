@@ -1,7 +1,18 @@
-// Per-attempt budget: iterations (contract maximum 12) and generated tokens.
+// Per-attempt budget: iterations (contract maximum 12) and tokens. Tokens are
+// input + output, since input dominates cost. Cached tokens are reported
+// separately and `null` (the provider did not say) stays distinct from 0.
 import type { Usage } from '../contracts/index.js';
 
 export const MAX_LOOP_ITERATIONS = 12;
+
+export interface TokenReport {
+  promptTokens: number;
+  completionTokens: number;
+  /** Sum of the cached tokens providers reported; null when none did. */
+  cachedTokens: number | null;
+  /** Calls whose input or output count was unavailable (not counted as 0 in spirit). */
+  callsWithUnavailableUsage: number;
+}
 
 export interface AttemptBudget {
   readonly maxIterations: number;
@@ -11,8 +22,10 @@ export interface AttemptBudget {
   next(): boolean;
   isLastIteration(): boolean;
   spend(usage: Usage | null): void;
+  /** input + output tokens counted so far. */
   spentTokens(): number;
   tokensExhausted(): boolean;
+  report(): TokenReport;
 }
 
 export function createBudget(limits: {
@@ -24,7 +37,10 @@ export function createBudget(limits: {
     Math.min(MAX_LOOP_ITERATIONS, limits.maxIterations),
   );
   let iteration = 0;
-  let spent = 0;
+  let prompt = 0;
+  let completion = 0;
+  let cached: number | null = null;
+  let unavailable = 0;
   return {
     maxIterations,
     maxTokens: limits.maxTokens,
@@ -36,12 +52,25 @@ export function createBudget(limits: {
     },
     isLastIteration: () => iteration >= maxIterations,
     spend(usage) {
+      if (
+        !usage ||
+        usage.promptTokens === null ||
+        usage.completionTokens === null
+      )
+        unavailable += 1;
       if (!usage) return;
-      // Output tokens only: the prompt is re-sent every iteration and is
-      // already bounded by the iteration cap and the per-item caps.
-      spent += usage.completionTokens ?? 0;
+      prompt += usage.promptTokens ?? 0;
+      completion += usage.completionTokens ?? 0;
+      if (usage.cachedTokens !== null)
+        cached = (cached ?? 0) + usage.cachedTokens;
     },
-    spentTokens: () => spent,
-    tokensExhausted: () => spent >= limits.maxTokens,
+    spentTokens: () => prompt + completion,
+    tokensExhausted: () => prompt + completion >= limits.maxTokens,
+    report: () => ({
+      promptTokens: prompt,
+      completionTokens: completion,
+      cachedTokens: cached,
+      callsWithUnavailableUsage: unavailable,
+    }),
   };
 }

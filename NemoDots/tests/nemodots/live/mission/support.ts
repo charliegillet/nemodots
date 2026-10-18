@@ -16,7 +16,13 @@ import path from 'node:path';
 import { readRolesFile } from '../../../../src/server/nemodots/config/roles-file.js';
 import { resolveMode } from '../../../../src/server/nemodots/inference/mode.js';
 
-export const APP_ROOT = path.resolve(import.meta.dirname, '..', '..', '..', '..');
+export const APP_ROOT = path.resolve(
+  import.meta.dirname,
+  '..',
+  '..',
+  '..',
+  '..',
+);
 const NAMES = ['OPENAI_API_KEY', 'OPENAI_BASE_URL', 'OPENAI_MODEL'];
 const SECRET_NAMES = ['OPENAI_API_KEY'];
 
@@ -37,7 +43,9 @@ export function requireLive() {
   const mode = resolveMode(process.env);
   if (mode.mode !== 'live') {
     const names = [
-      ...(mode.mode === 'blocked' ? [...mode.missingEnv, ...mode.invalidEnv] : []),
+      ...(mode.mode === 'blocked'
+        ? [...mode.missingEnv, ...mode.invalidEnv]
+        : []),
     ];
     const message = `BLOCKED: ${names.join(', ') || 'live mode'} missing`;
     console.error(message);
@@ -93,7 +101,9 @@ export async function startLiveInstance(): Promise<LiveInstance> {
   };
   const must = (label: string, result: { status: number; output: string }) => {
     if (result.status !== 0)
-      throw new Error(`${label} failed (exit ${result.status}): ${result.output}`);
+      throw new Error(
+        `${label} failed (exit ${result.status}): ${result.output}`,
+      );
   };
   must('init', exec(['init']));
   must('start', exec(['start']));
@@ -117,7 +127,10 @@ export async function startLiveInstance(): Promise<LiveInstance> {
     run: (entry) => exec(['run', entry]),
     stop() {
       exec(['stop']);
-      rmSync(path.join(APP_ROOT, '.local', name), { recursive: true, force: true });
+      rmSync(path.join(APP_ROOT, '.local', name), {
+        recursive: true,
+        force: true,
+      });
     },
   };
 }
@@ -147,4 +160,54 @@ export function writeResults(
   writeFileSync(path.join(dir, `mission-${suite}.json`), text, { mode: 0o600 });
 }
 
-export const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+export const sleep = (ms: number) =>
+  new Promise<void>((r) => setTimeout(r, ms));
+
+/** A redacted picture of where a mission is stuck: statuses, counts and error classes only. */
+export async function diagnose(
+  pool: {
+    query(
+      text: string,
+      values?: unknown[],
+    ): Promise<{ rows: Record<string, unknown>[] }>;
+  },
+  missionId: string,
+) {
+  const q = async (text: string) => (await pool.query(text, [missionId])).rows;
+  return {
+    mission: await q(
+      `SELECT status, transition_version, generation, left(coalesce(failure_reason, ''), 160) AS failure_reason
+         FROM coordinator.missions WHERE id = $1`,
+    ),
+    attemptFailures: await q(
+      `SELECT status, abort_reason, left(coalesce(failure_reason, ''), 200) AS failure_reason
+         FROM coordinator.task_attempts WHERE mission_id = $1 AND (failure_reason IS NOT NULL OR abort_reason IS NOT NULL)
+        ORDER BY started_at LIMIT 12`,
+    ),
+    modelCalls: await q(
+      `SELECT role, outcome, count(*)::int AS n FROM ledger.model_call_records WHERE mission_id = $1 GROUP BY 1, 2 ORDER BY 1, 2`,
+    ),
+    tasks: await q(
+      `SELECT role, status, count(*)::int AS n FROM coordinator.tasks WHERE mission_id = $1 GROUP BY role, status ORDER BY role, status`,
+    ),
+    attempts: await q(
+      `SELECT status, kind, (lease_expires_at < now()) AS lease_expired, count(*)::int AS n
+         FROM coordinator.task_attempts WHERE mission_id = $1 GROUP BY 1, 2, 3 ORDER BY 1, 2`,
+    ),
+    outbox: await q(
+      `SELECT topic, attempts, (processed_at IS NOT NULL) AS processed, (failed_at IS NOT NULL) AS failed,
+              left(coalesce(last_error, ''), 120) AS last_error
+         FROM coordinator.outbox WHERE mission_id = $1 OR mission_id IS NULL ORDER BY id DESC LIMIT 15`,
+    ),
+    invalidations: await q(
+      `SELECT source_key, reason, self_write, (resolved_at IS NOT NULL) AS resolved
+         FROM ledger.invalidation_events WHERE mission_ids ? $1::text ORDER BY created_at`,
+    ),
+    recoveries: await q(
+      `SELECT kind, count(*)::int AS n FROM coordinator.recovery_events WHERE mission_id = $1 GROUP BY kind ORDER BY kind`,
+    ),
+    lastEvents: await q(
+      `SELECT id, kind FROM coordinator.events WHERE mission_id = $1 ORDER BY id DESC LIMIT 8`,
+    ),
+  };
+}

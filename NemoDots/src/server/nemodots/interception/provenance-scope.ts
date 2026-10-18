@@ -39,3 +39,44 @@ export function addToScopeVector(
     entries,
   );
 }
+
+// Evidence read in earlier turns of a conversation (TOOL_COVERAGE R4). The next
+// turn replays the transcript, so what a replayed tool result was read from has
+// to be recalled server-side: the history itself comes from the client and
+// never supplies a receipt. Keyed by (thread, toolCallId); process-local and
+// bounded, so a restart or an eviction loses attribution, never invents it.
+const MAX_THREADS = 1000;
+const MAX_CALLS_PER_THREAD = 2000;
+const toolEvidence = new Map<string, Map<string, DependencyEntry[]>>();
+
+export function rememberToolEvidence(
+  threadId: string,
+  toolCallId: string,
+  entries: readonly DependencyEntry[],
+): void {
+  if (entries.length === 0) return;
+  const calls = toolEvidence.get(threadId) ?? new Map();
+  // Same id seen again in this thread: keep the union, never narrow.
+  calls.set(
+    toolCallId,
+    unionDependencyVectors(calls.get(toolCallId) ?? [], entries),
+  );
+  if (calls.size > MAX_CALLS_PER_THREAD)
+    calls.delete(calls.keys().next().value as string);
+  // Re-insert so the most recently used thread is evicted last.
+  toolEvidence.delete(threadId);
+  toolEvidence.set(threadId, calls);
+  if (toolEvidence.size > MAX_THREADS)
+    toolEvidence.delete(toolEvidence.keys().next().value as string);
+}
+
+export function recallToolEvidence(
+  threadId: string,
+  toolCallId: string,
+): readonly DependencyEntry[] {
+  return toolEvidence.get(threadId)?.get(toolCallId) ?? [];
+}
+
+export function resetToolEvidence(): void {
+  toolEvidence.clear();
+}

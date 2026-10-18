@@ -15,6 +15,7 @@ import {
   type ModelCallId,
   type ObservationReceipt,
   type ReceiptId,
+  sourceKeyFamily,
   type TaskId,
   type TeamToolName,
   unionDependencyVectors,
@@ -23,6 +24,7 @@ import { citationsOutOfScope, UnknownRunbookError } from '../context/index.js';
 import type { HandlerHelpers } from '../coordinator/index.js';
 import type { ClaimedAttempt } from '../coordinator/types.js';
 import { precheckDelegation } from './delegation.js';
+import { requireVerifierEnabled } from './policy.js';
 import type { TeamDeps } from './types.js';
 
 export interface LoopState {
@@ -32,6 +34,7 @@ export interface LoopState {
   readSetReceiptIds: string[];
   findingIds: string[];
   delegated: TaskId[];
+  delegatedVerifiers: TaskId[];
   proposedActionIds: string[];
 }
 
@@ -43,6 +46,7 @@ export function newLoopState(): LoopState {
     readSetReceiptIds: [],
     findingIds: [],
     delegated: [],
+    delegatedVerifiers: [],
     proposedActionIds: [],
   };
 }
@@ -110,6 +114,18 @@ function issuesOf(error: unknown): string {
     : (error as Error).message;
 }
 
+function refusalOf(content: string): { error?: string; detail?: string } {
+  const body = JSON.parse(content) as {
+    error?: string;
+    message?: string;
+    issues?: string[];
+  };
+  return {
+    error: body.error,
+    detail: (body.issues?.join('; ') ?? body.message ?? '').slice(0, 240),
+  };
+}
+
 export function createToolExecutor(
   deps: TeamDeps,
   claimed: ClaimedAttempt,
@@ -126,11 +142,30 @@ export function createToolExecutor(
     if (!context.capabilities.includes('observe'))
       return fail('capability_denied', 'this task may not observe sources');
     const input = TEAM_TOOL_INPUTS.observe_source.parse(args);
-    const receipt = await deps.observer.observe(context, {
-      sourceKey: input.sourceKey,
-      modelCallId: call.modelCallId,
-      toolCallId: call.toolCallId,
-    });
+    let receipt: ObservationReceipt;
+    try {
+      receipt = await deps.observer.observe(context, {
+        sourceKey: input.sourceKey,
+        modelCallId: call.modelCallId,
+        toolCallId: call.toolCallId,
+      });
+    } catch (error) {
+      // A registered key family with no reader (page, memory, runbook,
+      // acceptance) is a refusal the model can act on, not a failed attempt.
+      // Acceptance data stays model-invisible: no reader is added for it.
+      if ((error as Error).name === 'UnsupportedSourceError') {
+        // angle brackets would be escaped inside the data wrapper: use braces
+        const family = (
+          sourceKeyFamily(input.sourceKey) ?? 'requested'
+        ).replace(/<([^>]+)>/g, '{$1}');
+        return fail(
+          'source_unavailable',
+          `no reader serves the ${family} source family; observe one of the sources listed in the checkout-architecture runbook instead`,
+          { family },
+        );
+      }
+      throw error;
+    }
     const entry = entryOf(receipt);
     state.receipts.set(receipt.id, receipt);
     state.latestByKey.set(receipt.source.key, receipt);
@@ -166,6 +201,8 @@ export function createToolExecutor(
         toolCallId: call.toolCallId,
       });
       state.delegated.push(created.taskId);
+      if (input.role === 'verifier')
+        state.delegatedVerifiers.push(created.taskId);
       return done({
         taskId: created.taskId,
         created: created.created,
@@ -261,6 +298,19 @@ export function createToolExecutor(
     }
   }
 
+  /** True once a verifier this attempt delegated finished with a usable output. */
+  async function verifierConfirmed(): Promise<boolean> {
+    for (const id of state.delegatedVerifiers) {
+      const status = await deps.coordinator.getTaskStatus(
+        context.missionId,
+        id,
+      );
+      if (status.task.status === 'succeeded' && status.outputUsable === true)
+        return true;
+    }
+    return false;
+  }
+
   async function proposeAction(args: unknown, call: ToolCall) {
     const proposeCapabilities: Capability[] = [
       'propose_config_change',
@@ -306,6 +356,17 @@ export function createToolExecutor(
           expectedCurrentValueDigest: digest(observed.value),
         },
       };
+    }
+    if (requireVerifierEnabled(deps.config) && !(await verifierConfirmed())) {
+      if (!context.capabilities.includes('delegate'))
+        return fail(
+          'verification_unavailable',
+          'pre-change verification is required but this task may not delegate a verifier; ask for a replan',
+        );
+      return fail(
+        'verification_required',
+        'before proposing a change, delegate a verifier (delegate_task with role verifier) to confirm your reading independently, wait_for_children, then propose',
+      );
     }
     const input = TEAM_TOOL_INPUTS.propose_action.parse(candidate);
     const outside = citationsOutOfScope(
@@ -353,7 +414,8 @@ export function createToolExecutor(
     call: ToolCall,
   ): Promise<ToolOutcome> {
     const known = name as TeamToolName;
-    if (!(known in TEAM_TOOL_INPUTS))
+    // own keys only: 'constructor', 'toString', '__proto__' are not tools
+    if (!Object.hasOwn(TEAM_TOOL_INPUTS, name))
       return fail('unknown_tool', `no tool named ${name}`);
     let outcome: ToolOutcome;
     try {
@@ -423,6 +485,7 @@ export function createToolExecutor(
       attemptId: context.attemptId,
       name,
       ok: outcome.ok,
+      ...(outcome.ok ? {} : refusalOf(outcome.content)),
     });
     return outcome;
   }

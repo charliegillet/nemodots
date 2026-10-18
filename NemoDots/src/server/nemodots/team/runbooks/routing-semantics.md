@@ -3,7 +3,7 @@
 Inventory routing
 
 - The routing setting chooses where the API reads stock from. One option reads the authority database. The other reads a replica snapshot that can lag behind; its option name ends with `_stale`.
-- While reads go to the lagging replica, the API view of a product can disagree with the authority, orders can be accepted against stock that no longer exists and inventory can go negative. Health may still report ok. The per-product inventory source shows the authority value and the API value side by side and whether they agree.
+- While reads go to the lagging replica, the API view of a product can disagree with the authority, orders can be accepted against stock that no longer exists and inventory can go negative. Health may still report ok. The per-product inventory source states whether the authority and the API agree, a coarse stock band for each, and the divergence (API figure minus authority figure; zero when they agree).
 - The authority option is named with the English word meaning "first in rank" (the leading node of a leader and follower pair).
 - Customer data safety: never accept a repair that leaves reads on the lagging replica while orders are being placed.
 

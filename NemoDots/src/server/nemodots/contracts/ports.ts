@@ -6,6 +6,7 @@ import type {
   ReceiptId,
   Scope,
   SourceKey,
+  TaskId,
 } from './ids.js';
 import type { MissionEvent } from './events.js';
 import type {
@@ -18,7 +19,7 @@ import type {
 import type { ObservationReceipt } from './observation.js';
 import type { InvalidationEvent } from './recovery.js';
 import type { CreateMissionRequest, MissionSnapshot } from './routes.js';
-import type { AttemptContext, Mission } from './task.js';
+import type { AttemptContext, Mission, TaskRole, TaskStatus } from './task.js';
 import type { ToolSchema } from './tools.js';
 
 // CONTRACTS.md section 10: cross-package ports. Interfaces only; implementations
@@ -146,4 +147,38 @@ export interface RecoveryPort {
     actionId: ActionId,
     outcome: 'verified' | 'failed',
   ): Promise<void>;
+}
+
+/** rev3 (W6.1, D8): one task as a recovery scope rule sees it. */
+export interface RecoveryScopeTask {
+  id: TaskId;
+  parentId: TaskId | null;
+  /** Scheduling prerequisites (not evidence). */
+  prerequisites: TaskId[];
+  role: TaskRole;
+  status: TaskStatus;
+}
+
+/**
+ * rev3 (W6.1, D8): decides which tasks of one mission an invalidation restarts.
+ * The coordinator applies the result identically for every rule: fresh reads
+ * plus the invalidation summary, held-gate coalescing, replan bounds,
+ * admission checks and event recording. Only the scope differs between
+ * evaluation arms. A rule is a pure function of its input and selected per
+ * mission by name (`missions.recovery_scope_rule`, default 'selective');
+ * neither the model nor an HTTP client can choose it.
+ */
+export interface RecoveryScopeRule {
+  readonly name: string;
+  select(input: {
+    missionId: MissionId;
+    /** The mission-scoped closure from the ledger (evidence + inheritance edges). */
+    closureTaskIds: TaskId[];
+    /** Tasks whose own attempts read a superseded or retired receipt directly. */
+    directReaderTaskIds: TaskId[];
+    tasks: RecoveryScopeTask[];
+  }): {
+    /** Tasks to repair or replan; the rest are preserved. */
+    restartTaskIds: TaskId[];
+  };
 }

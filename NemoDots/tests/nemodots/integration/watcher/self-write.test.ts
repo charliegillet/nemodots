@@ -7,6 +7,7 @@ import type {
   ActionId,
   SourceKey,
 } from '../../../../src/server/nemodots/contracts/index.js';
+import { linkPublication } from '../../../../src/server/nemodots/ledger/index.js';
 import { advanceConfigTx } from '../../../../src/server/nemodots/sandbox/version-authority.js';
 import { attemptRow, recoveryKinds, taskRow } from '../coordinator/harness.js';
 import {
@@ -194,6 +195,47 @@ it('C7: stopped watcher, action commits v1->v2, injector writes v2->v3, restart:
   });
 });
 
+it('SW-3: an action row superseded by a later injector write settles verified without scheduling a postcondition; the head none classification drives repair', async () => {
+  await withWatcherEnv(async (env) => {
+    const { h } = env;
+    const ctx = await lineage(env);
+    // the proposal was published, so repair has an output to retire
+    await h.coordinator.publishOutput(ctx.actor.context, {
+      kind: 'handoff',
+      content: { proposed: true },
+      dependencyVector: [],
+    });
+    const { actionId } = await commitAsAction(env, ctx, 2, 1);
+    await env.inject(KEY, 5);
+
+    expect(await env.make().pass()).toMatchObject({ registered: 1, errors: 0 });
+
+    // X's own row matched: the intent is verified through the history walk
+    expect(env.intents.settled).toMatchObject([
+      { actionId, outcome: 'verified', version: 2 },
+    ]);
+    expect(h.intents.intents.get(actionId)?.status).toBe('verified');
+    // ...but the coordinator is not asked to verify a postcondition for it
+    expect(env.recovery.settlements).toEqual([]);
+    const head = (await receiptsOf(h, SOURCE)).at(-1)!;
+    expect(head).toMatchObject({ source_revision: 3, self_write: 'none' });
+    expect(env.recovery.invalidations[0].selfWrite).toBe('none');
+    const post = await h.admin.query(
+      `SELECT id FROM coordinator.tasks WHERE mission_id = $1 AND role = 'postcondition'`,
+      [ctx.planned.missionId],
+    );
+    expect(post.rows).toHaveLength(0);
+    const kinds = (await recoveryKinds(h, ctx.planned.missionId)).map(
+      (r) => r.kind,
+    );
+    expect(kinds).not.toContain('postcondition_scheduled');
+    // repair is the only way the acting task is routed; nothing is coalesced
+    // behind a postcondition (replan/branch bookkeeping covers the other branches)
+    expect(kinds).toContain('repair_scheduled');
+    expect(kinds).not.toContain('repair_coalesced');
+  });
+});
+
 it('a history row naming an unknown action excuses nothing and is logged', async () => {
   await withWatcherEnv(async (env) => {
     const { h } = env;
@@ -243,25 +285,38 @@ it('an owner edit through the manual path registers immediately and never record
   });
 });
 
-// DEPENDENCY (ledger): ARCHITECTURE 5.4 says a verified self-write does not
-// invalidate the acting lineage. The ledger closure still follows the actor's
-// evidence edge, so this fails today. `it.fails` turns into a red test the day
-// the ledger excuses the lineage: flip it to `it` then.
-it.fails(
-  'acting lineage keeps its output after a verified self-write',
-  async () => {
-    await withWatcherEnv(async (env) => {
-      const { h } = env;
-      const ctx = await lineage(env);
-      await h.coordinator.publishOutput(ctx.actor.context, {
-        kind: 'handoff',
-        content: { proposed: true },
-        dependencyVector: [],
-      });
-      await commitAsAction(env, ctx, 2, 1);
-      await env.make().pass();
-      expect((await taskRow(h, ctx.actorTask)).status).toBe('succeeded');
-      expect((await taskRow(h, ctx.actorTask)).output_id).not.toBeNull();
+// ARCHITECTURE 5.4: a verified self-write does not invalidate the acting
+// lineage. The lineage is found through the attempt -> intent evidence edge that
+// actions/propose.ts records with linkPublication, so the fixture records it too.
+it('acting lineage keeps its output after a verified self-write', async () => {
+  await withWatcherEnv(async (env) => {
+    const { h } = env;
+    const ctx = await lineage(env);
+    await h.coordinator.publishOutput(ctx.actor.context, {
+      kind: 'handoff',
+      content: { proposed: true },
+      dependencyVector: [],
     });
-  },
-);
+    const { actionId } = await commitAsAction(env, ctx, 2, 1);
+    const client = await h.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await linkPublication(client, {
+        missionId: ctx.planned.missionId,
+        taskId: ctx.actorTask,
+        attemptId: ctx.actor.context.attemptId,
+        modelCallIds: [],
+        actionId,
+      });
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
+    await env.make().pass();
+    expect((await taskRow(h, ctx.actorTask)).status).toBe('succeeded');
+    expect((await taskRow(h, ctx.actorTask)).output_id).not.toBeNull();
+  });
+});

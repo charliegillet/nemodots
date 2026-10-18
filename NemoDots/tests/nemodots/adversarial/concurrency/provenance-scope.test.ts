@@ -8,10 +8,14 @@
 // commit on, before any watcher runs.
 import { describe, expect, it } from 'vitest';
 import { createIntentReader } from '../../../../src/server/nemodots/actions/index.js';
-import type { DependencyVector } from '../../../../src/server/nemodots/contracts/index.js';
+import {
+  delegableRoles,
+  type DependencyVector,
+} from '../../../../src/server/nemodots/contracts/index.js';
 import { createEventSink } from '../../../../src/server/nemodots/coordinator/events.js';
 import {
   addReadSet,
+  delegate,
   publishFinding,
   publishOutput,
 } from '../../../../src/server/nemodots/coordinator/publish.js';
@@ -61,7 +65,9 @@ const entryOf = (r: {
     receiptId: r.id,
   }) as DependencyVector[number];
 
-// FINDING C-03 (medium). publishOutput / publishFinding assert currency of
+// C-03 (medium): REPRODUCED (C-03a/b failing 05:5x-06:05), then fixed in the
+// working tree (publish.ts outputVector(), 06:19 for outputs/findings, 06:22
+// for delegate). Before the fix publishOutput / publishFinding asserted currency of
 // union(caller vector, inheritedDependencyVector) only
 // (coordinator/publish.ts:218-223 and :566-583). The attempt's own recorded
 // read set (task_attempts.read_set_vector, written by addReadSet) is not part
@@ -70,7 +76,7 @@ const entryOf = (r: {
 // watcher registers the change. Today's only caller (team/worker-loop.ts:182)
 // passes a conservative union, so this is a boundary gap rather than a live
 // exploit path, but the coordinator is the enforcement point G2 names.
-describe('FINDING C-03: an output that drops a recorded dependency', () => {
+describe('C-03 regression: a publication that drops a recorded dependency', () => {
   async function staleReadSet(env: Env) {
     const world = await createWorld(env);
     const member = await observeMember(env, world, 'db.pool_max');
@@ -80,7 +86,7 @@ describe('FINDING C-03: an output that drops a recorded dependency', () => {
     return { world, member };
   }
 
-  it('FINDING C-03a: publishOutput with a vector that omits the stale read is rejected', () =>
+  it('C-03a regression: publishOutput with a vector that omits the stale read is rejected', () =>
     withEnv(async (env) => {
       const { world } = await staleReadSet(env);
       const result = await settle(
@@ -98,7 +104,7 @@ describe('FINDING C-03: an output that drops a recorded dependency', () => {
       expect(rows[0].n).toBe(0);
     }));
 
-  it('FINDING C-03b: publishFinding with a vector that omits the stale read is rejected', () =>
+  it('C-03b regression: publishFinding with a vector that omits the stale read is rejected', () =>
     withEnv(async (env) => {
       const { world } = await staleReadSet(env);
       const result = await settle(
@@ -110,6 +116,47 @@ describe('FINDING C-03: an output that drops a recorded dependency', () => {
         }),
       );
       expect(result.ok).toBe(false);
+    }));
+
+  // C-03c: the handoff to a child (delegate) follows the same rule. Its gap
+  // was read in the code (publish.ts delegate vector = requested ∪ inherited)
+  // and fixed (06:22) before this test's valid setup first ran.
+  it('C-03c regression: delegate with a vector that omits the stale read is rejected', () =>
+    withEnv(async (env) => {
+      const { world } = await staleReadSet(env);
+      // a mission/task that may delegate (caps), so only the support check decides
+      await env.admin.query(
+        `UPDATE coordinator.missions SET budgets = '{"maxDepth": 4, "maxBreadth": 4, "maxTasks": 16}'::jsonb WHERE id = $1`,
+        [world.missionId],
+      );
+      await env.admin.query(
+        `UPDATE coordinator.tasks SET budget = '{"maxIterations": 4, "maxTokens": 1000, "maxChildren": 4}'::jsonb WHERE id = $1`,
+        [world.taskId],
+      );
+      const role = delegableRoles('cache_specialist' as never)[0];
+      const deps = {
+        ...(publishDeps(env) as object),
+        config: {
+          taskDefaults: { maxIterations: 4, maxTokens: 1000, maxAttempts: 2 },
+        },
+      } as unknown as Parameters<typeof delegate>[0];
+      const result = await settle(
+        delegate(deps, world.ctx, {
+          title: 'check the pool',
+          role,
+          question: 'is the pool still at 10?',
+          dependsOn: [],
+          justification: 'adversarial reproduction',
+          dependencyVector: [],
+        }),
+      );
+      expect(result.ok).toBe(false);
+      expect(!result.ok && result.error.name).toBe('SupportError');
+      const { rows } = await env.admin.query(
+        'SELECT count(*)::int AS n FROM coordinator.tasks WHERE mission_id = $1',
+        [world.missionId],
+      );
+      expect(rows[0].n).toBe(1);
     }));
 
   it('cleared: the same output carrying its read is rejected (G3 before the watcher)', () =>

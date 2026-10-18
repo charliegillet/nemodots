@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import { isMutated } from '../config/mutation.js';
 import type { AttemptContext, TaskStatus } from '../contracts/index.js';
 import { FenceError } from './errors.js';
 import type { AttemptRow, MissionRow, TaskRow } from './rows.js';
@@ -87,22 +88,26 @@ export async function lockFencedAttempt(
       'mission_not_running',
       `mission is ${mission.status}`,
     );
-  if (attempt.status !== 'running')
+  if (attempt.status !== 'running' && !isMutated('ignore_fencing'))
     throw new FenceError(
       context.attemptId,
       'attempt_not_running',
       `attempt is ${attempt.status}`,
     );
+  // MUTATION ignore_fencing: a stale token, an expired lease and a finished
+  // attempt still publish.
+  const ignoreFencing = isMutated('ignore_fencing');
   if (
-    attempt.fencing_token !== context.fencingToken ||
-    task.fence_seq !== context.fencingToken
+    !ignoreFencing &&
+    (attempt.fencing_token !== context.fencingToken ||
+      task.fence_seq !== context.fencingToken)
   )
     throw new FenceError(
       context.attemptId,
       'token_mismatch',
       `token ${context.fencingToken}, attempt ${attempt.fencing_token}, task ${task.fence_seq}`,
     );
-  if (!options.ignoreLease && !attemptResult.rows[0].lease_ok)
+  if (!ignoreFencing && !options.ignoreLease && !attemptResult.rows[0].lease_ok)
     throw new FenceError(context.attemptId, 'lease_expired');
   const accepted = options.taskStatuses ?? ['running', 'waiting'];
   if (!accepted.includes(task.status as TaskStatus))

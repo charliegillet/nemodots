@@ -3,6 +3,9 @@
   "version": 1,
   "class": "repairable_checkout_fault",
   "description": "Order writes are switched off by the maintenance flag (F5).",
+  "preconditions": {
+    "visible": ["writes_disabled"]
+  },
   "steps": [
     {
       "kind": "set_config",

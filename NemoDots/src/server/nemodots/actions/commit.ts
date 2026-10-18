@@ -18,6 +18,7 @@
 //
 // A flush mutates nothing in PostgreSQL: the commit records the desired state
 // and the target version the dispatch CAS will check (C11).
+import { isMutated } from '../config/mutation.js';
 import type {
   ActionId,
   ActionIntent,
@@ -84,7 +85,8 @@ export async function commit(
         'not_admitted',
         `intent is ${intent.status}`,
       );
-    if (intent.dispatch_fence !== dispatchFence)
+    // MUTATION ignore_fencing: neither the dispatch fence nor the lease is checked.
+    if (!isMutated('ignore_fencing') && intent.dispatch_fence !== dispatchFence)
       throw new DispatchFenceError(
         intent.id,
         'fence_mismatch',
@@ -94,7 +96,7 @@ export async function commit(
       'SELECT $1::timestamptz <= clock_timestamp() AS expired',
       [intent.dispatcher_lease_expires_at],
     );
-    if (lease.rows[0].expired)
+    if (lease.rows[0].expired && !isMutated('ignore_fencing'))
       throw new DispatchFenceError(intent.id, 'lease_expired');
 
     const evaluation = await evaluate(
@@ -133,7 +135,9 @@ export async function commit(
         {
           blockReason: reason,
           blockDetail: detail,
-          dispatchFence,
+          dispatchFence: isMutated('ignore_fencing')
+            ? undefined
+            : dispatchFence,
         },
       );
       events.push(decidedEvent(authorization, detail));
@@ -153,6 +157,8 @@ export async function commit(
           key: payload.key,
           value: payload.value,
           expectedVersion: intent.expected_target_version,
+          // MUTATION bypass_final_version_check: write whatever version is there.
+          unconditional: isMutated('bypass_final_version_check'),
           causedBy: { actor: 'action', actionId: intent.id },
         });
       } catch (error) {
@@ -183,7 +189,7 @@ export async function commit(
       'admitted',
       'committed',
       {
-        dispatchFence,
+        dispatchFence: isMutated('ignore_fencing') ? undefined : dispatchFence,
         set: [['committed_target_version', committedTargetVersion]],
       },
     );

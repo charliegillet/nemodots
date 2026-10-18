@@ -21,9 +21,17 @@ import { openMissionStream, type StreamStatus } from './mission-stream';
 // Data hooks for the mission page. The mission hook reconstructs from storage:
 // snapshot first, then the durable SSE stream resumes from the snapshot's
 // lastEventId, and a 3 s snapshot poll covers every moment the stream is not
-// open. All state transitions go through the pure reducer in mission-events.ts.
+// open (plus a slower reconciliation poll while it is). All state transitions go
+// through the pure reducer in mission-events.ts.
 
 export const SNAPSHOT_POLL_MS = 3000;
+/**
+ * While the stream is open the page still re-reads the snapshot this often.
+ * Some facts change without an event (a receipt's lastConfirmedAt advances each
+ * time the watcher confirms the source unchanged), and an evidence ledger that
+ * shows a stale "last confirmed" is a stale claim.
+ */
+export const RECONCILE_POLL_MS = 30_000;
 export const HEALTH_POLL_MS = 5000;
 
 const failureText = (error: unknown, fallback: string) =>
@@ -103,7 +111,12 @@ export function useMission(missionId: string): UseMissionResult {
         missionId,
         lastEventId: resumeFrom,
         onEvent: (event) => {
-          if (active) dispatch({ type: 'event', event });
+          if (!active) return;
+          dispatch({ type: 'event', event });
+          // A status event carries the new status, not the fields stored with
+          // it (failureReason, acceptanceReceiptId). Read them from storage
+          // rather than showing a terminal mission without its reason.
+          if (event.payload.kind === 'mission.status') void load();
         },
         onStatus: (status, detail) => {
           if (!active) return;
@@ -123,10 +136,15 @@ export function useMission(missionId: string): UseMissionResult {
       if (!loadedRef.current || streamRef.current !== 'open') void load();
     }, SNAPSHOT_POLL_MS);
 
+    const reconcile = setInterval(() => {
+      if (loadedRef.current && streamRef.current === 'open') void load();
+    }, RECONCILE_POLL_MS);
+
     return () => {
       active = false;
       controller.abort();
       clearInterval(timer);
+      clearInterval(reconcile);
       handle?.close();
       loadRef.current = null;
     };

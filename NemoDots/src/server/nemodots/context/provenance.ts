@@ -6,6 +6,7 @@ import {
   type DependencyVector,
   type TaskAttempt,
 } from '../contracts/index.js';
+import { isMutated } from '../config/mutation.js';
 
 // Provenance helpers (BUILD_PROMPT: a specialist can add but not remove
 // dependencies; findings C10/I8). Pure functions over contract types.
@@ -35,6 +36,9 @@ export function inheritDependencies(
   output: { dependencyVector?: readonly DependencyEntry[] },
   inputs: readonly (readonly DependencyEntry[])[],
 ): DependencyVector {
+  // MUTATION drop_inherited_edges: inherited dependencies are dropped.
+  if (isMutated('drop_inherited_edges'))
+    return unionDependencyVectors(output.dependencyVector ?? []);
   return unionDependencyVectors(output.dependencyVector ?? [], ...inputs);
 }
 

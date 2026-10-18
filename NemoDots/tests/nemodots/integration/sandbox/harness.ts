@@ -8,11 +8,15 @@ import {
   type CheckoutRuntime,
 } from '../../../../src/server/nemodots/sandbox/checkout-app.js';
 import { CONFIG_CACHE_MS } from '../../../../src/server/nemodots/sandbox/checkout-db.js';
+import type { PreconditionDeps } from '../../../../src/server/nemodots/sandbox/preconditions.js';
 import {
   Injector,
   type ScenarioRun,
 } from '../../../../src/server/nemodots/sandbox/injector.js';
 import { loadScenario } from '../../../../src/server/nemodots/sandbox/manifest.js';
+import { preconditionDepsFromReaders } from '../../../../src/server/nemodots/sandbox/preconditions.js';
+import { createSourceReaders } from '../../../../src/server/nemodots/sandbox/readers.js';
+import type { Scope } from '../../../../src/server/nemodots/contracts/ids.js';
 import { seedCheckout } from '../../../../src/server/nemodots/sandbox/seed.js';
 import { probeHeaderValue } from '../../../../src/server/nemodots/sandbox/probe-auth.js';
 import { withTestDatabase, type TestDatabase } from '../../helpers/test-db.js';
@@ -51,8 +55,19 @@ export interface Sandbox {
   probeHeader(runId: string): Record<string, string>;
   /** A fetch that routes to the in-process app, for readers/probe under test. */
   fetch: typeof fetch;
-  /** Starts a development-set scenario with the injector role. */
-  inject(id: string, seed?: number): Promise<ScenarioRun>;
+  /**
+   * Starts a development-set scenario with the injector role. Unless
+   * `verify: false`, it resolves only after the scenario's preconditions were
+   * established and its symptoms were seen through the production readers
+   * (rejects with ScenarioPreconditionFailed otherwise).
+   */
+  inject(
+    id: string,
+    seed?: number,
+    options?: { verify?: boolean },
+  ): Promise<ScenarioRun>;
+  /** Preconditions deps over this sandbox's readers (the clock is advanced between polls). */
+  preconditionDeps(): PreconditionDeps;
 }
 
 export interface SandboxOptions {
@@ -60,6 +75,15 @@ export interface SandboxOptions {
   /** Override the Redis URL the checkout uses (to simulate Redis being down). */
   redisUrl?: string;
 }
+
+const CHECKOUT_URL = 'http://checkout.invalid';
+const TEST_SCOPE = {
+  ownerId: 'owner',
+  missionId: '11111111-1111-4111-8111-111111111111',
+  spaceId: null,
+  environment: 'test',
+  resource: 'checkout',
+} as unknown as Scope;
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -140,11 +164,43 @@ export async function withSandbox<T>(
           probeHeader: (runId) => ({
             'x-nemodots-probe': probeHeaderValue(probeSecret, runId),
           }),
-          async inject(id, seed = 1) {
-            const run = await new Injector({
+          preconditionDeps() {
+            return preconditionDepsFromReaders(
+              createSourceReaders({
+                pg: pools.verifier,
+                redis: redis.client,
+                redisPrefix: redis.prefix,
+                checkoutUrl: CHECKOUT_URL,
+                fetch: sandbox.fetch,
+                now: clock.now,
+              }),
+              TEST_SCOPE,
+              {
+                checkoutUrl: CHECKOUT_URL,
+                fetch: sandbox.fetch,
+                // the checkout's configuration cache and health self-test
+                // follow the controllable clock
+                sleep: async (ms: number) => {
+                  clock.advance(CONFIG_CACHE_MS + 1);
+                  await sleep(Math.min(ms, 20));
+                },
+              },
+            );
+          },
+          async inject(id, seed = 1, options = {}) {
+            const injector = new Injector({
               pool: pools.injector,
               listenUrl: db.urls.injector,
-            }).start(loadScenario(id), seed);
+              preconditions:
+                options.verify === false
+                  ? undefined
+                  : sandbox.preconditionDeps(),
+            });
+            const manifest = loadScenario(id);
+            const run =
+              options.verify === false
+                ? await injector.start(manifest, seed)
+                : await injector.startVerified(manifest, seed);
             runs.push(run);
             return run;
           },

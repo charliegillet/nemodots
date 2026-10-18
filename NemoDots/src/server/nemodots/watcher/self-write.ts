@@ -6,6 +6,8 @@
 // mismatch)) and the coordinator is told. The receipt the watcher registers
 // takes its `selfWrite` from the LAST row only: a later injector or owner write
 // makes the head `none`, so the full invalidation reaches the acting lineage.
+// The coordinator is told of a verified action only when its row is that head
+// (postcondition verification); a superseded verified row is settled silently.
 import type {
   ActionId,
   PgClient,
@@ -106,7 +108,14 @@ export async function classifyHistory(
       version: row.version,
       afterDigest: row.afterDigest,
     });
-    await deps.recovery.onSelfWriteSettled(actionId, outcome);
+    // A verified self-write schedules a postcondition attempt, which only
+    // makes sense while the action's row is the head being registered. When a
+    // later row (injector, owner, another action) supersedes it, the intent is
+    // still settled from its own row, but the head's `none` classification and
+    // its full invalidation drive repair; no postcondition is scheduled.
+    const isHead = row.version === rows[rows.length - 1].version;
+    if (outcome === 'failed' || isHead)
+      await deps.recovery.onSelfWriteSettled(actionId, outcome);
     settled.push({ actionId, outcome });
     last = {
       selfWrite: matches ? 'verified' : 'mismatch',

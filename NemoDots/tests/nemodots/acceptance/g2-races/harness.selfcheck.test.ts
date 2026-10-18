@@ -15,6 +15,7 @@ import {
   errText,
   isSettled,
   withWorld,
+  type World,
 } from './harness.js';
 
 const UUID =
@@ -22,6 +23,38 @@ const UUID =
 const NONE = { need: [] as never[] };
 
 describe('G2 harness self-check', () => {
+  it('H-8 planner: every mission has exactly one succeeded planner with a published attempt and no replan yet (under replanCap); planner:false creates none', async () => {
+    const plannerRows = async (w: World, m: string) =>
+      (
+        await w.admin.query(
+          `SELECT t.status, (SELECT count(*)::int FROM coordinator.task_attempts a
+                              WHERE a.task_id = t.id AND a.status = 'published') AS published
+             FROM coordinator.tasks t WHERE t.mission_id = $1 AND t.role = 'planner'`,
+          [m],
+        )
+      ).rows;
+    await withWorld(async (w) => {
+      expect(await plannerRows(w, w.mission)).toEqual([
+        { status: 'succeeded', published: 1 },
+      ]);
+      const other = await w.seedMission();
+      expect(await plannerRows(w, other)).toEqual([
+        { status: 'succeeded', published: 1 },
+      ]);
+      const replans = await w.admin.query(
+        "SELECT count(*)::int n FROM coordinator.recovery_events WHERE kind IN ('replan_scheduled','replan_coalesced')",
+      );
+      expect(replans.rows[0].n).toBe(0);
+      expect((w.deps as Rec).config.replanCap).toBeGreaterThan(0);
+    }, NONE);
+    await withWorld(
+      async (w) => {
+        expect(await plannerRows(w, w.mission)).toEqual([]);
+      },
+      { need: [], planner: false },
+    );
+  });
+
   it('H-1 setup: version authority holds the setup values, one supported receipt per label at the live revision', async () => {
     await withWorld(async (w) => {
       for (const [k, v] of Object.entries(SETUP_CONFIG)) {

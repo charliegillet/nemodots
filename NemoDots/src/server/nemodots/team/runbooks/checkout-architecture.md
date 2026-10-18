@@ -12,9 +12,9 @@ Components
 What you can observe (source keys)
 
 - `checkout.health`: overall status, the individual checks and the error classes currently reported.
-- `checkout.metrics`: request and error counters in coarse buckets, and, when the cache fails to decode an entry, the schema the checkout expects and the schema it found.
+- `checkout.metrics`: which error classes occurred recently and, when the cache fails to decode an entry, the schema the checkout expects and the schema it found. It carries no counters or rates: an empty class list means no server-side error was seen in the window.
 - `checkout.orders.recent`: coarse recent order activity.
-- `checkout.inventory/<sku>`: stock for one product as the authority database holds it and as the API reports it, and whether they agree.
+- `checkout.inventory/<sku>`: for one product, whether the authority database and the API agree, a coarse stock band for each (negative, zero, low or ok) and the divergence, which is the API figure minus the authority figure and zero when they agree.
 - `redis.stats`: how many cached entries exist, grouped by namespace and schema suffix.
 - `checkout.config/<key>`: one configuration key as `{key, value, version}`.
 - `checkout.config`: the sorted list of configuration keys and the membership version.

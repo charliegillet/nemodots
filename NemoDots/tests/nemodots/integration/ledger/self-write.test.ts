@@ -252,3 +252,164 @@ describe('verified self-write', () => {
     expect(result.invalidation!.affected.attemptIds).toHaveLength(2);
   });
 });
+
+// SW-1 (G2-16e): the investigator that delegated the acting specialist is part
+// of the acting lineage (its premise became the expected revision through its
+// own delegated repair); siblings and unrelated branches are not.
+async function delegated(w: World) {
+  const { admin, app } = getDb();
+  const missionId = w.scope.missionId;
+  const [parentTask, siblingTask] = [randomUUID(), randomUUID()];
+  const [parentAttempt, siblingAttempt] = [randomUUID(), randomUUID()];
+  const parentOutput = randomUUID();
+  await admin.query(
+    `INSERT INTO coordinator.tasks (id, mission_id, depth, ordinal, title, question, role, status, generation, budget)
+     VALUES ($1, $2, 0, 2, 'parent', 'q', 'investigator', 'waiting', 0, '{}'::jsonb)`,
+    [parentTask, missionId],
+  );
+  await admin.query(
+    `UPDATE coordinator.tasks SET parent_id = $2, depth = 1, justification = 'repair' WHERE id = $1`,
+    [w.actorTask, parentTask],
+  );
+  await admin.query(
+    `INSERT INTO coordinator.tasks (id, mission_id, parent_id, depth, ordinal, title, question, role, status, generation, budget, justification)
+     VALUES ($1, $2, $3, 1, 3, 'sibling', 'q', 'investigator', 'running', 0, '{}'::jsonb, 'also reads')`,
+    [siblingTask, missionId, parentTask],
+  );
+  for (const [id, taskId] of [
+    [parentAttempt, parentTask],
+    [siblingAttempt, siblingTask],
+  ])
+    await admin.query(
+      `INSERT INTO coordinator.task_attempts (id, task_id, mission_id, n, kind, status, generation, lease_owner,
+                                              fencing_token, lease_expires_at, lease_renewed_at)
+       VALUES ($1, $2, $3, 1, 'initial', 'running', 0, 'w', 1, now() + interval '1 hour', now())`,
+      [id, taskId, missionId],
+    );
+  await admin.query(
+    `INSERT INTO coordinator.task_outputs (id, task_id, attempt_id, mission_id, kind, content, digest)
+     VALUES ($1, $2, $3, $4, 'finding', '{}'::jsonb, repeat('c', 64))`,
+    [parentOutput, parentTask, parentAttempt, missionId],
+  );
+  const attemptNode = (id: string, taskId: string) => ({
+    kind: 'attempt' as const,
+    id,
+    missionId,
+    taskId,
+  });
+  await inTx(app, (client) =>
+    addEdges(client, [
+      {
+        kind: 'evidence',
+        from: { kind: 'receipt', id: w.member.id },
+        to: attemptNode(parentAttempt, parentTask),
+      },
+      {
+        kind: 'evidence',
+        from: { kind: 'receipt', id: w.member.id },
+        to: attemptNode(siblingAttempt, siblingTask),
+      },
+      {
+        kind: 'evidence',
+        from: attemptNode(parentAttempt, parentTask),
+        to: {
+          kind: 'task_output',
+          id: parentOutput,
+          missionId,
+          taskId: parentTask,
+        },
+      },
+    ]),
+  );
+  return {
+    parentTask,
+    siblingTask,
+    parentAttempt,
+    siblingAttempt,
+    parentOutput,
+  };
+}
+
+describe('verified self-write: delegation ancestors (SW-1)', () => {
+  const commit = (w: World, actionId: string) =>
+    advanceConfigTx(getDb().app, {
+      key: w.key,
+      value: 4,
+      expectedVersion: 1,
+      causedBy: { actor: 'action', actionId },
+    });
+
+  it('keeps the delegating parent (task, attempt, output) with the acting task; a sibling that read r1 independently and an unrelated branch are still invalidated', async () => {
+    const w = await build();
+    const d = await delegated(w);
+    await commit(w, w.actionId);
+    const result = await register(w, 4, 2, {
+      selfWrite: 'verified',
+      actionId: w.actionId,
+    });
+    const event = result.invalidation!;
+    expect([...event.affected.attemptIds].sort()).toEqual(
+      [w.otherAttempt, d.siblingAttempt].sort(),
+    );
+    expect([...event.affected.taskIds].sort()).toEqual(
+      [w.otherTask, d.siblingTask].sort(),
+    );
+    expect(event.affected.outputIds).toEqual([]);
+    expect(event.perMission[0].preserved.taskIds).toEqual(
+      expect.arrayContaining([w.actorTask, d.parentTask]),
+    );
+    expect(await status('tasks', d.parentTask)).toBe('waiting');
+    expect(await status('task_attempts', d.parentAttempt)).toBe('running');
+    expect(await status('task_outputs', d.parentOutput, 'usable')).toBe(true);
+    expect(await status('tasks', w.actorTask)).toBe('running');
+    expect(await status('task_outputs', w.output, 'usable')).toBe(true);
+    expect(await status('task_attempts', d.siblingAttempt)).toBe('invalidated');
+    expect(await status('tasks', d.siblingTask)).toBe('invalidated');
+    expect(await status('task_attempts', w.otherAttempt)).toBe('invalidated');
+  });
+
+  it('a mismatch or an unmarked write invalidates the parent too (full closure)', async () => {
+    for (const claim of [
+      { selfWrite: 'mismatch' as const, withAction: true },
+      { selfWrite: 'none' as const, withAction: false },
+    ]) {
+      const w = await build();
+      const d = await delegated(w);
+      await commit(w, w.actionId);
+      const result = await register(w, 4, 2, {
+        selfWrite: claim.selfWrite,
+        actionId: claim.withAction ? w.actionId : null,
+      });
+      expect([...result.invalidation!.affected.attemptIds].sort()).toEqual(
+        [
+          w.actorAttempt,
+          w.otherAttempt,
+          d.parentAttempt,
+          d.siblingAttempt,
+        ].sort(),
+      );
+      expect(await status('tasks', d.parentTask)).toBe('invalidated');
+      expect(await status('task_outputs', d.parentOutput, 'usable')).toBe(
+        false,
+      );
+    }
+  });
+
+  it('a forged marker (non-app writer) does not excuse the parent either', async () => {
+    const w = await build();
+    const d = await delegated(w);
+    await advanceConfigUnconditionallyTx(getDb().admin, {
+      key: w.key,
+      value: 4,
+      causedBy: { actor: 'injector', actionId: w.actionId },
+    });
+    const result = await register(w, 4, 2, {
+      selfWrite: 'verified',
+      actionId: w.actionId,
+    });
+    expect(result.invalidation!.affected.attemptIds).toEqual(
+      expect.arrayContaining([d.parentAttempt, w.actorAttempt]),
+    );
+    expect(await status('tasks', d.parentTask)).toBe('invalidated');
+  });
+});

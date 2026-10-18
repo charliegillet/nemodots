@@ -38,7 +38,9 @@ const config: PlatformConfig = {
   intelligenceWsUrl: intelligenceWsUrlFromEnv(process.env),
   apiKey: process.env.OPENAI_API_KEY,
   model: process.env.OPENAI_MODEL,
-  baseUrl: process.env.OPENAI_BASE_URL ?? 'https://api.openai.com/v1',
+  // No default provider host (NemoDots finding TP-01): unset means Dot turns
+  // are refused, never sent to a host nobody configured.
+  baseUrl: process.env.OPENAI_BASE_URL?.trim() ?? '',
   agentRunTimeoutMs: agentRunTimeoutMsFromEnv(process.env),
   webSearchProvider: webSearchProvider(process.env.WEB_SEARCH_PROVIDER),
   parallelApiKey: process.env.PARALLEL_API_KEY,

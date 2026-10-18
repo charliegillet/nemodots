@@ -84,10 +84,10 @@ describe('B1 benign change', () => {
 
 describe('F2 cache schema mismatch', () => {
   async function inject(s: Sandbox) {
-    // warm the namespace at the baseline schema: a health check writes its canary
-    expect((await s.request('/health')).status).toBe(200);
-    expect((await s.request('/products')).status).toBe(200);
+    // no manual warm-up: the scenario's own preconditions warm the namespace at
+    // the baseline schema and verify the decode error before inject() resolves
     const run = await s.inject('cache_schema_mismatch', 1);
+    expect((await run.ready).status).toBe('verified');
     expect((await run.done).status).toBe('completed');
     s.reloadConfig();
   }

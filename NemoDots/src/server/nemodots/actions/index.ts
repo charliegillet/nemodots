@@ -32,6 +32,8 @@ export { commit, ACTION_DISPATCH_TOPIC, type CommitResult } from './commit.js';
 export {
   claimDispatch,
   dispatch,
+  failNotRunning,
+  findDispatchable,
   effectKey,
   fenceKey,
   FLUSH_SCRIPT,

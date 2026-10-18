@@ -6,6 +6,14 @@
   "prerequisites": [
     "The catalog cache holds entries stored under the baseline schema."
   ],
+  "preconditions": {
+    "setup": [
+      {
+        "kind": "warm_cache"
+      }
+    ],
+    "visible": ["cache_decode_error", "inventory_inconsistent"]
+  },
   "steps": [
     {
       "kind": "set_config",

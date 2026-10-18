@@ -177,9 +177,17 @@ export interface SelfWriteCase {
     actingLineageInvalidated: boolean;
     otherReadersInvalidated: boolean;
     postconditionAttempts: number;
+    /** Routing kinds recorded right after the watcher pass (during the postcondition gate). */
     recoveryKinds: RecoveryKind[];
     /** Upper bound on repair attempts created per affected task (no storm). */
     maxRepairAttemptsPerTask: number;
+    /**
+     * oracle-v3: number of `replan_scheduled` rows for the held replan's event
+     * once the postcondition settles (the release). Verified self-writes only.
+     */
+    replansReleasedAfterPostcondition?: number;
+    /** oracle-v3: the only root tasks whose invalidation may trigger the replan. */
+    replanTriggerTaskIds?: string[];
   };
 }
 

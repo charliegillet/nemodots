@@ -1,7 +1,7 @@
 // The injector's trigger machinery: delays, prerequisites, cancellation and the
 // LISTEN-driven dependent change (C15). Uses ad-hoc manifests validated by the
 // real manifest schema so timings stay short.
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   Injector,
   notifyProposed,
@@ -127,10 +127,117 @@ describe('dependent_change_after_proposal (C15)', () => {
       const summary = await run.done;
       expect(summary.steps[0]).toMatchObject({
         status: 'skipped',
-        error: 'no_matching_proposal',
+        error: 'dependent_step_not_triggered',
       });
+      expect(summary.notTriggered).toEqual([0]);
       expect(summary.status).toBe('completed');
       expect(await versionOf(s, 'db.pool_max')).toBe(1);
+      const detail = await s.pools.verifier.query(
+        'SELECT detail FROM control.scenario_runs WHERE id = $1',
+        [run.runId],
+      );
+      expect(detail.rows[0].detail.notTriggered).toEqual([0]);
+    });
+  });
+
+  it('has no wall-clock limit of its own: a proposal an hour late still triggers the step', async () => {
+    await withSandbox(async (s) => {
+      // Only setTimeout/clearTimeout are faked, and only after the sandbox is
+      // up: any timer the injector armed for this wait would fire when the
+      // clock jumps. The step must survive the jump and still fire.
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        const run = await start(
+          s,
+          manifest([
+            { kind: 'set_config', key: 'db.pool_max', value: 3 },
+            {
+              kind: 'dependent_change_after_proposal',
+              values: { 'cache.schema_version': [5] },
+              after: [0],
+            },
+          ]),
+        );
+        expect(run.steps[1].timeoutMs).toBeNull();
+        await run.stepSettled(0);
+        await vi.advanceTimersByTimeAsync(60 * 60_000);
+        expect(await versionOf(s, 'cache.schema_version')).toBe(1);
+        let settled = false;
+        const second = run.stepSettled(1).then((outcome) => {
+          settled = true;
+          return outcome;
+        });
+        // re-send until the (re)armed LISTEN has the NOTIFY; real time, no fake clock needed
+        vi.useRealTimers();
+        const t0 = Date.now();
+        while (!settled && Date.now() - t0 < 5_000) {
+          await notifyProposed(s.pools.app, 'cache.schema_version');
+          await Promise.race([second, new Promise((r) => setTimeout(r, 50))]);
+        }
+        expect(await second).toMatchObject({
+          status: 'applied',
+          key: 'cache.schema_version',
+          versionAfter: 2,
+        });
+        const summary = await run.done;
+        expect(summary.status).toBe('completed');
+        expect(summary.notTriggered).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  it('an explicit maxRunMs bounds the wait and records dependent_step_not_triggered', async () => {
+    await withSandbox(async (s) => {
+      const run = await new Injector({
+        pool: s.pools.injector,
+        listenUrl: s.db.urls.injector,
+        maxRunMs: 200,
+      }).start(
+        manifest([
+          {
+            kind: 'dependent_change_after_proposal',
+            values: { 'db.pool_max': 2 },
+          },
+        ]),
+        1,
+      );
+      const summary = await run.done;
+      expect(summary.steps[0]).toMatchObject({
+        status: 'skipped',
+        error: 'dependent_step_not_triggered',
+      });
+      expect(summary.notTriggered).toEqual([0]);
+      expect(await versionOf(s, 'db.pool_max')).toBe(1);
+    });
+  });
+
+  it('cancel() while the step is armed records it as not triggered (the mission ended first)', async () => {
+    await withSandbox(async (s) => {
+      const run = await start(
+        s,
+        manifest([
+          { kind: 'set_config', key: 'db.pool_max', value: 3 },
+          {
+            kind: 'dependent_change_after_proposal',
+            values: { 'cache.schema_version': [5] },
+            after: [0],
+          },
+        ]),
+      );
+      await run.stepSettled(0);
+      // let the step reach its wait
+      await new Promise((r) => setTimeout(r, 100));
+      await run.cancel();
+      const summary = await run.done;
+      expect(summary.steps[1]).toMatchObject({
+        status: 'skipped',
+        error: 'dependent_step_not_triggered',
+      });
+      expect(summary.notTriggered).toEqual([1]);
+      expect(summary.status).toBe('cancelled');
+      expect(await versionOf(s, 'cache.schema_version')).toBe(1);
     });
   });
 
@@ -225,7 +332,7 @@ describe('the LISTEN connection is supervised', () => {
     });
   });
 
-  it('fails the armed step with listener_lost, not no_matching_proposal, when the connection cannot be restored', async () => {
+  it('fails the armed step with listener_lost, not dependent_step_not_triggered, when the connection cannot be restored', async () => {
     await withSandbox(async (s) => {
       let connects = 0;
       const injector = new Injector({

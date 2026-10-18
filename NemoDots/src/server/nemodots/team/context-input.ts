@@ -56,7 +56,7 @@ export function buildContext(input: BuildInput): CompiledContext {
     .join('\n');
   return compileContext({
     snapshotId: (deps.ids?.() ?? randomUUID()) as ContextSnapshotId,
-    layout: input.layout ?? 'cache_aware',
+    layout: input.layout ?? deps.config.layout ?? 'cache_aware',
     nowIso: (deps.clock?.() ?? new Date()).toISOString(),
     commonInstructions: COMMON_INSTRUCTIONS,
     roleInstructions: role,

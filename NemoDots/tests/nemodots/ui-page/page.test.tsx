@@ -15,7 +15,14 @@ const openPageLink = vi.hoisted(() => vi.fn());
 vi.mock('../../../src/client/page-navigation', () => ({ openPageLink }));
 
 import { MissionPage } from '../../../src/client/nemodots/MissionPage';
-import { eventPayloads, ids, receipt, T0 } from '../contracts/fixtures.js';
+import {
+  confirmation,
+  eventPayloads,
+  ids,
+  receipt,
+  T0,
+  T1,
+} from '../contracts/fixtures.js';
 import { ev, payload, snapshot } from '../ui/helpers';
 import {
   FakeApiError,
@@ -303,6 +310,78 @@ describe('mission view', () => {
     // The attempt started twice counts once: snapshot attempt + attempt2.
     expect(text).toContain('2 attempts');
     expect(text).not.toContain('3 attempts');
+  });
+
+  it('reads the failure reason from storage when a status event moves the mission to failed', async () => {
+    let failed = false;
+    const reason = 'task 11111111-1111-4111-8111-111111111111 failed';
+    routedApi(
+      api,
+      baseRoutes({
+        [`GET ${MISSION_PATH}`]: () =>
+          snapshot(
+            failed
+              ? {
+                  mission: {
+                    ...missionDto(),
+                    status: 'failed',
+                    failureReason: reason,
+                  },
+                  lastEventId: 21,
+                }
+              : {},
+          ),
+      }),
+    );
+    await render(M);
+    expect(textOf(root)).not.toContain('Failure reason');
+    failed = true;
+    await act(async () => {
+      // the event names the new status only; the reason lives with the mission row
+      streams[0].push(
+        sseFrame(
+          ev(
+            21,
+            payload('mission.status', {
+              from: 'running',
+              to: 'failed',
+              reason: 'task_failed',
+            }),
+          ),
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await settle();
+    const text = textOf(root);
+    expect(text).toContain('Failure reason');
+    expect(text).toContain(reason);
+  });
+
+  it('re-reads the snapshot slowly while the stream is open, so a later lastConfirmedAt shows', async () => {
+    let confirmedAt: string = T1;
+    routedApi(
+      api,
+      baseRoutes({
+        [`GET ${MISSION_PATH}`]: () =>
+          snapshot({ confirmations: [{ ...confirmation(), confirmedAt }] }),
+      }),
+    );
+    await render(M);
+    await act(async () => {
+      streams[0].push(sseFrame(ev(18, payload('heartbeat'))));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await settle();
+    expect(textOf(root)).toContain('Live updates: Open');
+    const before = calls(api, `GET ${MISSION_PATH}`).length;
+    // no 3 s polling while the stream is open ...
+    await settle(9000);
+    expect(calls(api, `GET ${MISSION_PATH}`).length).toBe(before);
+    // ... but the page reconciles with storage at the slower cadence
+    confirmedAt = T1.replace(/T\d\d:\d\d:\d\d/, 'T23:59:59');
+    await settle(25_000);
+    expect(calls(api, `GET ${MISSION_PATH}`).length).toBeGreaterThan(before);
   });
 
   it('never renders control data or prompts carried by a stray payload key', async () => {

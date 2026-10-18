@@ -8,6 +8,7 @@ import type {
   DependencyEntry,
   InferencePort,
   ModelCallId,
+  ContextLayout,
   ObservationReceipt,
   ProviderMode,
   Scope,
@@ -108,6 +109,18 @@ export interface TeamConfig {
   /** Upper bound of one wait_for_children tool call. */
   waitTimeoutMs?: number;
   waitPollMs?: number;
+  /**
+   * Pre-change verification: a specialist's proposal is refused until a
+   * verifier child it delegated has finished with a usable output. Default ON
+   * (policy.ts); an operator setting recorded in the mission report.
+   */
+  requireVerifier?: boolean;
+  /**
+   * Context layout of every compiled call (the evaluation 2x2). Absent means
+   * `cache_aware`, the product layout. Set by the composition root only, never
+   * by the model or an HTTP client.
+   */
+  layout?: ContextLayout;
 }
 
 export interface TeamDeps {
@@ -134,5 +147,27 @@ export type TeamEvent =
       role: string;
       outcome: string;
     }
-  | { kind: 'tool'; attemptId: string; name: string; ok: boolean }
-  | { kind: 'correction'; attemptId: string; reason: string };
+  | {
+      kind: 'tool';
+      attemptId: string;
+      name: string;
+      ok: boolean;
+      /** Policy error code of a refused call (never arguments or results). */
+      error?: string;
+      /** Policy detail of a refusal (issue text, never arguments or results). */
+      detail?: string;
+    }
+  | { kind: 'correction'; attemptId: string; reason: string }
+  | {
+      kind: 'attempt_usage';
+      attemptId: string;
+      role: string;
+      /** input + output tokens counted against the budget */
+      spentTokens: number;
+      promptTokens: number;
+      completionTokens: number;
+      /** null = the provider reported no cached count (not zero) */
+      cachedTokens: number | null;
+      callsWithUnavailableUsage: number;
+      budgetTokens: number;
+    };

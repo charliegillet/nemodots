@@ -201,7 +201,9 @@ describe('dispatcher leases and fences', () => {
       { dispatchLeaseMs: 1_500 },
     ));
 
-  // FINDING C-05 (low). The re-claimed lease is computed from now(), the
+  // C-05 (low): REPRODUCED (failing 06:05), then fixed in the working tree
+  // (clock_timestamp() leases in admit.ts, rows.ts, dispatch.ts, 06:12-06:21).
+  // Before the fix the re-claimed lease is computed from now(), the
   // transaction START (admit.ts:114, and transition() setIntervalMs in
   // rows.ts for first admission): a re-claim whose transaction waited (here
   // for the row lock window, in production behind a busy commit or a closure)
@@ -210,7 +212,7 @@ describe('dispatcher leases and fences', () => {
   // re-claimable again at once. ARCHITECTURE 6: the dispatcher lease is
   // NEMODOTS_DISPATCH_LEASE_MS from the grant. Expected: the new lease is
   // live when the re-claim returns and the new dispatcher can commit.
-  it('FINDING C-05: a re-claimed lease is live for the new dispatcher', () =>
+  it('C-05 regression: a re-claimed lease is live for the new dispatcher', () =>
     withEnv(
       async (env) => {
         const sc = await proposeSetConfig(env);

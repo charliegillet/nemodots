@@ -9,6 +9,7 @@
 //   3. then the ledger rows through SupportValidator.assertCurrent
 //      (registry rows, receipt rows).
 // Nothing in here touches Redis, an LLM or the network.
+import { isMutated } from '../config/mutation.js';
 import {
   actionTargetSourceKey,
   digest,
@@ -250,7 +251,8 @@ export async function evaluate(
     // missionId is a ledger extension of the port options (F4 scope check).
     const options = {
       lockMode,
-      freshness: maxAgeFor(action),
+      // MUTATION skip_freshness: no maxAgeMs is checked at admission or commit.
+      freshness: isMutated('skip_freshness') ? {} : maxAgeFor(action),
       missionId: intent.mission_id as MissionId,
     };
     checked = await validator.assertCurrent(
@@ -265,6 +267,17 @@ export async function evaluate(
   }
 
   // 6. the target itself: version and (set_config) the value the model saw
+  // MUTATION bypass_final_version_check: the commit (lockMode 'update')
+  // skips this final authority re-check; admission still runs it.
+  if (lockMode === 'update' && isMutated('bypass_final_version_check'))
+    return {
+      ok: true,
+      reason: null,
+      detail: null,
+      checked,
+      targetVersion: { expected, live },
+      liveValue: null,
+    };
   if (live !== expected)
     return fail(
       'target_version_mismatch',

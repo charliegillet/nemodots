@@ -147,7 +147,9 @@ describe('healthy checkout', () => {
   it('a config change takes effect only after the 250 ms config cache expires', async () => {
     await withSandbox(async (s) => {
       expect((await s.request('/health')).status).toBe(200);
-      const run = await s.inject('writes_disabled');
+      // unverified: verification polls the readers and advances the clock, which
+      // is exactly what this test must not do
+      const run = await s.inject('writes_disabled', 1, { verify: false });
       await run.done;
       // inside the 250 ms window the previous snapshot is still served
       expect((await s.request('/health')).body.status).toBe('ok');

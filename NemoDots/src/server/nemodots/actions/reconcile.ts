@@ -3,10 +3,14 @@
 //
 //   marker = a dispatch fence   -> the effect ran exactly once: verified
 //   marker = 'fence_newer'      -> refused by the Redis fence: failed(dispatch_fence_invalid)
+//   marker = 'not_applied'      -> a settlement of a stopped mission planted it: the
+//                                  flush never ran, failed(effect_not_applied) with
+//                                  mission_not_running (settled-absent, never applied)
 //   marker absent               -> failed(effect_not_applied) for outcome_unknown / dispatched;
 //                                  for `committed` it is left alone (not dispatched yet:
 //                                  a dispatcher may still claim it)
 // A failed intent is re-dispatchable only through a NEW authorization.
+import { isMutated } from '../config/mutation.js';
 import type {
   ActionId,
   ActionIntent,
@@ -15,12 +19,13 @@ import type {
 } from '../contracts/index.js';
 import { withTransaction } from '../db/tx.js';
 import type { ActionsDeps } from './deps.js';
-import { effectKey } from './dispatch.js';
+import { lockMissionThenIntent } from './predicates.js';
+import { effectKey } from './effect-keys.js';
+import { failNotRunning } from './not-running.js';
 import { flushEvents } from './emit.js';
 import { EffectUnavailableError } from './errors.js';
 import { isExternalEffect } from './policy.js';
 import {
-  getIntentRow,
   plainRead,
   findIntentRow,
   toIntent,
@@ -28,16 +33,20 @@ import {
   updateResultReceipt,
 } from './rows.js';
 
-export type MarkerState = 'applied' | 'fence_newer' | 'absent';
+export type MarkerState = 'applied' | 'fence_newer' | 'not_applied' | 'absent';
 
 export async function readMarker(
   deps: ActionsDeps,
   actionId: string,
 ): Promise<MarkerState> {
   if (!deps.redis) throw new EffectUnavailableError();
+  // MUTATION skip_effect_marker: the marker is never read; every effect looks unapplied.
+  if (isMutated('skip_effect_marker')) return 'absent';
   const value = await deps.redis.get(effectKey(deps.redisPrefix, actionId));
   if (value === null) return 'absent';
-  return value === 'fence_newer' ? 'fence_newer' : 'applied';
+  if (value === 'fence_newer') return 'fence_newer';
+  if (value === 'not_applied') return 'not_applied';
+  return 'applied';
 }
 
 export async function reconcile(
@@ -59,7 +68,7 @@ export async function reconcile(
   const marker = await readMarker(deps, seen.id);
 
   return withTransaction(deps.pool, async (client) => {
-    const row = await getIntentRow(client, seen.id, 'update');
+    const { intent: row } = await lockMissionThenIntent(client, seen.id);
     if (!reconcilable.includes(row.status)) return toIntent(row);
     if (row.status === 'committed' && marker === 'absent') return toIntent(row); // not dispatched yet: nothing to settle
     const events: EventPayload[] = [];
@@ -94,6 +103,15 @@ export async function reconcile(
         actionId: row.id,
         postcondition,
       } as unknown as EventPayload);
+    } else if (marker === 'not_applied') {
+      updated = await failNotRunning(
+        client,
+        { events: deps.events },
+        row,
+        row.dispatch_fence ?? 0,
+        'reconcile found the refusal marker planted when the mission stopped',
+        row.status as 'committed' | 'dispatched' | 'outcome_unknown',
+      );
     } else {
       const reason =
         marker === 'fence_newer'

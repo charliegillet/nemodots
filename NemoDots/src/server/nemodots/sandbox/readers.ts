@@ -8,9 +8,9 @@
 // sources and null for observed ones (the ledger assigns those).
 //
 //   checkout.health          status enum, per-check booleans, error classes
-//   checkout.metrics         error-class set, expected/found schema, deciles
+//   checkout.metrics         error-class set, expected/found schema (no ratios)
 //   checkout.orders.recent   bucketed non-probe count, status set
-//   checkout.inventory/<sku> authority vs API view, consistent flag
+//   checkout.inventory/<sku> consistent flag, stock bands, API-minus-authority divergence
 //   redis.stats              key counts per namespace:schema suffix
 //   checkout.config/<key>    { key, value, version } only (no actor columns)
 //   checkout.config          sorted key list + collection version
@@ -49,26 +49,19 @@ export interface ReaderDeps {
 // ------------------------------------------------------------ pure helpers
 
 /**
- * Decile index 0..9 of a ratio in [0,1]; null when the denominator is below
- * `minSamples` (default: any denominator > 0 counts).
+ * Stock bands. Exact quantities move with every ordinary order, so they never
+ * enter a digest; the band only changes at a meaningful threshold (oversold,
+ * sold out, running low), and `divergence` (API view minus authority) carries
+ * the F4 lag, which is zero in a healthy checkout (finding D2).
  */
-export function decile(
-  numerator: number,
-  denominator: number,
-  minSamples = 1,
-): number | null {
-  if (denominator <= 0 || denominator < minSamples) return null;
-  return Math.min(9, Math.floor((numerator / denominator) * 10));
+export type StockBand = 'negative' | 'zero' | 'low' | 'ok';
+export const LOW_STOCK_BELOW = 10;
+export function stockBand(quantity: number | null): StockBand | null {
+  if (quantity === null) return null;
+  if (quantity < 0) return 'negative';
+  if (quantity === 0) return 'zero';
+  return quantity < LOW_STOCK_BELOW ? 'low' : 'ok';
 }
-
-/**
- * Below this many requests (or cache lookups) inside the metrics window the
- * ratio deciles are `null`: an idle checkout and one with a trickle of traffic
- * produce the same normalized value, so sparse traffic cannot mint revisions of
- * `checkout.metrics` (finding D2). The error-class set and the decode-error
- * schemas, which carry the diagnosis, are unaffected.
- */
-export const MIN_DECILE_SAMPLES = 10;
 
 export type OrderCountBucket = '0' | '1-10' | '11-100' | '>100';
 export function orderCountBucket(count: number): OrderCountBucket {
@@ -106,14 +99,21 @@ export function normalizeHealth(raw: unknown) {
   };
 }
 
+/**
+ * `checkout.metrics` as the agents may rely on it: WHICH error classes occurred
+ * in the window and, for a cache decode error, which schema the API expected
+ * and which it found. Nothing that moves with ordinary traffic is digested:
+ * no counters, no request totals, no cache-hit or error-rate ratios (they
+ * change with every order, catalogue read or observation and would mint a
+ * revision, and with it a false invalidation of every reader, in a healthy
+ * checkout). Probe-tagged requests are not tracked at all; the readers' own
+ * requests can only add an error class that is really occurring.
+ */
 export function normalizeMetrics(raw: unknown) {
   const body = asRecord(raw);
-  const requests = asRecord(body.requests);
-  const cache = asRecord(body.cache);
   const errors = asRecord(body.errors);
   const decode = body.cache_decode_error;
   const decodeRecord = asRecord(decode);
-  const num = (value: unknown) => (typeof value === 'number' ? value : 0);
   return {
     errorClasses: [...new Set(strings(errors.windowClasses))].sort(),
     cacheDecodeError:
@@ -126,16 +126,6 @@ export function normalizeMetrics(raw: unknown) {
                 : null,
           }
         : null,
-    cacheHitRatioDecile: decile(
-      num(cache.windowHits),
-      num(cache.windowHits) + num(cache.windowMisses),
-      MIN_DECILE_SAMPLES,
-    ),
-    errorRateDecile: decile(
-      num(requests.windowServerErrors),
-      num(requests.window),
-      MIN_DECILE_SAMPLES,
-    ),
   };
 }
 
@@ -208,8 +198,6 @@ export function createSourceReaders(deps: ReaderDeps): SourceReaderPort {
         normalizedValue: {
           errorClasses: ['checkout_unreachable'],
           cacheDecodeError: null,
-          cacheHitRatioDecile: null,
-          errorRateDecile: null,
         },
         raw: { unreachable: true },
         revisionHint: null,
@@ -292,12 +280,16 @@ export function createSourceReaders(deps: ReaderDeps): SourceReaderPort {
     return {
       normalizedValue: {
         sku,
-        authorityQuantity,
-        apiQuantity,
         consistent:
           authorityQuantity !== null &&
           apiQuantity !== null &&
           authorityQuantity === apiQuantity,
+        authorityStock: stockBand(authorityQuantity),
+        apiStock: stockBand(apiQuantity),
+        divergence:
+          authorityQuantity !== null && apiQuantity !== null
+            ? apiQuantity - authorityQuantity
+            : null,
       },
       raw: { authority: before.row, api },
       revisionHint: null,

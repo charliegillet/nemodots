@@ -74,6 +74,18 @@ export interface PlatformConfig extends WebConfig {
   runtimeUrl: string;
   ownerToken?: string;
 }
+/** The configured provider base URL, or null when it is absent or not an http(s) URL. */
+export function providerBaseUrl(value: string | undefined): string | null {
+  const text = value?.trim();
+  if (!text) return null;
+  try {
+    const url = new URL(text);
+    return url.protocol === 'https:' || url.protocol === 'http:' ? text : null;
+  } catch {
+    return null;
+  }
+}
+
 export function setupStatus(
   config: PlatformConfig,
   slack = 'not_configured',
@@ -82,6 +94,9 @@ export function setupStatus(
   const missing = [
     !config.intelligenceKey && INTELLIGENCE_KEY_MISSING_LABEL,
     !config.apiKey && 'OPENAI_API_KEY',
+    // NemoDots (TP-01): there is no default provider host; without a base URL
+    // every Dot turn is refused, so setup is not complete.
+    !providerBaseUrl(config.baseUrl) && 'OPENAI_BASE_URL',
     !config.model && 'OPENAI_MODEL',
   ].filter((item): item is string => !!item);
   const declaredSlack = !!(
@@ -98,7 +113,7 @@ export function setupStatus(
       : 'not_configured';
   return {
     intelligence: !!config.intelligenceKey,
-    model: !!(config.apiKey && config.model),
+    model: !!(config.apiKey && config.model && providerBaseUrl(config.baseUrl)),
     browser: !!(config.browserUrl && config.browserSecret),
     voice: !!(config.voiceKey && config.voiceModel && !missing.length),
     composio: !!config.composioApiKey,

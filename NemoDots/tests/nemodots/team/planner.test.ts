@@ -28,7 +28,7 @@ const validPlan = {
       title: 'Check inventory path',
       question: 'Do stock readings agree with the authority?',
       role: 'investigator',
-      capabilities: ['observe', 'publish_finding'],
+      capabilities: ['observe', 'delegate', 'publish_finding'],
       dependsOn: [],
     },
   ],
@@ -177,6 +177,41 @@ describe('planner', () => {
     expect(outcome.type).toBe('plan');
     expect(r.inference.requests[1].messages.at(-1)!.content).toContain(
       'capabilities exceed',
+    );
+  });
+
+  it('a plan whose task cannot observe is corrected once (capability semantics)', async () => {
+    const blind = {
+      tasks: [
+        { ...validPlan.tasks[0], capabilities: ['delegate'] },
+        validPlan.tasks[1],
+      ],
+    };
+    const r = seeded([
+      text(JSON.stringify(blind)),
+      text(JSON.stringify(validPlan)),
+    ]);
+    const outcome = await runHandler(r, claimed('planner'));
+    expect(outcome.type).toBe('plan');
+    expect(r.inference.requests[1].messages.at(-1)!.content).toContain(
+      'must include observe',
+    );
+  });
+
+  it('an investigator task without delegate is corrected once', async () => {
+    const noDelegate = {
+      tasks: [
+        { ...validPlan.tasks[0], capabilities: ['observe', 'publish_finding'] },
+        validPlan.tasks[1],
+      ],
+    };
+    const r = seeded([
+      text(JSON.stringify(noDelegate)),
+      text(JSON.stringify(validPlan)),
+    ]);
+    expect((await runHandler(r, claimed('planner'))).type).toBe('plan');
+    expect(r.inference.requests[1].messages.at(-1)!.content).toContain(
+      'must include delegate',
     );
   });
 

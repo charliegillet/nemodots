@@ -57,7 +57,7 @@ const StepSchema = z
     trigger: TriggerSchema.optional(),
     /** Step indexes that must have been applied before this step may run. */
     after: z.array(z.number().int().min(0)).optional(),
-    /** dependent_change_after_proposal: give up after this long (default 600000). */
+    /** dependent_change_after_proposal: an explicit bound on the wait; absent means no limit but the run's own end. */
     timeoutMs: DelaySchema.optional(),
     note: z.string().max(500).optional(),
   })
@@ -72,6 +72,36 @@ export const SCENARIO_CLASSES = [
   'conflicting_observations',
   'diverging_edges',
 ] as const;
+
+/** Symptoms the injector verifies through what a reader sees (preconditions.ts). */
+export const SYMPTOM_KINDS = [
+  'healthy',
+  'cache_decode_error',
+  'pool_exhausted',
+  'inventory_inconsistent',
+  'writes_disabled',
+] as const;
+export type SymptomKind = (typeof SYMPTOM_KINDS)[number];
+
+/**
+ * What must be true before a mission may start (finding: a fault whose
+ * symptom never appeared would silently be a no-fault trial). `setup` runs
+ * before any step; `visible` is verified, through the same health, metrics and
+ * inventory reads an agent has, after the initial steps (those with no
+ * `after`) are applied. A symptom that does not appear within `withinMs` fails
+ * the run loudly as `scenario_precondition_failed`.
+ */
+const PreconditionsSchema = z
+  .object({
+    setup: z
+      .array(z.object({ kind: z.literal('warm_cache') }).strict())
+      .max(4)
+      .optional(),
+    visible: z.array(z.enum(SYMPTOM_KINDS)).min(1).max(4),
+    withinMs: z.number().int().min(500).max(60_000).optional(),
+  })
+  .strict();
+export type Preconditions = z.infer<typeof PreconditionsSchema>;
 
 const OracleSchema = z
   .object({
@@ -109,6 +139,8 @@ export const ScenarioManifestSchema = z
     description: z.string().min(1).max(800),
     /** What must already be true of the world before the steps run. */
     prerequisites: z.array(z.string().max(300)).max(8).optional(),
+    /** Optional for hand-written test manifests; every development scenario declares it. */
+    preconditions: PreconditionsSchema.optional(),
     steps: z.array(StepSchema).max(12),
     oracle: OracleSchema,
   })
@@ -205,10 +237,15 @@ export interface ResolvedStep {
   /** dependent changes: target key -> value */
   values: Record<string, ConfigScalar> | null;
   after: number[];
-  timeoutMs: number;
+  /**
+   * dependent changes only: an explicit upper bound on the wait for the
+   * proposal. null (the default) means the wait lasts as long as the run, which
+   * ends with the mission: a proposal that arrives late must still trigger it.
+   */
+  timeoutMs: number | null;
+  /** an initial-phase step: no prerequisites and not proposal-triggered */
+  initial: boolean;
 }
-
-export const DEFAULT_DEPENDENT_TIMEOUT_MS = 600_000;
 
 /** mulberry32 over a 32-bit state derived from (seed, scenario id). */
 export function seededRandom(seed: number, label: string) {
@@ -262,7 +299,8 @@ export function resolveScenario(
       value,
       values,
       after: [...(step.after ?? [])],
-      timeoutMs: step.timeoutMs ?? DEFAULT_DEPENDENT_TIMEOUT_MS,
+      timeoutMs: step.timeoutMs ?? null,
+      initial: (step.after ?? []).length === 0 && !dependent,
     };
   });
 }

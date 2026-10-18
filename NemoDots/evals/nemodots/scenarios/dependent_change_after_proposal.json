@@ -6,6 +6,14 @@
   "prerequisites": [
     "The catalog cache holds entries stored under the baseline schema."
   ],
+  "preconditions": {
+    "setup": [
+      {
+        "kind": "warm_cache"
+      }
+    ],
+    "visible": ["cache_decode_error"]
+  },
   "steps": [
     {
       "kind": "set_config",
@@ -21,7 +29,6 @@
         "cache.schema_version": [5, 6]
       },
       "after": [0],
-      "timeoutMs": 300000,
       "note": "fires on NOTIFY nemodots_action_proposed naming cache.schema_version"
     }
   ],

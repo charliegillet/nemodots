@@ -10,6 +10,7 @@
 // The author's fence is validated INSIDE the insert transaction: a proposal
 // from a lost lease writes nothing (FenceError). Admission happens later and
 // separately, from the outbox.
+import { isMutated } from '../config/mutation.js';
 import { randomUUID } from 'node:crypto';
 import {
   actionTargetSourceKey,
@@ -173,7 +174,12 @@ export async function propose(
       else unresolved.push(id);
     }
     const outOfScope = [...scope.outOfScope, ...unresolved];
-    const vector = intentVector(call.snapshotVector, citedEntries);
+    // MUTATION drop_inherited_edges: the emitting snapshot's vector is dropped,
+    // only the citations remain.
+    const vector = intentVector(
+      isMutated('drop_inherited_edges') ? [] : call.snapshotVector,
+      citedEntries,
+    );
     const expectedTargetVersion = expectedTargetVersionOf(
       action,
       payload,
@@ -199,6 +205,13 @@ export async function propose(
         ORDER BY proposed_at DESC, id`,
       [idempotencyKey, ctx.attemptId, ctx.toolCallId],
     );
+    // MUTATION accept_duplicate_differing_payloads: a different payload under
+    // a used key / tool call id is accepted as the stored call (no conflict).
+    if (isMutated('accept_duplicate_differing_payloads') && existing.rows[0])
+      return toIntent(
+        existing.rows.find((row) => row.status !== 'blocked') ??
+          existing.rows[existing.rows.length - 1],
+      );
     const same = existing.rows.find((row) => row.payload_hash === payloadHash);
     if (same) return toIntent(same);
     const conflict = existing.rows.length > 0;

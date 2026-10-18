@@ -12,10 +12,10 @@ import {
 
 /**
  * Reasons a stale vector entry may carry at COMMIT time. A change that nobody
- * registered yet is a "pending observation" (G3: fail closed, never permission);
- * one that was registered is stale_version. The frozen oracle names stale_version
- * for the unregistered cases ADM-03b/ADM-02 and stale_pending_observation for
- * ADM-01b; both are accepted at commit (reported to the lead, see README).
+ * registered yet is a "pending observation" (G3: fail closed, never
+ * permission); one that was registered is stale_version. Tests named after an
+ * oracle case pin the single code that case's setup implies (oracle-v2
+ * ADM-03b); this pair is used only by unnamed variants.
  */
 export const STALE = ['stale_version', 'stale_pending_observation'];
 

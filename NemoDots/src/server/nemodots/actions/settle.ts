@@ -9,10 +9,10 @@ import type {
 } from '../contracts/index.js';
 import { withTransaction } from '../db/tx.js';
 import type { ActionsDeps } from './deps.js';
+import { lockMissionThenIntent } from './predicates.js';
 import { flushEvents } from './emit.js';
 import {
   findResultReceipt,
-  getIntentRow,
   toIntent,
   transition,
   updateResultReceipt,
@@ -25,7 +25,7 @@ export async function settleFromHistory(
   observed: { afterDigest: string | null; configVersion: number },
 ): Promise<ActionIntent> {
   return withTransaction(deps.pool, async (client) => {
-    const row = await getIntentRow(client, actionId, 'update');
+    const { intent: row } = await lockMissionThenIntent(client, actionId);
     if (row.status !== 'committed' && row.status !== 'outcome_unknown')
       return toIntent(row);
     const receipt = await findResultReceipt(client, row.id);
@@ -72,7 +72,7 @@ export async function settleSuperseded(
   actionId: ActionId | string,
 ): Promise<ActionIntent> {
   return withTransaction(deps.pool, async (client) => {
-    const row = await getIntentRow(client, actionId, 'update');
+    const { intent: row } = await lockMissionThenIntent(client, actionId);
     if (row.status !== 'committed') return toIntent(row);
     const updated = await transition(client, row.id, 'committed', 'failed', {
       failureReason: 'superseded_before_verification',
@@ -96,7 +96,7 @@ export async function settleMismatch(
   actionId: ActionId | string,
 ): Promise<ActionIntent> {
   return withTransaction(deps.pool, async (client) => {
-    const row = await getIntentRow(client, actionId, 'update');
+    const { intent: row } = await lockMissionThenIntent(client, actionId);
     if (row.status !== 'committed' && row.status !== 'outcome_unknown')
       return toIntent(row);
     const updated = await transition(client, row.id, row.status, 'failed', {

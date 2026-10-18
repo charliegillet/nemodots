@@ -5,6 +5,7 @@
 // every method allows and upstream behaviour is unchanged (finding I4).
 import type { DependencyEntry } from '../contracts/index.js';
 import { isIncidentDot } from './policy-registry.js';
+import { resetToolEvidence } from './provenance-scope.js';
 import type { ProvenanceSink } from './sink.js';
 
 export type Actor = 'agent' | 'owner';
@@ -88,8 +89,11 @@ export function createIncidentPolicy(
         spaceId === options.projectionSpaceId),
     revalidateApproval: async (approval) => {
       const vector = approval.dependencyVector;
-      if (vector === null)
-        // A NULL vector passes for ordinary Dots and refuses for incident Dots.
+      // No evidence binding: NULL (created outside a provenance scope) or an
+      // empty vector (created in one that had read nothing). Ordinary Dots
+      // pass; for incident Dots both refuse, so an approval cannot be claimed
+      // on evidence nobody recorded (M10).
+      if (vector === null || vector.length === 0)
         return incident(approval.dotId)
           ? {
               ok: false,
@@ -97,7 +101,6 @@ export function createIncidentPolicy(
                 'Approval carries no evidence binding for an incident Dot.',
             }
           : { ok: true };
-      if (vector.length === 0) return { ok: true };
       if (!options.vectors)
         return incident(approval.dotId)
           ? { ok: false, reason: 'Evidence cannot be revalidated.' }
@@ -130,4 +133,5 @@ export function getInterceptionHooks(): InterceptionHooks {
 export function resetInterception(): void {
   active = createIncidentPolicy();
   hooks = {};
+  resetToolEvidence();
 }

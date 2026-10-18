@@ -1042,8 +1042,17 @@ export const SELF_WRITE_CASES: readonly SelfWriteCase[] = [
       actingLineageInvalidated: false,
       otherReadersInvalidated: true,
       postconditionAttempts: 1,
-      recoveryKinds: ['postcondition_scheduled', 'repair_coalesced'],
+      // oracle-v3: the replan is held behind the postcondition like the repairs
+      // (no immediate replan_scheduled), then released exactly once; only the
+      // unrelated root T_other triggers it, never the excused acting lineage.
+      recoveryKinds: [
+        'postcondition_scheduled',
+        'repair_coalesced',
+        'replan_coalesced',
+      ],
       maxRepairAttemptsPerTask: 1,
+      replansReleasedAfterPostcondition: 1,
+      replanTriggerTaskIds: ['T_other'],
     },
   },
   {
@@ -1061,7 +1070,8 @@ export const SELF_WRITE_CASES: readonly SelfWriteCase[] = [
       actingLineageInvalidated: true,
       otherReadersInvalidated: true,
       postconditionAttempts: 0,
-      recoveryKinds: ['repair_scheduled'],
+      // oracle-v3: a root task is invalidated, so the planner is re-invoked once
+      recoveryKinds: ['repair_scheduled', 'replan_scheduled'],
       maxRepairAttemptsPerTask: 1,
     },
   },
@@ -1081,7 +1091,8 @@ export const SELF_WRITE_CASES: readonly SelfWriteCase[] = [
       actingLineageInvalidated: true,
       otherReadersInvalidated: true,
       postconditionAttempts: 0,
-      recoveryKinds: ['repair_scheduled'],
+      // oracle-v3: a root task is invalidated, so the planner is re-invoked once
+      recoveryKinds: ['repair_scheduled', 'replan_scheduled'],
       maxRepairAttemptsPerTask: 1,
     },
   },

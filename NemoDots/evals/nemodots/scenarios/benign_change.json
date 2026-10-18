@@ -3,6 +3,9 @@
   "version": 1,
   "class": "benign_change",
   "description": "A cosmetic, unrelated configuration change (control for B1). It must not invalidate any health, cache, pool or routing evidence.",
+  "preconditions": {
+    "visible": ["healthy"]
+  },
   "steps": [
     {
       "kind": "set_config",

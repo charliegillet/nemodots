@@ -3,6 +3,7 @@
 // unfenced orphan path stores telemetry only (finding C16).
 import { randomUUID } from 'node:crypto';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { setMutationForTests } from '../../../../src/server/nemodots/config/mutation.js';
 import {
   ContextSnapshotSchema,
   ModelCallRecordSchema,
@@ -264,6 +265,27 @@ async function counts() {
 }
 
 describe('recordModelCall (fenced path)', () => {
+  it('MUTATION drop_inherited_edges: the same call stores its evidence edges but no inheritance edge (4 instead of 6)', async () => {
+    process.env.NEMODOTS_TEST_HOOKS = '1';
+    const w = await world();
+    const { snapshot, record } = build(w);
+    setMutationForTests('drop_inherited_edges');
+    try {
+      const stored = await inTx(getDb().app, (client) =>
+        recordModelCall(client, { record, snapshot }, FX),
+      );
+      expect(stored.edges).toEqual({ inserted: 4, existing: 0 });
+      expect(
+        await count(
+          getDb().app,
+          "SELECT count(*) AS n FROM ledger.dependency_edges WHERE kind = 'inheritance'",
+        ),
+      ).toBe(0);
+    } finally {
+      setMutationForTests(null);
+    }
+  });
+
   it('stores snapshot, record, tool calls, attempts and evidence + inheritance edges in one transaction', async () => {
     const w = await world();
     const { snapshot, record } = build(w);

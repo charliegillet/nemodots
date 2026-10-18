@@ -43,6 +43,10 @@ Collision rule: `(scope.ownerId, scope.environment, scope.resource, key)` is the
 
 **Revision 3 (2026-10-18, D5 delegation, approved by the user):** `allowedCapabilities(role, parentCapabilities)` is `ROLE_CAPABILITIES[role] ∩ parentCapabilities`, plus one server-owned grant: a specialist delegated by a parent holding `delegate` keeps its role's `propose_*` capabilities. Revision 2's pure intersection made the documented investigator → specialist repair path impossible (an investigator cannot propose, so its specialist child could not either). The grant is limited: only investigators may delegate specialists (`delegableRoles`), specialists delegate verifiers only, and admission still checks every proposal's evidence and policy.
 
+**Revision 3 (2026-10-18, replan coalescing):** `RecoveryEvent.kind` gains `replan_coalesced`. When a verified self-write's postcondition gate holds repairs (`repair_coalesced`), a replan triggered by the same invalidation event is held behind that gate too and released with the held repairs. Otherwise the planner would replan on a state still under postcondition verification. At most one replan per invalidation event per mission, bounded by `replanCap`.
+
+**Revision 3 (2026-10-18, recovery scope rule, W6.1/D8):** `contracts/ports.ts` defines `RecoveryScopeRule.select({missionId, closureTaskIds, directReaderTaskIds, tasks}) → {restartTaskIds}`. The coordinator applies its result identically for every rule (fresh reads plus the invalidation summary, gate coalescing, replan bounds, admission, events); only the scope differs. Rules are registered by name in the coordinator deps and chosen per mission at creation (`missions.recovery_scope_rule`, default `selective`), never by the model or an HTTP client. Evaluation arms: `selective` = `closureTaskIds`; `dag-restart` = `directReaderTaskIds` ∪ all their scheduling descendants (children and dependents); `broad-restart` = every non-terminal or succeeded non-planner task of the mission. Superseded facts are never reused in any arm.
+
 The collection's `normalizedValue` is `{ keys: string[] /* sorted */, collectionVersion: number }`; its version advances only on key insert/delete. Member values never affect the collection version (rev2 C1/D1).
 
 ---
@@ -302,7 +306,7 @@ InvalidationEvent = {
 
 RecoveryEvent = {
   id, invalidationEventId, missionId,
-  kind: 'repair_scheduled' | 'replan_scheduled' | 'postcondition_scheduled' | 'intent_blocked' | 'attempt_aborted' | 'branch_preserved' | 'repair_coalesced' | 'invalidation_resolved' | 'mission_paused_closure_cap',
+  kind: 'repair_scheduled' | 'replan_scheduled' | 'postcondition_scheduled' | 'intent_blocked' | 'attempt_aborted' | 'branch_preserved' | 'repair_coalesced' | 'replan_coalesced' | 'invalidation_resolved' | 'mission_paused_closure_cap',
   taskId: TaskId | null, attemptId: AttemptId | null, newAttemptId: AttemptId | null, actionId: ActionId | null,
   detail: string (<= 500), createdAt
 }

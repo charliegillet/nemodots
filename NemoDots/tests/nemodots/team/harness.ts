@@ -90,6 +90,16 @@ export const text =
     outcome: 'completed',
   });
 
+/** The investigator's closing-check reply when its readings showed no defect. */
+export const noDefect = (): Step =>
+  text(
+    JSON.stringify({
+      defectFound: false,
+      area: 'none',
+      reason: 'nothing broken',
+    }),
+  );
+
 export const calls =
   (
     ...toolCalls: { id?: string; name: string; args: unknown | string }[]

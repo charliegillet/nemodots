@@ -100,8 +100,8 @@ describe('classifyHistory', () => {
     expect(settled).toHaveLength(1);
   });
 
-  it('two actions in one walk: both settle in order, the last decides', async () => {
-    const { deps, told } = setup({
+  it('two actions in one walk: both settle in order, the last decides; the superseded verified row schedules no postcondition (SW-3)', async () => {
+    const { deps, told, settled } = setup({
       [X]: { digest: D('a') },
       [Y]: { digest: D('b') },
     });
@@ -109,10 +109,18 @@ describe('classifyHistory', () => {
       row(2, X, D('a')),
       row(3, Y, D('z')),
     ]);
-    expect(told).toEqual([
+    // both intents settle from their own history rows, in order
+    expect(settled.map((s) => [s.actionId, s.outcome])).toEqual([
       [X, 'verified'],
       [Y, 'failed'],
     ]);
+    expect(result.settled).toEqual([
+      { actionId: X, outcome: 'verified' },
+      { actionId: Y, outcome: 'failed' },
+    ]);
+    // recovery hears only the head row: X's verified row is superseded, so no
+    // postcondition is scheduled for it; the mismatch still reaches recovery.
+    expect(told).toEqual([[Y, 'failed']]);
     expect(result).toMatchObject({
       selfWrite: 'mismatch',
       causedByActionId: Y,

@@ -14,22 +14,24 @@ import {
   probeHeaderValue,
 } from '../../../src/server/nemodots/sandbox/probe-auth.js';
 import {
-  MIN_DECILE_SAMPLES,
-  decile,
   normalizeHealth,
   normalizeMetrics,
   normalizeRedisKeys,
   orderCountBucket,
+  stockBand,
 } from '../../../src/server/nemodots/sandbox/readers.js';
 
 describe('buckets', () => {
-  it('deciles are 0..9 and null without a denominator', () => {
-    expect(decile(0, 0)).toBeNull();
-    expect(decile(0, 10)).toBe(0);
-    expect(decile(1, 10)).toBe(1);
-    expect(decile(95, 100)).toBe(9);
-    expect(decile(10, 10)).toBe(9);
-    expect(decile(5, 10)).toBe(5);
+  it('stock bands change only at meaningful thresholds', () => {
+    expect([null, -1, 0, 1, 9, 10, 500].map(stockBand)).toEqual([
+      null,
+      'negative',
+      'zero',
+      'low',
+      'low',
+      'ok',
+      'ok',
+    ]);
   });
 
   it('order counts fall in the documented buckets', () => {
@@ -79,7 +81,7 @@ describe('normalization drops volatile fields', () => {
     expect(normalizeHealth({ status: 'weird' }).status).toBe('down');
   });
 
-  it('metrics keep the class set, expected/found schema and deciles, not counters', () => {
+  it('metrics keep the class set and the expected/found schema, and nothing that moves with ordinary traffic', () => {
     const base = {
       windowMs: 30000,
       requests: { total: 1000, window: 20, windowServerErrors: 4 },
@@ -94,42 +96,35 @@ describe('normalization drops volatile fields', () => {
     expect(value).toEqual({
       errorClasses: ['cache_decode_error', 'pool_timeout'],
       cacheDecodeError: { expectedSchema: 2, foundSchema: 1 },
-      cacheHitRatioDecile: 8,
-      errorRateDecile: 2,
     });
+    // totals, window sizes, hit counts and error counts do not matter
     const other = normalizeMetrics({
       ...base,
-      requests: { total: 5, window: 20, windowServerErrors: 4 },
-      cache: { hits: 1, misses: 1, windowHits: 17, windowMisses: 3 },
+      requests: { total: 5, window: 400, windowServerErrors: 1 },
+      cache: { hits: 1, misses: 1, windowHits: 3, windowMisses: 90 },
     });
     expect(other).toEqual(value);
     expect(normalizeMetrics({}).cacheDecodeError).toBeNull();
   });
 
-  it('ratio deciles are null below the minimum sample count, so idle and sparse traffic normalize alike', () => {
-    expect(decile(1, 9, MIN_DECILE_SAMPLES)).toBeNull();
-    expect(decile(0, 0, MIN_DECILE_SAMPLES)).toBeNull();
-    expect(decile(9, MIN_DECILE_SAMPLES, MIN_DECILE_SAMPLES)).toBe(9);
-    const sparse = (requests: number, hits: number, misses: number) =>
+  it('a healthy window normalizes the same whatever the traffic volume or cache temperature', () => {
+    const healthy = (window: number, hits: number, misses: number) =>
       normalizeMetrics({
-        requests: { total: 99, window: requests, windowServerErrors: 0 },
+        requests: { total: 99, window, windowServerErrors: 0 },
         cache: { hits: 99, misses: 99, windowHits: hits, windowMisses: misses },
         errors: { windowClasses: [] },
         cache_decode_error: null,
       });
-    const idle = sparse(0, 0, 0);
-    expect(idle).toEqual({
-      errorClasses: [],
-      cacheDecodeError: null,
-      cacheHitRatioDecile: null,
-      errorRateDecile: null,
-    });
-    expect(sparse(3, 2, 1)).toEqual(idle);
-    expect(sparse(MIN_DECILE_SAMPLES - 1, 9, 0)).toEqual(idle);
-    expect(sparse(MIN_DECILE_SAMPLES, 10, 0)).toMatchObject({
-      cacheHitRatioDecile: 9,
-      errorRateDecile: 0,
-    });
+    const idle = healthy(0, 0, 0);
+    expect(idle).toEqual({ errorClasses: [], cacheDecodeError: null });
+    for (const [window, hits, misses] of [
+      [3, 2, 1],
+      [9, 0, 9],
+      [10, 10, 0],
+      [250, 20, 230],
+      [250, 249, 1],
+    ])
+      expect(healthy(window, hits, misses)).toEqual(idle);
   });
 
   it('redis keys group by namespace:schema suffix and skip foreign keys', () => {

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { isMutated } from '../config/mutation.js';
 import type pg from 'pg';
 import {
   type AttemptContext,
@@ -238,11 +239,17 @@ export async function heartbeat(
         SET lease_expires_at = now() + $3 * interval '1 millisecond',
             lease_renewed_at = now()
        FROM coordinator.tasks t
-      WHERE a.id = $1 AND a.fencing_token = $2 AND a.status = 'running'
-        AND a.lease_expires_at > clock_timestamp()
-        AND t.id = a.task_id AND t.fence_seq = $2
+      WHERE a.id = $1 AND t.id = a.task_id
+        AND ($4::boolean OR (a.fencing_token = $2 AND a.status = 'running'
+             AND a.lease_expires_at > clock_timestamp() AND t.fence_seq = $2))
       RETURNING a.lease_expires_at`,
-    [context.attemptId, context.fencingToken, leaseMs],
+    // MUTATION ignore_fencing ($4): any token renews any lease.
+    [
+      context.attemptId,
+      context.fencingToken,
+      leaseMs,
+      isMutated('ignore_fencing'),
+    ],
   );
   if (rows.length === 1)
     return { leaseExpiresAt: iso(rows[0].lease_expires_at) };

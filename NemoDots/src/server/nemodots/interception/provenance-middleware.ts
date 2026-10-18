@@ -1,19 +1,24 @@
 // TanStack chat middleware for Dot turns (TOOL_COVERAGE section 2). It
 //  - computes a ContextSnapshot at the start of every model iteration,
 //  - enforces the tool policy registry for incident Dots (`skip` + a visible
-//    tool error, in addition to withToolPolicy),
+//    tool error, in addition to withToolPolicy). Client tools carry no
+//    executor, so the loop never asks `onBeforeToolCall` about them; for
+//    incident Dots the registry's refused ones are given a refusing executor
+//    in `onConfig`, so the call ends with a result instead of staying pending,
 //  - records tool results and lets the sink register receipts for read tools,
+//    and recalls them when the transcript is replayed in a later turn (R4),
 //  - turns each iteration's observed provider requests into a ModelCallRecord
 //    handed to an injected `recordModelCall` sink.
 // Every sink method is optional; without a sink nothing is recorded.
 import { randomUUID } from 'node:crypto';
-import type { ChatMiddleware } from '@tanstack/ai';
+import type { ChatMiddleware, ModelMessage, Tool } from '@tanstack/ai';
 import {
   ContextSnapshotSchema,
   ModelCallRecordSchema,
   digest,
   unionDependencyVectors,
   type ContextSnapshot,
+  type DependencyEntry,
   type Digest,
   type InferenceAttempt,
   type ModelCallOutcome,
@@ -21,8 +26,17 @@ import {
   type ProviderMode,
 } from '../contracts/index.js';
 import type { FetchTelemetry, ObservedRequest } from './fetch-telemetry.js';
-import { addToScopeVector, type ProvenanceScope } from './provenance-scope.js';
-import { checkToolCall, type ToolPolicyScope } from './with-tool-policy.js';
+import {
+  addToScopeVector,
+  recallToolEvidence,
+  rememberToolEvidence,
+  type ProvenanceScope,
+} from './provenance-scope.js';
+import {
+  checkToolCall,
+  ToolRefusedError,
+  type ToolPolicyScope,
+} from './with-tool-policy.js';
 import { classifyTool } from './policy-registry.js';
 import type { ProvenanceSink } from './sink.js';
 
@@ -94,6 +108,27 @@ function attemptOf(request: ObservedRequest, n: number): InferenceAttempt {
   };
 }
 
+/**
+ * What each replayed history item was read from (R4). A tool result inherits the
+ * receipts registered for its tool call; an assistant message inherits
+ * everything read before it (its model call was given all of it); a user
+ * message carries none. Attribution is looked up server-side by (thread, tool
+ * call id), never taken from the replayed content, and it is only ever added to
+ * a vector: forging history cannot remove evidence from one.
+ */
+function historyEvidence(threadId: string, messages: readonly ModelMessage[]) {
+  const perItem: (readonly DependencyEntry[])[] = [];
+  let seen: DependencyEntry[] = [];
+  for (const message of messages) {
+    if (message.role === 'tool' && message.toolCallId) {
+      const own = recallToolEvidence(threadId, message.toolCallId);
+      seen = unionDependencyVectors(seen, own);
+      perItem.push(own);
+    } else perItem.push(message.role === 'assistant' ? seen : []);
+  }
+  return { perItem, vector: seen };
+}
+
 export function provenanceMiddleware(
   options: ProvenanceOptions,
 ): ProvenanceMiddleware {
@@ -102,7 +137,32 @@ export function provenanceMiddleware(
   const iterations: Iteration[] = [];
   const snapshots: ContextSnapshot[] = [];
   const records: ModelCallRecord[] = [];
+  const refused = new Set<string>();
   let flush: Promise<void> | null = null;
+
+  // Client tools (no executor) are never offered to onBeforeToolCall, so a call
+  // the registry refuses would stay a pending client call, which the browser
+  // renders as an approval card. Give those an executor that refuses; the
+  // refusal then runs through onBeforeToolCall like any server tool. Allowed
+  // client tools (review_space_page) are left untouched.
+  const refusingClientTools = (tools: readonly Tool[]): Tool[] | undefined => {
+    if (!options.policy.policy.isIncident(options.policy.dotId))
+      return undefined;
+    let changed = false;
+    const next = tools.map((tool) => {
+      if (tool.execute) return tool;
+      const refusal = checkToolCall(options.policy, tool.name, {});
+      if (!refusal) return tool;
+      changed = true;
+      return {
+        ...tool,
+        execute: () => {
+          throw new ToolRefusedError(refusal);
+        },
+      };
+    });
+    return changed ? next : undefined;
+  };
 
   const current = () => iterations[iterations.length - 1];
 
@@ -180,7 +240,16 @@ export function provenanceMiddleware(
   const middleware: ChatMiddleware = {
     name: 'nemodots-provenance',
     onConfig(ctx, config) {
-      if (ctx.phase !== 'beforeModel') return;
+      // Replayed evidence joins the turn vector before any tool can run, so an
+      // approval created later in this turn is bound to it.
+      const replay = historyEvidence(facts.threadId, config.messages);
+      addToScopeVector(scope, replay.vector);
+      // The structured-output boundary passes a config without tools.
+      const gated = config.tools
+        ? refusingClientTools(config.tools)
+        : undefined;
+      if (ctx.phase !== 'beforeModel')
+        return gated ? { tools: gated } : undefined;
       const tools = config.tools.map((tool) => ({
         name: tool.name,
         description: tool.description,
@@ -209,16 +278,17 @@ export function provenanceMiddleware(
           memories: facts.memories,
           invalidationEvents: [],
           historyItems: history
+            .map((h, i) => ({ h, ids: replay.perItem[i] }))
             .filter(
-              (h) =>
+              ({ h }) =>
                 h.role === 'assistant' ||
                 h.role === 'tool' ||
                 h.role === 'user',
             )
-            .map((h) => ({
+            .map(({ h, ids }) => ({
               role: h.role as 'assistant' | 'tool' | 'user',
               digest: h.digest,
-              dependencyReceiptIds: [],
+              dependencyReceiptIds: ids.map((entry) => entry.receiptId),
             })),
         },
         dependencyVector: unionDependencyVectors(scope.dependencyVector),
@@ -231,9 +301,10 @@ export function provenanceMiddleware(
         toolCalls: [],
         content: '',
       });
+      const patch = gated ? { tools: gated } : undefined;
       return sink.recordSnapshot
-        ? Promise.resolve(sink.recordSnapshot(snapshot)).then(() => undefined)
-        : undefined;
+        ? Promise.resolve(sink.recordSnapshot(snapshot)).then(() => patch)
+        : patch;
     },
     onChunk(ctx) {
       const iteration = current();
@@ -247,6 +318,7 @@ export function provenanceMiddleware(
       });
       const refusal = checkToolCall(options.policy, hook.toolName, hook.args);
       if (!refusal) return;
+      refused.add(hook.toolCallId);
       options.policy.onRefusal?.({ ...refusal, toolName: hook.toolName });
       return {
         type: 'skip',
@@ -256,6 +328,9 @@ export function provenanceMiddleware(
     async onAfterToolCall(_ctx, info) {
       if (!info.ok || !sink.registerToolResult) return;
       if (classifyTool(info.toolName).class !== 'read') return;
+      // A refused call reaches here with the refusal as its "result"; there is
+      // nothing read to register a receipt for.
+      if (refused.has(info.toolCallId)) return;
       const entries = await sink.registerToolResult({
         toolName: info.toolName,
         toolCallId: info.toolCallId,
@@ -263,7 +338,10 @@ export function provenanceMiddleware(
         result: info.result,
         resultDigest: safeDigest(info.result),
       });
-      if (entries && entries.length) addToScopeVector(scope, entries);
+      if (entries && entries.length) {
+        addToScopeVector(scope, entries);
+        rememberToolEvidence(facts.threadId, info.toolCallId, entries);
+      }
     },
     onFinish(ctx) {
       finish(ctx);

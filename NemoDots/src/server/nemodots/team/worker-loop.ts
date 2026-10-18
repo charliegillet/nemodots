@@ -16,31 +16,31 @@ import {
 } from '../context/index.js';
 import type { HandlerHelpers, HandlerOutcome } from '../coordinator/index.js';
 import type { ClaimedAttempt } from '../coordinator/types.js';
-import { createBudget } from './budget.js';
+import { createBudget, type AttemptBudget } from './budget.js';
 import { buildContext } from './context-input.js';
 import { failureOutcome } from './failures.js';
 import { callModel } from './model-call.js';
-import { CORRECTION_NOTICE, FINAL_ITERATION_NOTICE } from './prompts.js';
+import {
+  CLOSING_CHECK_PROMPT,
+  CORRECTION_NOTICE,
+  DELEGATE_NOW_NOTICE,
+  FINAL_ITERATION_NOTICE,
+} from './prompts.js';
+import { CLOSING_CHECK_FORMAT, parseClosingCheck } from './closing-check.js';
 import { createToolExecutor, newLoopState } from './tools.js';
 import type { TeamDeps } from './types.js';
 
 const SUMMARY_MAX = 8000;
 
-export async function runWorker(
+async function runWorkerInner(
   deps: TeamDeps,
   claimed: ClaimedAttempt,
   helpers: HandlerHelpers,
+  budget: AttemptBudget,
 ): Promise<HandlerOutcome> {
   const { context } = claimed;
   const state = newLoopState();
   const executor = createToolExecutor(deps, claimed, helpers, state);
-  const budget = createBudget({
-    maxIterations: Math.min(
-      claimed.task.maxIterations,
-      deps.config.maxIterations ?? 12,
-    ),
-    maxTokens: claimed.task.maxTokens,
-  });
   const modelRole: ModelRole =
     claimed.attempt.kind === 'repair' ? 'repair' : 'worker';
   const repairOf = claimed.attempt.repairOf;
@@ -60,6 +60,7 @@ export async function runWorker(
 
   const history: HistoryItemInput[] = [];
   let corrections = 0;
+  let closed = false;
 
   while (budget.next()) {
     await helpers.checkpoint();
@@ -176,6 +177,61 @@ export async function runWorker(
       continue;
     }
 
+    // Investigators cannot repair; before one finishes without having delegated,
+    // it answers a structured check. If its own readings show a defect in a
+    // specialist's area, it is sent back to delegate. The model decides whether
+    // there is a defect, which area and what the child is asked.
+    if (
+      !closed &&
+      !last &&
+      context.role === 'investigator' &&
+      context.capabilities.includes('delegate') &&
+      state.delegated.length === 0
+    ) {
+      closed = true;
+      history.push({ role: 'assistant', content: text, dependencyVector: [] });
+      history.push({
+        role: 'user',
+        content: CLOSING_CHECK_PROMPT,
+        dependencyVector: [],
+      });
+      const check = await callModel({
+        deps,
+        claimed,
+        helpers,
+        compiled: buildContext({
+          deps,
+          claimed,
+          history,
+          artifacts: inherited,
+          invalidations,
+          readSetVector: state.readSet,
+          noTools: true,
+        }),
+        role: modelRole,
+        maxTokens: deps.config.maxTokens ?? 1536,
+        responseFormat: CLOSING_CHECK_FORMAT,
+      });
+      budget.spend(check.record.attempts.at(-1)?.usage ?? null);
+      const checkFailure = failureOutcome(check.result);
+      if (checkFailure) return checkFailure;
+      const reply = (check.result.content ?? '').trim();
+      const verdict = parseClosingCheck(reply);
+      history.push({ role: 'assistant', content: reply, dependencyVector: [] });
+      if (verdict && verdict.defectFound && verdict.area !== 'none') {
+        history.push({
+          role: 'user',
+          content: DELEGATE_NOW_NOTICE(verdict.area),
+          dependencyVector: [],
+        });
+        continue;
+      }
+      // no defect in a specialist's area (or an unusable check): the answer stands
+      history.pop();
+      history.pop();
+      history.pop();
+    }
+
     // Final answer: published as this task's output. The vector is a
     // conservative union of everything the attempt read, inherited or was told.
     const vector = unionDependencyVectors(
@@ -202,4 +258,31 @@ export async function runWorker(
     };
   }
   return { type: 'failed', reason: 'iteration_limit' };
+}
+
+export async function runWorker(
+  deps: TeamDeps,
+  claimed: ClaimedAttempt,
+  helpers: HandlerHelpers,
+): Promise<HandlerOutcome> {
+  const budget = createBudget({
+    maxIterations: Math.min(
+      claimed.task.maxIterations,
+      deps.config.maxIterations ?? 12,
+    ),
+    maxTokens: claimed.task.maxTokens,
+  });
+  try {
+    return await runWorkerInner(deps, claimed, helpers, budget);
+  } finally {
+    // reported on every exit path: published, failed, aborted or thrown
+    deps.onEvent?.({
+      kind: 'attempt_usage',
+      attemptId: claimed.context.attemptId,
+      role: claimed.context.role,
+      spentTokens: budget.spentTokens(),
+      ...budget.report(),
+      budgetTokens: budget.maxTokens,
+    });
+  }
 }

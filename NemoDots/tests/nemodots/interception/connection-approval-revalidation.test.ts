@@ -259,7 +259,8 @@ it('an incident Dot cannot run an approved call even with a current vector', asy
     connectionId: f.workspace.connections.list(f.dot.id)[0].id,
     tool: 'send mail!',
     arguments: { to: 'a@example.com' },
-    dependencyVector: [],
+    // A bound vector: an empty one is refused for an incident Dot (TP-15).
+    dependencyVector: [entryFor('evidence-page', 1)],
   });
   setActivePolicy(createIncidentPolicy({ vectors: { isCurrent: () => true } }));
   const response = await f.approve('tc1', approvalId);

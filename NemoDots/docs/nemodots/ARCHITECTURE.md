@@ -260,18 +260,18 @@ The healthy baseline values live in `sandbox/seed.ts` and in the scenario manife
 
 ### 9.4 Observed sources: normalization decides invalidation-significance (finding D2)
 
-| Source                     | Normalized value (what gets digested)                                                                                                           | Excluded                             |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
-| `checkout.health`          | `status` enum, per-check booleans (`postgres`, `redis`, `config_parse`, `writes`), error class list                                             | latencies, timestamps                |
-| `checkout.metrics`         | error classes present (set), `cache_decode_error.expectedSchema/foundSchema`, coarse buckets: cache hit ratio in deciles, error rate in deciles | raw counters, request totals         |
-| `checkout.orders.recent`   | count of non-probe orders in the last 10 minutes bucketed (0, 1-10, 11-100, >100), latest non-probe order status set                            | probe-tagged orders, ids, timestamps |
-| `checkout.inventory/<sku>` | authority quantity and API-view quantity for the SKU, `consistent: boolean`                                                                     | probe-tagged reservations            |
-| `redis.stats`              | key counts per `namespace:schema` suffix, active namespace from config, `reachable`                                                             | memory, per-key TTLs                 |
-| `checkout.config/<key>`    | `{ key, value, version }`                                                                                                                       | `caused_by_*` columns, timestamps    |
-| `checkout.config`          | sorted key list + collection version                                                                                                            | values                               |
-| `checkout.acceptance`      | probe verdict, invariant results, health window summary                                                                                         | probe secret, run id                 |
+| Source                     | Normalized value (what gets digested)                                                                                                   | Excluded                                                                                                         |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `checkout.health`          | `status` enum, per-check booleans (`postgres`, `redis`, `config_parse`, `writes`), error class list                                     | latencies, timestamps                                                                                            |
+| `checkout.metrics`         | error classes seen in the window (set), `cacheDecodeError {expectedSchema, foundSchema}`                                                | raw counters, request totals, cache-hit and error-rate ratios (rev 2026-10-18: they moved with ordinary traffic) |
+| `checkout.orders.recent`   | count of non-probe orders in the last 10 minutes bucketed (0, 1-10, 11-100, >100), latest non-probe order status set                    | probe-tagged orders, ids, timestamps                                                                             |
+| `checkout.inventory/<sku>` | `consistent: boolean`, `authorityStock` and `apiStock` bands (`negative`, `zero`, `low` < 10, `ok`), `divergence` (API minus authority) | probe-tagged reservations, exact quantities (rev 2026-10-18: they changed with every order)                      |
+| `redis.stats`              | key counts per `namespace:schema` suffix, active namespace from config, `reachable`                                                     | memory, per-key TTLs                                                                                             |
+| `checkout.config/<key>`    | `{ key, value, version }`                                                                                                               | `caused_by_*` columns, timestamps                                                                                |
+| `checkout.config`          | sorted key list + collection version                                                                                                    | values                                                                                                           |
+| `checkout.acceptance`      | probe verdict, invariant results, health window summary                                                                                 | probe secret, run id                                                                                             |
 
-Same-digest re-observations append confirmations (section 5.2). The probe's `PROBE-SKU` order is tagged and excluded, so acceptance never invalidates mission evidence.
+Revised 2026-10-18 after the first live missions: under real mission traffic the decile ratios and exact stock quantities minted false revisions and invalidated readers of a healthy checkout. `tests/nemodots/integration/sandbox/observed-stability.test.ts` asserts zero new revisions under 10 rounds of mixed traffic, and that a real fault still changes the digest (EVALUATION.md section 12). Same-digest re-observations append confirmations (section 5.2). The probe's `PROBE-SKU` order is tagged and excluded, so acceptance never invalidates mission evidence.
 
 ### 9.5 Acceptance probe
 

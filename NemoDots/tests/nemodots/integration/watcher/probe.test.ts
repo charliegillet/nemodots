@@ -11,11 +11,14 @@ import {
   registerObservation,
   type RegisterObservationInput,
 } from '../../../../src/server/nemodots/ledger/index.js';
+import { createEventSink } from '../../../../src/server/nemodots/coordinator/events.js';
 import { createProbe } from '../../../../src/server/nemodots/sandbox/probe.js';
 import { createSourceReaders } from '../../../../src/server/nemodots/sandbox/readers.js';
 import { createWatcher } from '../../../../src/server/nemodots/watcher/index.js';
 import { withSandbox } from '../sandbox/harness.js';
 import { newScope, sourceRef } from '../ledger/fixtures.js';
+
+const ledger = { events: createEventSink() };
 
 const KEYS = [
   'checkout.health',
@@ -50,11 +53,15 @@ it('a probe run leaves the health, metrics, orders.recent and inventory receipts
       const client = await s.pools.app.connect();
       try {
         await client.query('BEGIN');
-        await registerObservation(client, {
-          source: sourceRef(testScope, key),
-          normalizedValue: read.normalizedValue,
-          provenance: { kind: 'tool_call' },
-        } as RegisterObservationInput);
+        await registerObservation(
+          client,
+          {
+            source: sourceRef(testScope, key),
+            normalizedValue: read.normalizedValue,
+            provenance: { kind: 'tool_call' },
+          } as RegisterObservationInput,
+          { ledger },
+        );
         await client.query('COMMIT');
       } finally {
         client.release();
@@ -72,6 +79,7 @@ it('a probe run leaves the health, metrics, orders.recent and inventory receipts
         async onSelfWriteSettled() {},
       },
       intervalMs: 60_000,
+      ledger,
     });
     try {
       expect(await watcher.pass()).toMatchObject({

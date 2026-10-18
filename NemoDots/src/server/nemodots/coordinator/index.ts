@@ -18,7 +18,7 @@ import {
   startAttempt,
   type ClaimOptions,
 } from './leases.js';
-import { pauseMission } from './missions.js';
+import { evaluateStalled, pauseMission } from './missions.js';
 import { createOutbox, type Outbox, type OutboxOptions } from './outbox.js';
 import {
   abortAttempt,
@@ -81,8 +81,10 @@ export {
   createRecovery,
   evaluateOpen,
   IntentNotFoundError,
+  SELECTIVE_SCOPE_RULE,
 } from './recovery.js';
-export type { Recovery } from './recovery.js';
+export type { Recovery, RecoveryOptions } from './recovery.js';
+export { UnknownScopeRuleError } from './recovery.js';
 export { createMissionControl } from './control.js';
 export type { MissionControl } from './control.js';
 export {
@@ -210,6 +212,7 @@ export function createCoordinator(
     ...input,
     events: input.events ?? createEventSink(),
     clock: input.clock ?? (() => new Date()),
+    recoveryOptions: options.recovery,
   };
   const workerId = options.workerId ?? 'coordinator';
   const recovery = createRecovery(deps, {
@@ -219,11 +222,17 @@ export function createCoordinator(
       (async (missionId) => {
         await pauseMission(deps, missionId);
       }),
+    pauseOnUnknownScopeRule:
+      options.recovery?.pauseOnUnknownScopeRule ??
+      (async (missionId, reason) => {
+        await pauseMission(deps, missionId, reason);
+      }),
   });
   const control = createMissionControl(deps);
   const runMaintenance = async () => {
     await reapExpired(deps);
     await recovery.sweep();
+    await evaluateStalled(deps);
   };
   const outbox = createOutbox(deps, {
     workerId,

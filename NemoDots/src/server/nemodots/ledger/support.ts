@@ -12,6 +12,7 @@
 // and observed receipts alike.
 // Reads happen after the locks, so a statement that waited sees the writer's
 // committed result (READ COMMITTED).
+import { isMutated } from '../config/mutation.js';
 import type {
   BlockReason,
   CheckedVector,
@@ -162,7 +163,9 @@ export async function assertCurrent(
         id,
       );
     const maxAge = opts.freshness?.[row.sourceKey];
+    // MUTATION skip_freshness: evidence_too_old can never fire.
     const freshnessOk =
+      isMutated('skip_freshness') ||
       maxAge === undefined ||
       row.lastConfirmedAt.getTime() >= now.getTime() - maxAge;
     const liveRevision =
@@ -177,7 +180,12 @@ export async function assertCurrent(
       lastConfirmedAt: row.lastConfirmedAt.toISOString(),
       freshnessOk,
     });
-    if (!failure) {
+    // MUTATION bypass_final_version_check: a G1 commit (lockMode 'update')
+    // accepts a stale or superseded receipt.
+    if (
+      !failure &&
+      !(opts.lockMode === 'update' && isMutated('bypass_final_version_check'))
+    ) {
       const verdict = judge(
         row,
         live.get(row.sourceKey),

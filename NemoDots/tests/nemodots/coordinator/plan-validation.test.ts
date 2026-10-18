@@ -386,13 +386,55 @@ describe('childCapabilities', () => {
         ROLE_CAPABILITIES.cache_specialist as readonly Capability[],
       ).sort(),
     ).toEqual([...ROLE_CAPABILITIES.cache_specialist].sort());
-    // A child can never exceed its parent: an investigator's specialists cannot propose.
-    expect(
-      childCapabilities(
-        'cache_specialist',
-        ROLE_CAPABILITIES.investigator as readonly Capability[],
-      ),
-    ).not.toContain('propose_config_change');
     expect(childCapabilities('verifier', [])).toEqual([]);
+  });
+
+  it('keeps the propose_* capabilities of a specialist delegated by a parent holding delegate (rev3 D5)', () => {
+    const investigator =
+      ROLE_CAPABILITIES.investigator as readonly Capability[];
+    expect(childCapabilities('cache_specialist', investigator).sort()).toEqual(
+      [...ROLE_CAPABILITIES.cache_specialist].sort(),
+    );
+    // the grant is limited to propose_*: observe is still gated by the parent
+    expect(childCapabilities('cache_specialist', ['delegate']).sort()).toEqual([
+      'delegate',
+      'propose_cache_flush',
+      'propose_config_change',
+    ]);
+    expect(
+      childCapabilities('database_specialist', investigator).sort(),
+    ).toEqual([...ROLE_CAPABILITIES.database_specialist].sort());
+  });
+
+  it('grants no propose_* without delegate, and never to verifiers or investigators', () => {
+    const noDelegate: Capability[] = ['observe', 'publish_finding'];
+    expect(childCapabilities('cache_specialist', noDelegate).sort()).toEqual([
+      'observe',
+      'publish_finding',
+    ]);
+    const proposing = [
+      'observe',
+      'delegate',
+      'publish_finding',
+      'propose_config_change',
+      'propose_cache_flush',
+    ] as Capability[];
+    expect(childCapabilities('verifier', proposing)).not.toContain(
+      'propose_config_change',
+    );
+    expect(childCapabilities('verifier', proposing)).not.toContain(
+      'propose_cache_flush',
+    );
+    for (const role of ['investigator', 'verifier'] as const)
+      expect(
+        childCapabilities(role, proposing).filter((c) =>
+          c.startsWith('propose_'),
+        ),
+      ).toEqual([]);
+    expect(
+      (ROLE_CAPABILITIES.investigator as readonly string[]).filter((c) =>
+        c.startsWith('propose_'),
+      ),
+    ).toEqual([]);
   });
 });

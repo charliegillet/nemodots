@@ -10,6 +10,7 @@ import {
 import type { HandlerHelpers, HandlerOutcome } from '../coordinator/index.js';
 import type { ClaimedAttempt } from '../coordinator/types.js';
 import { jsonSchemaOf, parsePlanText, runPlanning } from './planner.js';
+import { requireVerifierEnabled } from './policy.js';
 import type { TeamDeps } from './types.js';
 
 export const ReplanShapeSchema = z
@@ -60,28 +61,32 @@ export async function runReplan(
     invalidations,
     responseFormat: REPLAN_RESPONSE_FORMAT,
     parse: (text) =>
-      parsePlanText(text, (raw) => {
-        const ids = (raw as { cancelTaskIds?: unknown })?.cancelTaskIds;
-        const parsed = z
-          .array(TaskIdSchema)
-          .max(24)
-          .safeParse(ids ?? []);
-        if (!parsed.success)
+      parsePlanText(
+        text,
+        (raw) => {
+          const ids = (raw as { cancelTaskIds?: unknown })?.cancelTaskIds;
+          const parsed = z
+            .array(TaskIdSchema)
+            .max(24)
+            .safeParse(ids ?? []);
+          if (!parsed.success)
+            return {
+              cancelTaskIds: [],
+              issues: ['cancelTaskIds must be task ids'],
+            };
+          const unknown = parsed.data.filter((id) => !cancellable.has(id));
           return {
-            cancelTaskIds: [],
-            issues: ['cancelTaskIds must be task ids'],
+            cancelTaskIds: parsed.data.filter((id) =>
+              cancellable.has(id),
+            ) as TaskId[],
+            issues: unknown.length
+              ? [
+                  `cancelTaskIds names tasks that cannot be cancelled: ${unknown.join(', ')}`,
+                ]
+              : [],
           };
-        const unknown = parsed.data.filter((id) => !cancellable.has(id));
-        return {
-          cancelTaskIds: parsed.data.filter((id) =>
-            cancellable.has(id),
-          ) as TaskId[],
-          issues: unknown.length
-            ? [
-                `cancelTaskIds names tasks that cannot be cancelled: ${unknown.join(', ')}`,
-              ]
-            : [],
-        };
-      }),
+        },
+        { requireVerifier: requireVerifierEnabled(deps.config) },
+      ),
   });
 }

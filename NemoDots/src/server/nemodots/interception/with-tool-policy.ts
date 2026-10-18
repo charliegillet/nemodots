@@ -9,7 +9,12 @@ import { decideTool, type Refusal } from './policy-registry.js';
 export interface ToolPolicyScope {
   dotId: string;
   policy: ToolPolicy;
-  /** Space a page write lands in when the call names none. */
+  /**
+   * The Dot's default page destination. Not a policy input: a create that names
+   * no Space is refused for incident Dots, because the Space it would land in
+   * (the thread's current page Space, else this default) is decided later by
+   * page-tools.ts and can change between this check and the write.
+   */
   defaultSpaceId: string | null;
   onRefusal?: (refusal: Refusal & { toolName: string }) => void;
 }
@@ -27,14 +32,16 @@ export function checkToolCall(
   args: unknown,
 ): Refusal | null {
   if (!scope.policy.isIncident(scope.dotId)) return null;
+  // Only an explicit Space is checked; the Space an omitted one resolves to is
+  // not known here, so it is treated as no Space at all (finding TP-02).
   const spaceOf = (input: unknown) => {
     const value =
       input && typeof input === 'object'
         ? (input as { spaceId?: unknown }).spaceId
         : undefined;
-    return typeof value === 'string' ? value : scope.defaultSpaceId;
+    return typeof value === 'string' ? value : null;
   };
-  return decideTool(
+  const refusal = decideTool(
     name,
     (toolName, input) =>
       // Only creation may be allowed (into the projection Space); edits of
@@ -46,6 +53,12 @@ export function checkToolCall(
       }),
     args,
   );
+  return refusal && name === 'create_space_page' && spaceOf(args) === null
+    ? {
+        ...refusal,
+        message: `Tool ${name} needs an explicit spaceId in the incident scope: an omitted spaceId would land in the current page's Space, not the mission projection Space.`,
+      }
+    : refusal;
 }
 
 export function withToolPolicy<T extends AnyTool>(

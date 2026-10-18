@@ -31,45 +31,74 @@ it('events.id order equals commit order: the higher id cannot commit first, and 
     // B tries to insert second and then to commit first.
     const a = await begin(h.pool);
     const b = await begin(h.pool);
-    const idA = await sink.append(a, {
-      missionId,
-      kind: 'heartbeat',
-      payload: heartbeat,
-    });
-    let bAppended = false;
-    const bAppend = sink
-      .append(b, { missionId, kind: 'heartbeat', payload: heartbeat })
-      .then((id) => {
-        bAppended = true;
-        return id;
+    const finished = new Set<pg.PoolClient>();
+    const finish = async (client: pg.PoolClient) => {
+      finished.add(client);
+      await client.query('COMMIT');
+      client.release();
+    };
+    let bAppend: Promise<number> = Promise.resolve(0);
+    try {
+      const idA = await sink.append(a, {
+        missionId,
+        kind: 'heartbeat',
+        payload: heartbeat,
       });
-    await sleep(300);
-    // B is parked on the events advisory lock: it holds no id yet, so it cannot
-    // commit a higher id before A's lower one.
-    expect(bAppended).toBe(false);
+      let bAppended = false;
+      bAppend = sink
+        .append(b, { missionId, kind: 'heartbeat', payload: heartbeat })
+        .then((id) => {
+          bAppended = true;
+          return id;
+        });
+      // Barrier: B's backend is waiting on an ungranted advisory lock in this
+      // database. Only then is "B holds no id yet" a statement about the lock
+      // and not about how long we happened to wait.
+      await until(async () => {
+        const { rows } = await h.admin.query(
+          `SELECT 1 FROM pg_locks
+            WHERE locktype = 'advisory' AND NOT granted
+              AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`,
+        );
+        return rows.length > 0;
+      }, 'B parked on the events advisory lock');
+      // B is parked on the events advisory lock: it holds no id yet, so it
+      // cannot commit a higher id before A's lower one.
+      expect(bAppended).toBe(false);
 
-    // A reader that polls now sees nothing past the baseline.
-    expect(
-      (await replayEvents(h.pool, missionId, baseline)).map((e) => e.id),
-    ).toEqual([]);
+      // A reader that polls now sees nothing past the baseline.
+      expect(
+        (await replayEvents(h.pool, missionId, baseline)).map((e) => e.id),
+      ).toEqual([]);
 
-    await a.query('COMMIT');
-    a.release();
-    const idB = await withTimeout(bAppend, 5_000, 'B append after A commits');
-    expect(idB).toBeGreaterThan(idA);
-    // After A's commit the reader sees exactly A ...
-    expect(
-      (await replayEvents(h.pool, missionId, baseline)).map((e) => e.id),
-    ).toEqual([idA]);
-    await b.query('COMMIT');
-    b.release();
-    // ... and then exactly the gap [B] when resuming from A.
-    expect(
-      (await replayEvents(h.pool, missionId, idA)).map((e) => e.id),
-    ).toEqual([idB]);
-    expect(
-      (await replayEvents(h.pool, missionId, baseline)).map((e) => e.id),
-    ).toEqual([idA, idB]);
+      await finish(a);
+      const idB = await withTimeout(bAppend, 5_000, 'B append after A commits');
+      expect(idB).toBeGreaterThan(idA);
+      // After A's commit the reader sees exactly A ...
+      expect(
+        (await replayEvents(h.pool, missionId, baseline)).map((e) => e.id),
+      ).toEqual([idA]);
+      await finish(b);
+      // ... and then exactly the gap [B] when resuming from A.
+      expect(
+        (await replayEvents(h.pool, missionId, idA)).map((e) => e.id),
+      ).toEqual([idB]);
+      expect(
+        (await replayEvents(h.pool, missionId, baseline)).map((e) => e.id),
+      ).toEqual([idA, idB]);
+    } finally {
+      // A failed assertion must not leave a transaction open: the harness
+      // cannot close its pool while a client is checked out.
+      if (!finished.has(a)) {
+        await a.query('ROLLBACK').catch(() => undefined);
+        a.release();
+      }
+      await bAppend.catch(() => undefined);
+      if (!finished.has(b)) {
+        await b.query('ROLLBACK').catch(() => undefined);
+        b.release();
+      }
+    }
   });
 });
 
@@ -109,50 +138,76 @@ it('control: without the advisory lock the higher id commits first and a tailing
   });
 });
 
-it('many concurrent writers: ids are strictly commit-ordered with no skipped row visible to a polling tailer', async () => {
+it('many concurrent writers: no instant of the stream shows a skipped row, and a cursor tailer receives every id once, in order', async () => {
   await withHarness(async (h) => {
     const mission = await createRunningMission(h);
     const missionId = mission.id as MissionId;
     const sink = createEventSink();
     const baseline = (await replayEvents(h.pool, missionId, 0)).at(-1)!.id;
-    const commitOrder: number[] = [];
-    let writing = true;
-    const seen: number[] = [];
+    const ascending = (x: number, y: number) => x - y;
+    // C6 is about what a reader can SEE: the order in which commits become
+    // visible must equal id order. The order in which the writers' COMMIT
+    // acknowledgements reach this process is not that order: a backend that
+    // commits first can be descheduled between releasing the lock and replying,
+    // so the next writer's whole round trip can finish before the earlier
+    // writer's reply is read. Visibility is therefore observed from the reader
+    // side only.
+    const polls: number[][] = []; // every id visible at a poll, ascending
+    const seen: number[] = []; // what a cursor tailer ("id > last") receives
     let last = baseline;
+    let writing = true;
+    const poll = async () => {
+      polls.push(
+        (await replayEvents(h.pool, missionId, baseline)).map((e) => e.id),
+      );
+      for (const event of await replayEvents(h.pool, missionId, last)) {
+        seen.push(event.id);
+        last = event.id;
+      }
+    };
     const tailer = (async () => {
       while (writing) {
-        for (const event of await replayEvents(h.pool, missionId, last)) {
-          seen.push(event.id);
-          last = event.id;
-        }
+        await poll();
         await sleep(2);
       }
     })();
-    await Promise.all(
+    const handed = await Promise.all(
       Array.from({ length: 6 }, () =>
         (async () => {
+          const own: number[] = [];
           for (let i = 0; i < 12; i += 1) {
             const client = await begin(h.pool);
-            const id = await sink.append(client, {
-              missionId,
-              kind: 'heartbeat',
-              payload: heartbeat,
-            });
+            own.push(
+              await sink.append(client, {
+                missionId,
+                kind: 'heartbeat',
+                payload: heartbeat,
+              }),
+            );
             await client.query('COMMIT');
-            commitOrder.push(id);
             client.release();
           }
+          return own;
         })(),
       ),
     );
     writing = false;
     await tailer;
-    for (const event of await replayEvents(h.pool, missionId, last))
-      seen.push(event.id);
-    expect(commitOrder).toEqual([...commitOrder].sort((x, y) => x - y));
-    expect(seen).toHaveLength(72);
-    expect(seen).toEqual([...seen].sort((x, y) => x - y));
-    expect(new Set(seen).size).toBe(72);
+    await poll();
+    const final = (await replayEvents(h.pool, missionId, baseline)).map(
+      (event) => event.id,
+    );
+    expect(final).toHaveLength(72);
+    expect(final).toEqual([...final].sort(ascending));
+    // Every id a writer was handed is in the table, once.
+    expect(handed.flat().sort(ascending)).toEqual(final);
+    // A writer's successive transactions get strictly increasing ids.
+    for (const own of handed) expect(own).toEqual([...own].sort(ascending));
+    // At no poll was an id visible while a lower one was not.
+    for (const visible of polls)
+      expect(visible).toEqual(final.slice(0, visible.length));
+    // The cursor tailer received exactly the stream, in order, nothing skipped.
+    expect(seen).toEqual(final);
   });
 });
 
@@ -162,9 +217,12 @@ it('pg_notify nemodots_events is delivered on commit, carrying mission id and ev
     const missionId = mission.id as MissionId;
     const listener = new pg.Client({ connectionString: h.db.urls.app });
     await listener.connect();
-    const notified = latch<{ missionId: string; id: number }>();
+    const delivered = latch<{ missionId: string; id: number }>();
+    const sentinel = latch();
     listener.on('notification', (message) => {
-      notified.open(JSON.parse(message.payload ?? '{}'));
+      const payload = JSON.parse(message.payload ?? '{}');
+      if (payload.sentinel) sentinel.open();
+      else delivered.open(payload);
     });
     await listener.query('LISTEN nemodots_events');
     try {
@@ -174,12 +232,19 @@ it('pg_notify nemodots_events is delivered on commit, carrying mission id and ev
         kind: 'heartbeat',
         payload: heartbeat,
       });
-      await sleep(150);
-      expect(notified.isOpen).toBe(false); // not before commit
+      // Barrier: a sentinel committed AFTER the append's pg_notify call. The
+      // listener receives notifications in queue order, so once the sentinel has
+      // arrived, an event notification delivered at append time (before commit)
+      // would already have arrived too.
+      await h.pool.query(`SELECT pg_notify('nemodots_events', $1)`, [
+        JSON.stringify({ sentinel: true }),
+      ]);
+      await withTimeout(sentinel.promise, 5_000, 'sentinel notification');
+      expect(delivered.isOpen).toBe(false); // not before commit
       await client.query('COMMIT');
       client.release();
       expect(
-        await withTimeout(notified.promise, 5_000, 'notification'),
+        await withTimeout(delivered.promise, 5_000, 'notification'),
       ).toEqual({ missionId, id });
     } finally {
       await listener.end();

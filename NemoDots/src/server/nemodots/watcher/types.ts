@@ -12,7 +12,10 @@ import type {
   SourceKey,
   SourceReaderPort,
 } from '../contracts/index.js';
-import type { ClosureLimits, LedgerOptions } from '../ledger/index.js';
+import type {
+  ClosureLimits,
+  RegistrationLedgerOptions,
+} from '../ledger/index.js';
 
 /** The slice of an action intent the history walk needs (written by the actions package). */
 export interface SelfWriteIntent {
@@ -81,7 +84,8 @@ export interface WatcherDeps {
   missions?: MissionPauser;
   /** NEMODOTS_WATCH_INTERVAL_MS. */
   intervalMs: number;
-  ledger?: LedgerOptions;
+  /** Required: `events` is the sink for the per-mission invalidation events. */
+  ledger: RegistrationLedgerOptions;
   /** Closure caps (production default 64 / 10 000). */
   limits?: ClosureLimits;
   log?: (entry: WatcherLogEntry) => void;

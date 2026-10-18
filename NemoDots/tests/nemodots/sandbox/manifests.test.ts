@@ -88,6 +88,76 @@ describe('scenario manifests', () => {
     expect(Object.keys(steps[1].values!)).toEqual(['cache.schema_version']);
   });
 
+  it('the dependent step has no wall-clock limit of its own', () => {
+    const m = loadScenario('dependent_change_after_proposal');
+    expect(JSON.stringify(m.steps)).not.toContain('timeoutMs');
+    expect(resolveScenario(m, 1)[1].timeoutMs).toBeNull();
+    // an explicit bound is still expressible, and is the only way to get one
+    const bounded = ScenarioManifestSchema.parse({
+      ...m,
+      steps: [m.steps[0], { ...m.steps[1], timeoutMs: 1_000 }],
+    });
+    expect(resolveScenario(bounded, 1)[1].timeoutMs).toBe(1_000);
+  });
+
+  it('marks the initial steps (no prerequisites, not proposal-triggered)', () => {
+    const steps = resolveScenario(loadScenario('diverging_edges'), 1);
+    expect(steps.map((st) => st.initial)).toEqual([true, true, false]);
+    const dependent = resolveScenario(
+      loadScenario('dependent_change_after_proposal'),
+      1,
+    );
+    expect(dependent.map((st) => st.initial)).toEqual([true, false]);
+  });
+
+  it('every scenario declares what must be visible before a mission starts', () => {
+    const faults: Record<string, string[]> = {
+      healthy: ['healthy'],
+      benign_change: ['healthy'],
+      cache_schema_mismatch: ['cache_decode_error'],
+      dependent_change_after_proposal: ['cache_decode_error'],
+      second_change_during_repair: ['cache_decode_error'],
+      pool_starvation: ['pool_exhausted'],
+      stale_replica: ['inventory_inconsistent'],
+      writes_disabled: ['writes_disabled'],
+      conflicting_observations: ['healthy', 'inventory_inconsistent'],
+      diverging_edges: ['cache_decode_error', 'inventory_inconsistent'],
+    };
+    for (const id of REQUIRED) {
+      const declared = loadScenario(id).preconditions;
+      expect(declared, id).toBeDefined();
+      expect([...declared!.visible].sort(), id).toEqual([...faults[id]].sort());
+    }
+  });
+
+  it('every scenario that bumps the cache schema warms the cache first', () => {
+    for (const id of REQUIRED) {
+      const m = loadScenario(id);
+      const bumpsSchema = JSON.stringify(m.steps).includes(
+        'cache.schema_version',
+      );
+      const warms = (m.preconditions?.setup ?? []).some(
+        (a) => a.kind === 'warm_cache',
+      );
+      expect(warms, id).toBe(bumpsSchema);
+    }
+  });
+
+  it('rejects unknown precondition kinds and symptoms', () => {
+    const base = loadScenario('writes_disabled');
+    for (const bad of [
+      { visible: ['no_such_symptom'] },
+      { visible: [] },
+      { visible: ['healthy'], setup: [{ kind: 'drop_database' }] },
+      { visible: ['healthy'], withinMs: 5 },
+      { visible: ['healthy'], extra: true },
+    ])
+      expect(
+        ScenarioManifestSchema.safeParse({ ...base, preconditions: bad })
+          .success,
+      ).toBe(false);
+  });
+
   it('diverging_edges documents the independent reads of its two branches', () => {
     const { oracle, steps } = loadScenario('diverging_edges');
     expect(Object.keys(oracle.independentReads ?? {}).sort()).toEqual([

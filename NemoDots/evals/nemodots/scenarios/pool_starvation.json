@@ -3,6 +3,9 @@
   "version": 1,
   "class": "repairable_checkout_fault",
   "description": "The business connection pool is shrunk to a size that cannot serve ordinary concurrency (F3).",
+  "preconditions": {
+    "visible": ["pool_exhausted"]
+  },
   "steps": [
     {
       "kind": "set_config",

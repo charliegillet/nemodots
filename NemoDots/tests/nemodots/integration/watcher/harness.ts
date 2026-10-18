@@ -214,6 +214,7 @@ export async function withWatcherEnv<T>(
         } as never,
         key,
       );
+    const ledgerOptions = { ledger: { events: h.coordinator.events.sink } };
     const inTx = async <R>(work: (client: pg.PoolClient) => Promise<R>) => {
       const client = await h.pool.connect();
       try {
@@ -245,6 +246,7 @@ export async function withWatcherEnv<T>(
           intents,
           missions: h.coordinator.control,
           intervalMs: 60_000,
+          ledger: { events: h.coordinator.events.sink },
           log: (entry) => logs.push(entry),
           ...overrides,
         });
@@ -260,15 +262,19 @@ export async function withWatcherEnv<T>(
             'SELECT value, version FROM checkout.config_entries WHERE key = $1',
             [key],
           );
-          return registerObservation(client, {
-            source: refFor(missionId, `checkout.config/${key}`),
-            normalizedValue: {
-              key,
-              value: rows[0].value,
-              version: Number(rows[0].version),
+          return registerObservation(
+            client,
+            {
+              source: refFor(missionId, `checkout.config/${key}`),
+              normalizedValue: {
+                key,
+                value: rows[0].value,
+                version: Number(rows[0].version),
+              },
+              provenance: { kind: 'tool_call' },
             },
-            provenance: { kind: 'tool_call' },
-          });
+            ledgerOptions,
+          );
         });
       },
       async observeCollection(missionId) {
@@ -279,24 +285,32 @@ export async function withWatcherEnv<T>(
           const version = await client.query<{ version: string }>(
             'SELECT version FROM checkout.config_collection',
           );
-          return registerObservation(client, {
-            source: refFor(missionId, 'checkout.config'),
-            normalizedValue: {
-              keys: keys.rows.map((row) => row.key).sort(),
-              collectionVersion: Number(version.rows[0].version),
+          return registerObservation(
+            client,
+            {
+              source: refFor(missionId, 'checkout.config'),
+              normalizedValue: {
+                keys: keys.rows.map((row) => row.key).sort(),
+                collectionVersion: Number(version.rows[0].version),
+              },
+              provenance: { kind: 'tool_call' },
             },
-            provenance: { kind: 'tool_call' },
-          });
+            ledgerOptions,
+          );
         });
       },
       async observeEndpoint(missionId, key, value) {
         reader.values.set(key, value);
         return inTx((client) =>
-          registerObservation(client, {
-            source: refFor(missionId, key),
-            normalizedValue: value,
-            provenance: { kind: 'tool_call' },
-          }),
+          registerObservation(
+            client,
+            {
+              source: refFor(missionId, key),
+              normalizedValue: value,
+              provenance: { kind: 'tool_call' },
+            },
+            ledgerOptions,
+          ),
         );
       },
       async link(receiptId, attempt) {

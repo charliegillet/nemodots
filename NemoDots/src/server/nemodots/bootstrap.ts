@@ -24,6 +24,7 @@ import type pg from 'pg';
 import { createClient } from 'redis';
 import {
   createActions,
+  findDispatchable,
   listAuthorizations,
   listIntents,
   listResultReceipts,
@@ -39,7 +40,9 @@ import {
   type MissionId,
   type ObservationReceipt,
   type PgClient,
+  type ContextLayout,
   type ProviderMode,
+  type RecoveryScopeRule,
   type Scope,
   type SourceKey,
   type SourceRef,
@@ -78,6 +81,7 @@ import {
   setActivePolicy,
   setInterceptionHooks,
   resetInterception,
+  currentProvenanceScope,
   type PageRevisionEvent,
   type ProvenanceSink,
 } from './interception/index.js';
@@ -114,6 +118,7 @@ import { createSourceReaders } from './sandbox/readers.js';
 import {
   createRunbookStore,
   createTeamHandler,
+  incidentTeamConfig,
   type ChildOutput,
   type MissionTaskView,
   type SourceObserver,
@@ -149,10 +154,24 @@ export interface NemoDotsOptions {
   handler?: AttemptHandler;
   /** Place the router under test without starting any background loop. */
   autoWorkers?: boolean;
+  /**
+   * Extra recovery scope rules by name (evaluation arms), passed to the
+   * coordinator. `selective` is built in and cannot be replaced. Not
+   * reachable over HTTP or by the model; production passes nothing.
+   */
+  recoveryScopeRules?: Record<string, RecoveryScopeRule>;
+  /**
+   * Context layout for the team (evaluation 2x2), set as TeamConfig.layout.
+   * Not reachable over HTTP or by the model; production passes nothing and
+   * the team default (`cache_aware`) applies.
+   */
+  teamLayout?: () => ContextLayout;
 }
 
 export interface NemoDots {
   router: Hono;
+  /** The coordinator, for composition and tests; null when unconfigured. */
+  coordinator: Coordinator | null;
   state(): NemoDotsState;
   start(): Promise<void>;
   stop(): Promise<void>;
@@ -183,10 +202,12 @@ export function resolveNemoDotsEnv(
   appRoot = APP_ROOT,
 ): Record<string, string | undefined> {
   const merged = { ...env };
-  const needsFile =
-    PG_ROLES.some((role) => !merged[pgUrlEnvName(role)]?.trim()) ||
-    !merged.NEMODOTS_PROBE_SECRET?.trim();
-  if (!needsFile) return merged;
+  // The file is one consistent set from one stack instance. If the process
+  // environment supplies any role URL it is authoritative as a whole: mixing
+  // its URLs with another instance's (for example an admin URL of `dev`) would
+  // point part of the system at the wrong database.
+  if (PG_ROLES.some((role) => merged[pgUrlEnvName(role)]?.trim()))
+    return merged;
   const instance = merged.NEMODOTS_INSTANCE?.trim() || 'dev';
   let file: Record<string, string>;
   try {
@@ -207,6 +228,10 @@ export function resolveNemoDotsEnv(
 // ------------------------------------------------------------------- runtime
 
 export interface Runtime {
+  /** NEMODOTS_PROJECTION_SPACE_ID: the Space of incident missions, or null. */
+  projectionSpaceId: string | null;
+  /** The team configuration in force (incidentTeamConfig). */
+  teamConfig: ReturnType<typeof incidentTeamConfig>;
   config: NemoDotsConfig;
   env: Record<string, string | undefined>;
   mode: ModeResolution;
@@ -299,6 +324,25 @@ const EMPTY_TELEMETRY = {
   prefixGroups: [],
 };
 
+/**
+ * Per-task token cap, counting input + output tokens of every call of the
+ * attempt (W4.1 ruling; cached tokens are reported separately). A live run
+ * measured up to 94,964 per attempt, so the default is 200,000.
+ */
+export const DEFAULT_TASK_MAX_TOKENS = 200_000;
+
+export function taskMaxTokens(env: Record<string, string | undefined>): number {
+  const raw = env.NEMODOTS_TASK_MAX_TOKENS?.trim();
+  if (!raw) return DEFAULT_TASK_MAX_TOKENS;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 5_000 || value > 1_000_000)
+    throw new NemoDotsEnvError(
+      ['NEMODOTS_TASK_MAX_TOKENS'],
+      'NEMODOTS_TASK_MAX_TOKENS must be an integer between 5000 and 1000000.',
+    );
+  return value;
+}
+
 export function buildRuntime(
   rawEnv: Record<string, string | undefined>,
   options: NemoDotsOptions,
@@ -368,10 +412,15 @@ export function buildRuntime(
     dispatchLeaseMs: config.dispatchLeaseMs,
   });
 
+  // The Space the incident missions run in, which is also the only Space an
+  // incident Dot may create pages in (TP-02). Unset: missions are Space-less,
+  // no OpenDots page can match their scope, and no page receipt is ever
+  // registered (fail closed, F4b).
+  const projectionSpaceId = env.NEMODOTS_PROJECTION_SPACE_ID?.trim() || null;
   const scopeOf = (missionId: string): Scope => ({
     ownerId: options.workspace.ownerId,
     missionId: missionId as MissionId,
-    spaceId: null,
+    spaceId: projectionSpaceId,
     environment: 'dev',
     resource: 'checkout',
   });
@@ -379,7 +428,7 @@ export function buildRuntime(
   // ---- coordinator
   const coordinatorConfig: CoordinatorConfig = {
     ownerId: options.workspace.ownerId,
-    spaceId: null,
+    spaceId: projectionSpaceId,
     environment: 'dev',
     resource: 'checkout',
     mode: providerMode,
@@ -397,7 +446,11 @@ export function buildRuntime(
       maxWallClockMs: 600_000,
     },
     leaseMs: config.leaseMs,
-    taskDefaults: { maxAttempts: 3, maxIterations: 12, maxTokens: 20_000 },
+    taskDefaults: {
+      maxAttempts: 3,
+      maxIterations: 12,
+      maxTokens: taskMaxTokens(env),
+    },
     replanCap: 3,
   };
 
@@ -532,6 +585,9 @@ export function buildRuntime(
     probe,
     providerHealthy,
     events,
+    ...(options.recoveryScopeRules
+      ? { recoveryScopeRules: options.recoveryScopeRules }
+      : {}),
   });
 
   // ---- outbox: the coordinator's handlers plus the action boundary's
@@ -553,12 +609,32 @@ export function buildRuntime(
     );
     return rows[0] ?? null;
   };
+  // One in-process dispatcher per intent: the outbox message and the sweep can
+  // both see the same committed flush. Across processes the dispatch lease and
+  // the Redis effect marker keep the effect single.
+  const dispatching = new Set<string>();
+  const dispatchOnce = async (actionId: string, fence: number) => {
+    if (dispatching.has(actionId)) return;
+    dispatching.add(actionId);
+    try {
+      await actions.dispatch(actionId, fence, dispatcher);
+    } finally {
+      dispatching.delete(actionId);
+    }
+  };
   const outbox = createOutbox(coordinator.deps, {
     workerId: dispatcher,
     pollMs: 500,
     maintenance: async () => {
       await coordinator.runMaintenance();
       await actions.reclaimExpired(dispatcher);
+      // A paused mission's committed flush is deferred, not failed. Whatever
+      // resumes it leaves it committed and undispatched; this sweep (and so
+      // every resume) picks it up. findDispatchable lists only flushes of
+      // running missions, so a paused or cancelled mission is never dispatched.
+      for (const pending of await findDispatchable(pools.app))
+        if (pending.fence !== null)
+          await dispatchOnce(pending.id, Number(pending.fence));
       const stuck = await pools.app.query<{ id: string }>(
         `SELECT id FROM coordinator.action_intents
           WHERE status = 'outcome_unknown' ORDER BY proposed_at LIMIT 20`,
@@ -586,11 +662,7 @@ export function buildRuntime(
         const { actionId } = message.payload as { actionId: string };
         const row = await intentRow(actionId);
         if (row?.status === 'committed' && row.dispatch_fence !== null)
-          await actions.dispatch(
-            actionId,
-            Number(row.dispatch_fence),
-            dispatcher,
-          );
+          await dispatchOnce(actionId, Number(row.dispatch_fence));
       },
     },
   });
@@ -703,6 +775,15 @@ export function buildRuntime(
     },
   };
 
+  // Every mission here is an incident mission: the team runs the pre-change
+  // verification policy through the one function that sets it. No literal.
+  const teamConfig: ReturnType<typeof incidentTeamConfig> = {
+    ...incidentTeamConfig({
+      model,
+      provider: { host: providerHost, mode: providerMode },
+    }),
+    ...(options.teamLayout ? { layout: options.teamLayout() } : {}),
+  };
   const handler: AttemptHandler | null =
     options.handler ??
     (inference
@@ -713,10 +794,7 @@ export function buildRuntime(
           actions,
           reads,
           runbooks: createRunbookStore(),
-          config: {
-            model,
-            provider: { host: providerHost, mode: providerMode },
-          },
+          config: teamConfig,
           onEvent: (event) => {
             if (event.kind === 'tool')
               log('tool', { name: event.name, ok: event.ok });
@@ -741,6 +819,8 @@ export function buildRuntime(
   });
 
   return {
+    projectionSpaceId,
+    teamConfig,
     config,
     env,
     mode,
@@ -757,7 +837,15 @@ export function buildRuntime(
     probes,
     async close() {
       await Promise.allSettled([
-        redis?.isOpen ? redis.quit() : Promise.resolve(),
+        (async () => {
+          if (!redis?.isOpen) return;
+          if (redis.isReady)
+            await Promise.race([
+              redis.quit(),
+              new Promise<void>((resolve) => setTimeout(resolve, 1_500)),
+            ]);
+          redis.destroy(); // a client still reconnecting would never quit
+        })(),
         pools.app.end(),
         pools.verifier.end(),
         pools.injector.end(),
@@ -860,6 +948,7 @@ export function createNemoDots(
     log('unconfigured', { missing });
     return {
       router: unconfiguredRouter(missing),
+      coordinator: null,
       state: () => 'unconfigured',
       start: async () => undefined,
       stop: async () => undefined,
@@ -883,24 +972,34 @@ export function createNemoDots(
   const ownerId = options.workspace.ownerId;
 
   // ---- interception: ledger-backed revalidation and the page-revision feed
-  const latestMission = async (client: PgClient) => {
+  // The mission an incident page belongs to is the one whose scope is the
+  // page's Space (F4b): exactly one active mission in that Space. Zero or
+  // several means the page cannot be attributed, and nothing is registered.
+  const missionInSpace = async (client: PgClient, spaceId: string) => {
     const { rows } = await client.query<{ id: string }>(
-      `SELECT id FROM coordinator.missions WHERE owner_id = $1
-        ORDER BY created_at DESC LIMIT 1`,
-      [ownerId],
+      `SELECT id FROM coordinator.missions
+        WHERE owner_id = $1 AND space_id = $2
+          AND status IN ('created', 'running', 'paused', 'awaiting_acceptance')
+        LIMIT 2`,
+      [ownerId, spaceId],
     );
-    return rows[0]?.id ?? null;
+    return rows.length === 1 ? rows[0].id : null;
   };
+  // Page receipts carry trust `page_snapshot`: evidence that a page had this
+  // revision when an incident Dot wrote or read it, WITHOUT authority (they
+  // cannot support a controlled commit).
   const registerPage = async (
     pageId: string,
+    spaceId: string,
     value: Record<string, unknown>,
     provenanceKind: 'watcher' | 'tool_call',
   ): Promise<DependencyEntry | null> => {
     try {
       return await inTx(rt.pools.app, async (client) => {
-        const missionId = await latestMission(client);
+        const missionId = await missionInSpace(client, spaceId);
         if (!missionId) return null;
         const scope = await resolveMissionScope(client, missionId);
+        if (scope.spaceId !== spaceId) return null;
         const key = `opendots.page/${pageId}` as SourceKey;
         if (!sourceKeyFamily(key)) return null;
         const registered = await registerObservation(
@@ -929,6 +1028,9 @@ export function createNemoDots(
     setActivePolicy(
       createIncidentPolicy({
         env: rt.env,
+        ...(rt.projectionSpaceId
+          ? { projectionSpaceId: rt.projectionSpaceId }
+          : {}),
         vectors: {
           async isCurrent(vector) {
             if (vector.length === 0) return true;
@@ -957,21 +1059,33 @@ export function createNemoDots(
         },
       }),
     );
+    // OpenDots Dot chat turns are OUTSIDE the controlled incident scope
+    // (TOOL_COVERAGE section 2): they have no mission, task or attempt, so no
+    // ModelCallRecord can be written for them (the ledger fails closed on a
+    // call without a real attempt) and nothing is recorded as mission
+    // evidence. The sink keeps the provider-host and timing instrumentation,
+    // and registers page receipts (without authority) for INCIDENT Dot turns.
     const sink: ProvenanceSink = {
-      // Dot turns belong to no mission: their snapshots and calls are not
-      // recorded as ModelCallRecords (they have no mission/task/attempt).
       identify: () => null,
       async registerToolResult(info) {
+        // I4: with no incident Dot in this turn nothing is registered.
+        if (!currentProvenanceScope()?.incident) return [];
         if (info.toolName !== 'read_space_page') return [];
-        const page = info.result as { id?: unknown; revision?: unknown } | null;
+        const page = info.result as {
+          id?: unknown;
+          spaceId?: unknown;
+          revision?: unknown;
+        } | null;
         if (
           !page ||
           typeof page.id !== 'string' ||
+          typeof page.spaceId !== 'string' ||
           typeof page.revision !== 'number'
         )
           return [];
         const entry = await registerPage(
           page.id,
+          page.spaceId,
           { pageId: page.id, revision: page.revision },
           'tool_call',
         );
@@ -982,10 +1096,14 @@ export function createNemoDots(
       providerMode: rt.providerMode,
       sink,
       pageRevision: (event: PageRevisionEvent) => {
-        // Eventual by design: the page store is SQLite, the ledger PostgreSQL.
-        // The page revision CAS stays the authority for page content.
+        // Only pages written by an incident Dot's turn, in a mission's Space
+        // (I4, F4b). Owner edits and ordinary Dots leave the ledger alone.
+        // Eventual by design: the page store is SQLite, the ledger
+        // PostgreSQL; the page revision CAS stays the authority.
+        if (!currentProvenanceScope()?.incident) return;
         void registerPage(
           event.pageId,
+          event.spaceId,
           {
             pageId: event.pageId,
             revision: event.revision,
@@ -1108,6 +1226,7 @@ export function createNemoDots(
 
   return {
     router,
+    coordinator: rt.coordinator,
     state: () => state,
     health,
     async start() {
@@ -1115,8 +1234,13 @@ export function createNemoDots(
       state = 'starting';
       try {
         await checkMigrations();
+        // Redis may be down at boot. The client keeps reconnecting in the
+        // background (health reports it); boot must not wait for it.
         if (rt.redis && !rt.redis.isOpen)
-          await rt.redis.connect().catch(() => undefined);
+          await Promise.race([
+            rt.redis.connect().catch(() => undefined),
+            new Promise<void>((resolve) => setTimeout(resolve, 1_500)),
+          ]);
         installInterception();
         watcher = createWatcher({
           pool: rt.pools.app,

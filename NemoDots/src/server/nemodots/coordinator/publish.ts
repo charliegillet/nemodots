@@ -101,6 +101,8 @@ export type PublishDeps = Pick<
   | 'recordOrphanedAttempt'
   | 'intents'
   | 'clock'
+  | 'recoveryOptions'
+  | 'recoveryScopeRules'
 >;
 
 interface PublicationSpec<T> {
@@ -112,6 +114,8 @@ interface PublicationSpec<T> {
 }
 
 const RECOVERY_OPTIONS: RecoveryOptions = {};
+const recoveryOptionsOf = (deps: { recoveryOptions?: RecoveryOptions }) =>
+  deps.recoveryOptions ?? RECOVERY_OPTIONS;
 
 export async function runPublication<T>(
   deps: PublishDeps,
@@ -173,7 +177,7 @@ async function rejectAfterSupportError(
     await recordPublicationRejection(
       tx,
       deps,
-      RECOVERY_OPTIONS,
+      recoveryOptionsOf(deps),
       fenced,
       vector,
       error,
@@ -371,6 +375,9 @@ export async function publishPlan(
           await transitionTask(tx, row, 'cancelled', {
             reason: 'superseded_by_replan',
           });
+          // A cancelled gate must release what it holds (never wedge).
+          if (row.role === 'postcondition')
+            await releaseGate(tx, fenced.mission.id, row.id);
         }
       }
       const outputId = randomUUID();
@@ -431,22 +438,38 @@ export async function delegate(
   return runPublication(deps, {
     context,
     fence: { missionLock: 'update' },
-    vector: (fenced) =>
-      union(requested, fenced.attempt.inherited_dependency_vector),
+    vector: (fenced) => outputVector(requested, fenced),
     async write(fenced, tx) {
       const parent = fenced.task;
       if (!parent.capabilities.includes('delegate'))
         throw new CapabilityDeniedError('delegate', parent.role);
+      // A tool call id comes from the provider response, so it is only unique
+      // within the attempt that received it. The dedupe key is scoped to the
+      // delegating ATTEMPT (TP-67): another task's or attempt's identical id
+      // can never be handed this attempt's child, or the other way round.
       const dedupeKey = input.toolCallId
-        ? `delegate:${input.toolCallId}`
+        ? `delegate:${fenced.attempt.id}:${input.toolCallId}`
         : null;
       if (dedupeKey) {
         const repeat = await tx.client.query<TaskRow>(
           `SELECT * FROM coordinator.tasks WHERE mission_id = $1 AND dedupe_key = $2`,
           [parent.mission_id, dedupeKey],
         );
-        if (repeat.rows[0])
-          return { taskId: repeat.rows[0].id as TaskId, created: false };
+        const found = repeat.rows[0];
+        if (found) {
+          // A redelivery of the SAME delegation returns the child. The same
+          // id with another delegation is an explicit refusal.
+          if (
+            found.parent_id !== parent.id ||
+            found.role !== input.role ||
+            found.title !== input.title ||
+            found.question !== input.question
+          )
+            throw new DelegationRejectedError([
+              `tool call ${input.toolCallId} was already used for a different delegation by this attempt`,
+            ]);
+          return { taskId: found.id as TaskId, created: false };
+        }
       }
       const graph = (
         await tx.client.query<
@@ -496,10 +519,7 @@ export async function delegate(
         parent.capabilities as never,
       );
       const defaults = deps.config.taskDefaults;
-      const vector = union(
-        requested,
-        fenced.attempt.inherited_dependency_vector,
-      );
+      const vector = outputVector(requested, fenced);
       const child = await insertTask(tx, {
         id: candidateId,
         missionId: parent.mission_id as MissionId,

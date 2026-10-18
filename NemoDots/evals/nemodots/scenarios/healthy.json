@@ -3,6 +3,9 @@
   "version": 1,
   "class": "healthy_control",
   "description": "Healthy control: no fault is injected. A correct team proposes no action and the acceptance probe passes.",
+  "preconditions": {
+    "visible": ["healthy"]
+  },
   "steps": [],
   "oracle": {
     "faultClass": "none",

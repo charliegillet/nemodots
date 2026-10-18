@@ -11,6 +11,7 @@ import {
   cancelMission,
   completeAcceptance,
   createMission,
+  type CreateMissionServerOptions,
   evaluateMission,
   failMission,
   getMission,
@@ -37,9 +38,18 @@ export type ControlDeps = Pick<
   | 'providerHealthy'
   | 'probe'
   | 'snapshotReader'
+  | 'recoveryScopeRules'
 >;
 
 export interface MissionControl extends MissionControlPort {
+  /**
+   * `serverOptions` is server-side only (the evaluation harness, the composition
+   * root): it is never parsed from an HTTP body or a tool input.
+   */
+  create(
+    request: CreateMissionRequest,
+    serverOptions?: CreateMissionServerOptions,
+  ): Promise<Mission>;
   get(missionId: MissionId): Promise<Mission>;
   /** Drive completion/failure after a task settles (also an outbox handler). */
   evaluate(missionId: MissionId): Promise<EvaluationOutcome>;
@@ -55,7 +65,10 @@ export interface MissionControl extends MissionControlPort {
 
 export function createMissionControl(deps: ControlDeps): MissionControl {
   return {
-    create: (request: CreateMissionRequest) => createMission(deps, request),
+    create: (
+      request: CreateMissionRequest,
+      serverOptions?: CreateMissionServerOptions,
+    ) => createMission(deps, request, serverOptions),
     start: (missionId) => startMission(deps, missionId),
     pause: (missionId) => pauseMission(deps, missionId),
     resume: (missionId) => resumeMission(deps, missionId),

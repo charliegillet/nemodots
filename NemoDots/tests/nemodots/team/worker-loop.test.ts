@@ -34,7 +34,7 @@ describe('worker loop', () => {
       observe(HEALTH),
       text('Health is degraded; see receipt.'),
     ]);
-    const outcome = await runHandler(r, claimed('investigator'));
+    const outcome = await runHandler(r, claimed('cache_specialist'));
     expect(outcome.type).toBe('output');
     if (outcome.type !== 'output') throw new Error('unreachable');
     expect(outcome.output.kind).toBe('handoff');
@@ -82,7 +82,7 @@ describe('worker loop', () => {
     // checkpoints: before call 1, after the tool, then before call 2 -> abort there
     h.abortAtCheckpoint = 3;
     await expect(
-      runHandler(r, claimed('investigator'), h),
+      runHandler(r, claimed('cache_specialist'), h),
     ).rejects.toBeInstanceOf(AttemptAbortedError);
     expect(r.inference.requests).toHaveLength(1);
     expect(r.coordinator.modelCalls).toHaveLength(1);
@@ -94,7 +94,7 @@ describe('worker loop', () => {
       calls({ id: 'c2', name: 'observe_source', args: '{"sourceKey":' }),
       text('unreachable'),
     ]);
-    expect(await runHandler(r, claimed('investigator'))).toEqual({
+    expect(await runHandler(r, claimed('cache_specialist'))).toEqual({
       type: 'failed',
       reason: 'invalid_output',
     });
@@ -111,12 +111,14 @@ describe('worker loop', () => {
       observe(HEALTH, 'c2'),
       text('done'),
     ]);
-    expect((await runHandler(r, claimed('investigator'))).type).toBe('output');
+    expect((await runHandler(r, claimed('cache_specialist'))).type).toBe(
+      'output',
+    );
   });
 
   it('an empty reply gets one correction and then fails', async () => {
     const r = withHealth([text(''), text('')]);
-    expect(await runHandler(r, claimed('investigator'))).toEqual({
+    expect(await runHandler(r, claimed('cache_specialist'))).toEqual({
       type: 'failed',
       reason: 'invalid_output',
     });
@@ -156,7 +158,9 @@ describe('worker loop', () => {
     '%s is an explicit outcome and is still recorded',
     async (_label, step, expected) => {
       const r = withHealth([step]);
-      expect(await runHandler(r, claimed('investigator'))).toEqual(expected);
+      expect(await runHandler(r, claimed('cache_specialist'))).toEqual(
+        expected,
+      );
       expect(r.coordinator.modelCalls).toHaveLength(1);
     },
   );
@@ -206,7 +210,7 @@ describe('worker loop', () => {
       }),
     ];
     expect(
-      await runHandler(r, claimed('investigator', { maxTokens: 4 })),
+      await runHandler(r, claimed('cache_specialist', { maxTokens: 4 })),
     ).toEqual({ type: 'abort', reason: 'budget_exhausted' });
     expect(r.inference.requests).toHaveLength(1);
   });
@@ -219,7 +223,7 @@ describe('worker loop', () => {
     ]);
     const outcome = await runHandler(
       r,
-      claimed('investigator', { maxIterations: 3 }),
+      claimed('cache_specialist', { maxIterations: 3 }),
     );
     expect(outcome.type).toBe('output');
     const last = r.inference.requests[2];
@@ -231,14 +235,14 @@ describe('worker loop', () => {
   it('a model that keeps calling tools on the last step fails with invalid_output', async () => {
     const r = withHealth([observe(HEALTH, 'a'), observe(HEALTH, 'b')]);
     expect(
-      await runHandler(r, claimed('investigator', { maxIterations: 2 })),
+      await runHandler(r, claimed('cache_specialist', { maxIterations: 2 })),
     ).toEqual({ type: 'failed', reason: 'invalid_output' });
   });
 
   it('instruction-like text in a tool result leaves the system prompt and prefix digest unchanged', async () => {
     const run = async (value: unknown) => {
       const r = withHealth([observe(HEALTH), text('ok')], value);
-      await runHandler(r, claimed('investigator'));
+      await runHandler(r, claimed('cache_specialist'));
       return r;
     };
     const benign = await run({ status: 'ok' });
@@ -267,7 +271,7 @@ describe('worker loop', () => {
     ];
     const outcome = await runHandler(
       r,
-      claimed('investigator', {
+      claimed('cache_specialist', {
         kind: 'repair',
         repairOf: { attemptId: uuid(), invalidationEventId: 'f'.repeat(64) },
       }),
@@ -330,7 +334,7 @@ describe('worker loop', () => {
       digest: digest('x'),
       dependencyVector: [entry],
     });
-    const outcome = await runHandler(r, claimed('investigator'));
+    const outcome = await runHandler(r, claimed('cache_specialist'));
     expect(r.coordinator.waiting).toBe(1);
     expect(toolResultsOf(r.inference.requests[1])[0].body).toMatchObject({
       allTerminal: true,
@@ -349,5 +353,125 @@ describe('worker loop', () => {
       type: 'output',
       output: { kind: 'verification' },
     });
+  });
+});
+
+describe('investigator closing check', () => {
+  const check = (defectFound: boolean, area = 'none') =>
+    text(JSON.stringify({ defectFound, area, reason: 'because of receipts' }));
+
+  it('no defect reported: the answer stands, after exactly one extra structured call', async () => {
+    const r = withHealth([
+      observe(HEALTH),
+      text('nothing wrong in my area'),
+      check(false),
+    ]);
+    const outcome = await runHandler(r, claimed('investigator'));
+    expect(outcome).toMatchObject({
+      type: 'output',
+      output: { content: { summary: 'nothing wrong in my area' } },
+    });
+    expect(r.inference.requests).toHaveLength(3);
+    expect(r.inference.requests[2].responseFormat).toMatchObject({
+      name: 'closing_check',
+    });
+    expect(r.inference.requests[2].tools).toEqual([]);
+    expect(r.coordinator.modelCalls).toHaveLength(3);
+  });
+
+  it('a defect in a specialist area sends the investigator back to delegate, then it finishes with the outcome', async () => {
+    const r = withHealth([
+      observe(HEALTH),
+      text('the cache schema does not match, a specialist must fix it'),
+      check(true, 'cache'),
+      calls({
+        id: 'd',
+        name: 'delegate_task',
+        args: {
+          title: 'Fix cache',
+          role: 'cache_specialist',
+          question: 'repair',
+          dependsOn: [],
+          justification: 'schema mismatch per receipts',
+        },
+      }),
+      text('delegated; the specialist is handling it'),
+    ]);
+    const outcome = await runHandler(r, claimed('investigator'));
+    expect(outcome.type).toBe('output');
+    expect(r.coordinator.delegations).toHaveLength(1);
+    const afterCheck = r.inference.requests[3].messages.at(-1)!;
+    expect(afterCheck.role).toBe('user');
+    expect(afterCheck.content).toContain('Delegate it now');
+    expect(afterCheck.content).toContain('cache specialist');
+    // the check runs once only: a second plain answer is final
+    expect(r.inference.requests).toHaveLength(5);
+  });
+
+  it('is skipped after a delegation and for roles that cannot delegate', async () => {
+    const delegated = withHealth([
+      calls({
+        id: 'd',
+        name: 'delegate_task',
+        args: {
+          title: 't',
+          role: 'verifier',
+          question: 'q',
+          dependsOn: [],
+          justification: 'j',
+        },
+      }),
+      text('done'),
+    ]);
+    await runHandler(delegated, claimed('investigator'));
+    expect(delegated.inference.requests).toHaveLength(2);
+    const specialist = withHealth([text('done')]);
+    await runHandler(specialist, claimed('cache_specialist'));
+    expect(specialist.inference.requests).toHaveLength(1);
+  });
+
+  it('an unusable check reply leaves the answer unchanged', async () => {
+    const r = withHealth([text('answer'), text('not json')]);
+    const outcome = await runHandler(r, claimed('investigator'));
+    expect(outcome).toMatchObject({
+      type: 'output',
+      output: { content: { summary: 'answer' } },
+    });
+  });
+
+  it('the check is compiled and recorded like any other call, with its own snapshot, and cannot choose a diagnosis', async () => {
+    const r = withHealth([
+      observe(HEALTH),
+      text('looks like a cache problem'),
+      check(true, 'cache'),
+      text('I could not delegate; reporting only'),
+    ]);
+    const outcome = await runHandler(r, claimed('investigator'));
+    // at most once: the second plain answer is final, nothing is delegated for it
+    expect(outcome).toMatchObject({
+      type: 'output',
+      output: { content: { summary: 'I could not delegate; reporting only' } },
+    });
+    expect(r.inference.requests).toHaveLength(4);
+    expect(r.coordinator.delegations).toHaveLength(0);
+    // recorded: 1 observe call, 1 answer, 1 check, 1 final = 4 records with snapshots
+    expect(r.coordinator.modelCalls).toHaveLength(4);
+    const recorded = r.coordinator.modelCalls[2];
+    expect(recorded.record.contextSnapshotId).toBe(recorded.snapshot.id);
+    expect(recorded.record.id).toBe(r.inference.contexts[2].modelCallId);
+    // the snapshot lists the closing prompt among the injected history items
+    expect(
+      recorded.snapshot.injected.historyItems.some((h) => h.role === 'user'),
+    ).toBe(true);
+    // the only text the loop adds after a reported defect names the area the
+    // model itself reported, and tells it to delegate
+    const notice = r.inference.requests[3].messages.at(-1)!;
+    expect(notice.content).toContain('Delegate it now');
+    expect(notice.content).toContain('cache specialist');
+    // no defect claim is made by the loop itself: with no defect reported there is no notice
+    const clean = withHealth([observe(HEALTH), text('fine'), check(false)]);
+    await runHandler(clean, claimed('investigator'));
+    for (const request of clean.inference.requests)
+      expect(JSON.stringify(request.messages)).not.toContain('Delegate it now');
   });
 });

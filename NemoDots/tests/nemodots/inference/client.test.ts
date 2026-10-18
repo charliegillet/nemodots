@@ -268,10 +268,15 @@ describe('streaming and telemetry (stub-verified)', () => {
   });
 
   it('firstContentAt ignores reasoning-only deltas', async () => {
+    // The stub records when it writes the content delta. A loaded test process
+    // can read buffered chunks late, which only moves firstContentAt later; if
+    // it were stamped from the reasoning delta it would be ~60 ms too early.
+    let contentWrittenAt = 0;
     stub = await startStub(async (_req, res) => {
       sse(res);
       res.write(chunk({ reasoning: 'hmm' }));
       await new Promise((r) => setTimeout(r, 60));
+      contentWrittenAt = Date.now();
       res.write(chunk({ content: 'x' }));
       res.write(chunk({}, 'stop'));
       res.write(DONE);
@@ -280,9 +285,10 @@ describe('streaming and telemetry (stub-verified)', () => {
     const { client: c } = client(stub);
     const result = await c.complete(request(), ctx());
     const a = result.attempts[0];
-    expect(
-      Date.parse(a.firstContentAt!) - Date.parse(a.headersAt!),
-    ).toBeGreaterThanOrEqual(40);
+    // 5 ms covers millisecond rounding between the two clock reads.
+    expect(Date.parse(a.firstContentAt!)).toBeGreaterThanOrEqual(
+      contentWrittenAt - 5,
+    );
   });
 
   it('accumulates streamed tool calls and preserves the provider tool call ids', async () => {

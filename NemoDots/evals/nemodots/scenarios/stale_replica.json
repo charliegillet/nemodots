@@ -3,6 +3,9 @@
   "version": 1,
   "class": "repairable_checkout_fault",
   "description": "Inventory reads are routed to a replica that stopped replicating (F4). Orders still succeed and /health stays ok, but stock is oversold.",
+  "preconditions": {
+    "visible": ["inventory_inconsistent"]
+  },
   "steps": [
     {
       "kind": "set_config",

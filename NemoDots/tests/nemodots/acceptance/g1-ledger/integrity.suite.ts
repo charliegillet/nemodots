@@ -186,10 +186,11 @@ describe('[G1.1] immutable receipt identity and safe failure', () => {
       let deep: unknown = 1;
       for (let i = 0; i < 400; i += 1) deep = { d: deep };
       const huge = { items: Array.from({ length: 20_000 }, (_, i) => i) };
+      // ARCHITECTURE 9.4 (rev 2026-10-18): checkout.metrics normalizes to the
+      // error classes seen and cacheDecodeError; the deciles were removed.
       const good = observed(w, 'checkout.metrics', {
         errorClasses: [],
-        cacheHitDecile: 9,
-        errorRateDecile: 0,
+        cacheDecodeError: null,
       });
       const bad: [string, Record<string, unknown>][] = [
         ['source null', { ...good, source: null }],
@@ -426,8 +427,7 @@ describe('[G1.3] supersession and support status', () => {
       const h = await mk('h', 'checkout.health', HEALTH_OK);
       const m = await mk('m', 'checkout.metrics', {
         errorClasses: [],
-        cacheHitDecile: 9,
-        errorRateDecile: 0,
+        cacheDecodeError: null, // ARCHITECTURE 9.4 rev 2026-10-18 shape
       });
       await w.transition({ op: 'transition', label: 'h', to: 'contested' });
       expect((await w.receiptById(h))?.status).toBe('contested');

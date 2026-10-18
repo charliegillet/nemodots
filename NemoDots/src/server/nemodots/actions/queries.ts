@@ -10,6 +10,8 @@ import type {
 import type { IntentReader } from '../coordinator/types.js';
 import { withTransaction } from '../db/tx.js';
 import type { ActionsDeps } from './deps.js';
+import { failNotRunning } from './not-running.js';
+import { lockMissionShared } from './predicates.js';
 import {
   findResultReceipt,
   toIntent,
@@ -128,7 +130,15 @@ export function createIntentReader(): IntentReader {
 
 /**
  * Cancels the queued intents (proposed | admitted) of a mission generation
- * older than `generation` (the cancel bumped it). Committed effects stay.
+ * older than `generation` (the cancel bumped it) and settles the committed but
+ * never-dispatched flushes: they end failed(effect_not_applied) with the
+ * explicit reason mission_not_running and no Redis command is issued. The
+ * returned ids are the CANCELLED queue entries only; settled committed effects
+ * are listed in the mission's cancellation.committedEffects (the coordinator
+ * computes that list before this runs) and stay distinguishable by their
+ * receipt (outcome failed, no external effect). A flush that was already
+ * claimed for dispatch is in flight and is left to its dispatcher: dispatched
+ * effects stay as they are, with no rollback.
  */
 export async function cancelQueued(
   deps: ActionsDeps,
@@ -136,6 +146,8 @@ export async function cancelQueued(
   generation: number,
 ): Promise<ActionId[]> {
   return withTransaction(deps.pool, async (client) => {
+    // mission first (FOR SHARE), then the intents: the common lock order
+    await lockMissionShared(client, missionId as string);
     const { rows } = await client.query<{ id: string; status: string }>(
       `SELECT id, status FROM coordinator.action_intents
         WHERE mission_id = $1 AND generation < $2 AND status IN ('proposed', 'admitted')
@@ -152,6 +164,23 @@ export async function cancelQueued(
       );
       cancelled.push(row.id as ActionId);
     }
+    const undispatched = await client.query<IntentRow>(
+      `SELECT i.* FROM coordinator.action_intents i
+        WHERE i.mission_id = $1 AND i.status = 'committed'
+          AND i.action = 'flush_cache_namespace'
+          AND NOT EXISTS (SELECT 1 FROM coordinator.authorizations a
+                           WHERE a.action_id = i.id AND a.stage = 'dispatch')
+        ORDER BY i.id FOR UPDATE`,
+      [missionId],
+    );
+    for (const row of undispatched.rows)
+      await failNotRunning(
+        client,
+        deps,
+        row,
+        row.dispatch_fence ?? 0,
+        'the mission was cancelled before the effect was dispatched',
+      );
     return cancelled;
   });
 }

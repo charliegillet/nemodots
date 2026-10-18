@@ -113,6 +113,8 @@ export const RecoveryKindSchema = z.enum([
   'attempt_aborted',
   'branch_preserved',
   'repair_coalesced',
+  // rev3: a replan held behind a verified self-write's postcondition, released with the held repairs.
+  'replan_coalesced',
   'invalidation_resolved',
   'mission_paused_closure_cap',
 ]);

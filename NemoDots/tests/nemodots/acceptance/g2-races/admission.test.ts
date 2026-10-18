@@ -247,9 +247,10 @@ describe('G2 admission and races: cases 1-8', () => {
     });
   });
 
-  it('G2-03b concurrent commit ordering: the injector holds the lock first, the commit waits then rejects r1 at commit stage', async () => {
+  it('G2-03b ADM-03b concurrent commit ordering: the injector holds the lock first, the commit waits then rejects r1 at commit stage', async () => {
     await withWorld(async (w) => {
-      const v1 = (await w.cfg(POOL)).version;
+      const base = await w.snapshotConfig();
+      const v1 = base[POOL].version;
       const i = await w.proposeAdmit(w.poolSpec('tc-1'));
       const hold = await w.holdRowLock(POOL, 4);
       const commit = w.actions.commit(i.id, fence(i)).then(
@@ -260,10 +261,8 @@ describe('G2 admission and races: cases 1-8', () => {
       expect(await w.anyBlocked()).toBe(true);
       await hold.commit();
       await commit;
-      // Lead ruling 2026-10-18: the replacement is NOT registered at this step,
-      // so the one code the setup implies is stale_pending_observation. The
-      // frozen ADM-03b row says stale_version (README proposal 3), so this
-      // test is not named ADM-03b until the oracle is revised.
+      // acceptance-v2 (oracle-v2): the replacement is NOT registered at this
+      // step, so the one code is stale_pending_observation (G3).
       await expectStaleBlocked(w, i.id, {
         changedKey: POOL,
         path: 'commit',
@@ -280,6 +279,10 @@ describe('G2 admission and races: cases 1-8', () => {
           .filter((r) => Number(r.version) > v1)
           .map((r) => r.caused_by_actor),
       ).toEqual(['injector']);
+      await checkOutcome(w, oracleOutcome('ADM-03b'), {
+        intents: { I: i.id },
+        base,
+      });
     });
   });
 
@@ -898,10 +901,18 @@ describe('G2 admission and races: cases 1-8', () => {
       });
     });
 
-    it('G2-08b branch A’s commit is parked holding ITS locks: branch B commits within 2 s (no mission-wide epoch lock), then A commits too', async () => {
+    it('G2-08b ADM-08 branch A’s commit is parked holding ITS locks: branch B (another key) commits within 2 s (no mission-wide epoch lock), then A commits too', async () => {
       await withWorld(async (w) => {
         const base = await w.snapshotConfig();
-        const a = await w.proposeAdmit(w.poolSpec('tc-a', 12));
+        // oracle-v2 ADM-08: IA routing.inventory_source -> primary (routing_specialist), IB orders.write_enabled -> true
+        const routing = await w.newAttempt('routing_specialist');
+        const a = await w.proposeAdmit({
+          ...w.setSpec('tc-a', ROUTING, 'primary', [
+            `member:${ROUTING}`,
+            'health',
+          ]),
+          att: routing,
+        });
         const b = await w.proposeAdmit(
           w.setSpec('tc-b', ORDERS, true, [`member:${ORDERS}`, 'health']),
         );
@@ -914,11 +925,11 @@ describe('G2 admission and races: cases 1-8', () => {
           5000,
           'branch B must not wait on branch A',
         );
-        expect(Date.now() - t0).toBeLessThan(2000);
+        expect(Date.now() - t0).toBeLessThan(2000); // nonBlockingWithinMs
         parked.release();
         await commitA;
         for (const [i, key, value] of [
-          [a, POOL, 12],
+          [a, ROUTING, 'primary'],
           [b, ORDERS, true],
         ] as const) {
           expect((await w.intent(i.id)).status).toBe('committed');
@@ -929,7 +940,10 @@ describe('G2 admission and races: cases 1-8', () => {
           });
           expect((await w.resultReceipts(i.id)).length).toBe(1);
         }
-        expect(await w.actionRows()).toBe(2);
+        await checkOutcome(w, oracleOutcome('ADM-08'), {
+          intents: { IA: a.id, IB: b.id },
+          base,
+        });
       });
     });
   });

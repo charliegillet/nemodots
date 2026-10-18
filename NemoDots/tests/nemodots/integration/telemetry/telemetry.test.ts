@@ -67,6 +67,34 @@ afterAll(async () => {
 const T0 = Date.parse('2026-10-18T10:00:00.000Z');
 const at = (ms: number) => new Date(T0 + ms).toISOString();
 
+const seededMissions = new Set<string>();
+/** A real mission, task and running attempt: the ledger derives the mission from the attempt. */
+async function seedAttempt(missionId: string) {
+  if (!seededMissions.has(missionId)) {
+    await admin.query(
+      `INSERT INTO coordinator.missions (id, owner_id, environment, resource, goal, mode, status, budgets, provider)
+       VALUES ($1, 'owner', 'test', 'checkout', 'telemetry test', 'fixture', 'running', '{}'::jsonb, '{}'::jsonb)`,
+      [missionId],
+    );
+    seededMissions.add(missionId);
+  }
+  const taskId = randomUUID();
+  const attemptId = randomUUID();
+  await admin.query(
+    `INSERT INTO coordinator.tasks (id, mission_id, depth, ordinal, title, question, role, status, generation, budget)
+     SELECT $1, $2, 0, COALESCE(MAX(ordinal) + 1, 0), 't', 'q', 'investigator', 'running', 0, '{}'::jsonb
+       FROM coordinator.tasks WHERE mission_id = $2`,
+    [taskId, missionId],
+  );
+  await admin.query(
+    `INSERT INTO coordinator.task_attempts (id, task_id, mission_id, n, kind, status, generation, lease_owner,
+                                            fencing_token, lease_expires_at, lease_renewed_at)
+     VALUES ($1, $2, $3, 1, 'initial', 'running', 0, 'w', 1, now() + interval '1 hour', now())`,
+    [attemptId, taskId, missionId],
+  );
+  return { taskId, attemptId };
+}
+
 function scopeOf(missionId: string): Scope {
   return {
     ownerId: 'owner',
@@ -141,11 +169,12 @@ async function fenced(
     dependencyVector: [],
     volatile: { nowIso: at(0) },
   } as unknown as ContextSnapshot;
+  const { taskId, attemptId } = await seedAttempt(missionId);
   const record = {
     id: randomUUID(),
     scope: scopeOf(missionId),
-    taskId: randomUUID(),
-    attemptId: randomUUID(),
+    taskId,
+    attemptId,
     role,
     model: { requested: model, returned: model },
     provider: { host: 'api.inference.crusoecloud.com', mode: 'live' },
@@ -225,20 +254,29 @@ describe('telemetry over stored attempts', () => {
       'prefix-z',
     );
     // An orphaned call (fence lost) in the mission: counted separately.
-    await app.query('BEGIN');
-    await recordOrphanedAttempt(app, {
-      modelCallId: randomUUID() as never,
-      scope: scopeOf(missionId),
-      taskId: randomUUID() as never,
-      attemptId: randomUUID() as never,
-      role: 'worker',
-      model: { requested: SUPER, returned: SUPER },
-      provider: { host: 'api.inference.crusoecloud.com', mode: 'live' },
-      attempts: [
-        attempt(1, { tokens: [9999, 999, 9999], outcome: 'orphaned_fence' }),
-      ],
-    } as never);
-    await app.query('COMMIT');
+    const orphan = await seedAttempt(missionId);
+    const client = await app.connect();
+    try {
+      await client.query('BEGIN');
+      await recordOrphanedAttempt(client, {
+        modelCallId: randomUUID() as never,
+        scope: scopeOf(missionId),
+        taskId: orphan.taskId as never,
+        attemptId: orphan.attemptId as never,
+        role: 'worker',
+        model: { requested: SUPER, returned: SUPER },
+        provider: { host: 'api.inference.crusoecloud.com', mode: 'live' },
+        attempts: [
+          attempt(1, { tokens: [9999, 999, 9999], outcome: 'orphaned_fence' }),
+        ],
+      } as never);
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }, 60_000);
 
   it('the summary equals totals computed by hand', async () => {

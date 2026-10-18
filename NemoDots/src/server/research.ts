@@ -90,6 +90,11 @@ export async function research(
     throw new Error(
       'Live mode is not configured. Set OPENAI_API_KEY and OPENAI_MODEL; browser research also needs BROWSER_URL and BROWSER_SECRET. Research must not be disabled.',
     );
+  // NemoDots (TP-01): no implicit provider host. Refuse before any request.
+  if (!config.baseUrl?.trim())
+    throw new Error(
+      'OPENAI_BASE_URL is required: there is no default provider host.',
+    );
   let pages: WebSource[];
   const limitations: string[] = [];
   let screenshot: string | undefined;

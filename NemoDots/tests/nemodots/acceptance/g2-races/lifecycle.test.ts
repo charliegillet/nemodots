@@ -4,7 +4,10 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { digest } from '../../../../src/server/nemodots/contracts/index.js';
-import { delegate } from '../../../../src/server/nemodots/coordinator/publish.js';
+import {
+  delegate,
+  publishOutput,
+} from '../../../../src/server/nemodots/coordinator/publish.js';
 import { advanceConfig } from '../../../../src/server/nemodots/sandbox/version-authority.js';
 import { ADMISSION_CASES, type AdmissionOutcome } from '../oracle/admission.js';
 import { SELF_WRITE_CASES } from '../oracle/closures.js';
@@ -15,6 +18,7 @@ import {
   authSummary,
   checkOutcome,
   commitSettled,
+  expectNoReplanStorm,
   errText,
   isSettled,
   sleep,
@@ -80,9 +84,36 @@ const swExpected = (id: string) => {
 const ROUTING_KINDS = [
   'repair_scheduled',
   'replan_scheduled',
+  'replan_coalesced',
   'postcondition_scheduled',
   'repair_coalesced',
 ];
+/** The replan_* recovery rows of the mission, oldest first. */
+const replanRows = async (w: World) =>
+  (
+    await w.admin.query(
+      `SELECT kind, invalidation_event_id, detail FROM coordinator.recovery_events
+        WHERE mission_id=$1 AND kind IN ('replan_scheduled','replan_coalesced')
+        ORDER BY created_at, id`,
+      [w.mission],
+    )
+  ).rows as { kind: string; invalidation_event_id: string; detail: string }[];
+/** Root tasks (not planner/postcondition) in the mission's subset of an invalidation. */
+const affectedRoots = async (w: World, eventId: string) => {
+  const row = (
+    await w.admin.query(
+      'SELECT event FROM coordinator.invalidations WHERE mission_id=$1 AND event_id=$2',
+      [w.mission, eventId],
+    )
+  ).rows[0];
+  const taskIds = (row?.event?.affected?.taskIds ?? []) as string[];
+  const roots = await w.admin.query(
+    `SELECT id FROM coordinator.tasks WHERE id = ANY($1::uuid[])
+        AND parent_id IS NULL AND role NOT IN ('planner','postcondition')`,
+    [taskIds],
+  );
+  return { taskIds, roots: roots.rows.map((r) => r.id as string).sort() };
+};
 const routingKinds = async (w: World) =>
   (
     await w.admin.query(
@@ -110,12 +141,18 @@ const postconditionCount = async (w: World) =>
     )
   ).rows[0].n as number;
 
-const taskStatus = async (w: World, taskId: string) =>
+/**
+ * A task counts as invalidated when one of its attempts was moved to
+ * `invalidated`. The task row itself may already be `runnable` again because
+ * recovery requeued it for repair.
+ */
+const taskInvalidated = async (w: World, taskId: string) =>
   (
-    await w.admin.query('SELECT status FROM coordinator.tasks WHERE id=$1', [
-      taskId,
-    ])
-  ).rows[0].status as string;
+    await w.admin.query(
+      "SELECT count(*)::int AS n FROM coordinator.task_attempts WHERE task_id=$1 AND status='invalidated'",
+      [taskId],
+    )
+  ).rows[0].n > 0;
 
 /**
  * The SW oracle's lineage: T_parent (an investigator that read r1) delegates
@@ -171,20 +208,20 @@ async function expectSw(
   const lineage = await Promise.all(
     run.lineage.map(async (t, n) => [
       n === 0 ? 'T_parent' : 'T_act',
-      await taskStatus(w, t),
+      await taskInvalidated(w, t),
     ]),
   );
+  expect(lineage, `${id} acting lineage invalidated`).toEqual(
+    lineage.map(([name]) => [name, exp.actingLineageInvalidated]),
+  );
   expect(
-    lineage.map(([name, status]) => [name, status === 'invalidated']),
-    `${id} acting lineage (task statuses ${JSON.stringify(lineage)})`,
-  ).toEqual(lineage.map(([name]) => [name, exp.actingLineageInvalidated]));
-  expect(
-    (await taskStatus(w, run.other.ctx.taskId)) === 'invalidated',
+    await taskInvalidated(w, run.other.ctx.taskId),
     `${id} other reader invalidated`,
   ).toBe(exp.otherReadersInvalidated);
   expect(await postconditionCount(w), `${id} postconditions`).toBe(
     exp.postconditionAttempts,
   );
+  await expectNoReplanStorm(w);
   expect(await routingKinds(w), `${id} routing kinds`).toEqual(
     [...exp.recoveryKinds].sort(),
   );
@@ -192,6 +229,44 @@ async function expectSw(
     exp.maxRepairAttemptsPerTask,
   );
 }
+
+/** The mission's planner task and its latest attempt. */
+const plannerOf = async (w: World) => {
+  const row = (
+    await w.admin.query(
+      `SELECT t.id AS task_id, t.status, t.repair,
+              (SELECT a.id FROM coordinator.task_attempts a WHERE a.task_id = t.id
+                ORDER BY a.n DESC LIMIT 1) AS attempt_id
+         FROM coordinator.tasks t WHERE t.mission_id=$1 AND t.role='planner'`,
+      [w.mission],
+    )
+  ).rows[0];
+  return row as {
+    task_id: string;
+    status: string;
+    repair: Rec | null;
+    attempt_id: string;
+  };
+};
+/** The open postcondition task verifies the given (moved) members and publishes. */
+async function settlePostcondition(w: World, members: string[]) {
+  const post = await w.claim('postcondition');
+  expect(post, 'the postcondition task is claimable').toBeTruthy();
+  for (const m of members) await w.refresh(m);
+  await w.readReceipts(post!, members);
+  await publishOutput(w.deps, post!.ctx, {
+    kind: 'verification',
+    content: { verified: true },
+    dependencyVector: w.vector(members),
+  });
+}
+const replanScheduledCount = async (w: World) =>
+  (
+    await w.admin.query(
+      "SELECT count(*)::int n FROM coordinator.recovery_events WHERE mission_id=$1 AND kind='replan_scheduled'",
+      [w.mission],
+    )
+  ).rows[0].n as number;
 
 describe('G2 compensation, cancellation, self-writes: cases 13, 14, 16', () => {
   describe('G2-13 compensation', () => {
@@ -531,6 +606,53 @@ describe('G2 compensation, cancellation, self-writes: cases 13, 14, 16', () => {
           await w.actions.commit(run.x.id, fence(run.x));
           await w.watcherPoll();
           await expectSw(w, 'SW-1', run);
+
+          // oracle-v3 SW-1 provenance: the held replan comes from the UNRELATED
+          // root T_other, never from the excused acting lineage.
+          const sw1 = swExpected('SW-1');
+          const byName: Record<string, string> = {
+            T_parent: run.lineage[0],
+            T_act: run.lineage[1],
+            T_other: run.other.ctx.taskId,
+          };
+          const held = await replanRows(w);
+          expect(held.map((r) => r.kind)).toEqual(['replan_coalesced']);
+          const eventId = held[0].invalidation_event_id;
+          const scope = await affectedRoots(w, eventId);
+          expect(
+            scope.roots,
+            'the invalidated roots are exactly the replan trigger',
+          ).toEqual(sw1.replanTriggerTaskIds!.map((n) => byName[n]).sort());
+          for (const t of run.lineage)
+            expect(
+              scope.taskIds,
+              'the acting lineage is excused',
+            ).not.toContain(t);
+
+          // oracle-v3 SW-1 release: once the postcondition settles, the held
+          // replan runs exactly once for the same event.
+          const post = await w.claim('postcondition');
+          expect(post, 'the postcondition task is claimable').toBeTruthy();
+          await w.refresh('member:db.pool_max');
+          await w.readReceipts(post!, ['member:db.pool_max']);
+          await publishOutput(w.deps, post!.ctx, {
+            kind: 'verification',
+            content: { verified: true },
+            dependencyVector: w.vector(['member:db.pool_max']),
+          });
+          const after = await replanRows(w);
+          expect(
+            after.filter(
+              (r) =>
+                r.kind === 'replan_scheduled' &&
+                r.invalidation_event_id === eventId,
+            ),
+            'released replans for the event',
+          ).toHaveLength(sw1.replansReleasedAfterPostcondition!);
+          expect(
+            after.filter((r) => r.kind === 'replan_scheduled'),
+          ).toHaveLength(1);
+          await expectNoReplanStorm(w);
         },
         { need: ['actions', 'hooks', 'cacheKey', 'watcher'] },
       );
@@ -571,6 +693,175 @@ describe('G2 compensation, cancellation, self-writes: cases 13, 14, 16', () => {
           await w.advance(POOL, 4); // the injector writes before the watcher looks
           await w.watcherPoll();
           await expectSw(w, 'SW-3', run);
+        },
+        { need: ['actions', 'hooks', 'cacheKey', 'watcher'] },
+      );
+    });
+
+    // No oracle id: the two sides of scheduleReplan (adversary review).
+    it('G2-16h a root task invalidated in a mission WITHOUT a succeeded planner: its repair is scheduled and no replan of any kind is recorded', async () => {
+      await withWorld(
+        async (w) => {
+          const reader = await w.newAttempt('investigator', {
+            reads: ['member:db.pool_max'],
+          });
+          await w.advance(POOL, 4); // unregistered; the watcher registers it
+          await w.watcherPoll();
+          expect(await attemptStatus(w, reader.ctx.attemptId)).toBe(
+            'invalidated',
+          );
+          expect(await routingKinds(w)).toEqual(['repair_scheduled']);
+          expect(await replanRows(w)).toEqual([]);
+        },
+        { need: ['actions', 'hooks', 'cacheKey', 'watcher'], planner: false },
+      );
+    });
+
+    it('G2-16i positive control: the same root invalidation with a succeeded planner under replanCap records exactly one replan_scheduled', async () => {
+      await withWorld(
+        async (w) => {
+          const reader = await w.newAttempt('investigator', {
+            reads: ['member:db.pool_max'],
+          });
+          await w.advance(POOL, 4);
+          await w.watcherPoll();
+          expect(await attemptStatus(w, reader.ctx.attemptId)).toBe(
+            'invalidated',
+          );
+          expect(await routingKinds(w)).toEqual([
+            'repair_scheduled',
+            'replan_scheduled',
+          ]);
+          expect((await replanRows(w)).map((r) => r.kind)).toEqual([
+            'replan_scheduled',
+          ]);
+          await expectNoReplanStorm(w);
+        },
+        { need: ['actions', 'hooks', 'cacheKey', 'watcher'] },
+      );
+    });
+
+    // No oracle ids: the replan-merge rules around one open gate (lead ruling
+    // 2026-10-18; C-10 from the concurrency review).
+    it('G2-16j two verified self-writes behind ONE open gate: one held replan per event (the second merged), exactly one replan_scheduled after the postcondition settles', async () => {
+      await withWorld(
+        async (w) => {
+          // event E1: verified self-write X on db.pool_max; T_other is an unrelated root reader
+          const run = await swLineage(w);
+          await w.actions.commit(run.x.id, fence(run.x));
+          await w.watcherPoll();
+          const e1 = await replanRows(w);
+          expect(e1.map((r) => r.kind)).toEqual(['replan_coalesced']);
+          // event E2: a second verified self-write Y on another key while the gate is open
+          const actor = await w.newAttempt('database_specialist', {
+            reads: [`member:${TIMEOUT}`, 'health'],
+          });
+          const other2 = await w.newAttempt('investigator', {
+            reads: [`member:${TIMEOUT}`],
+          });
+          const y = await w.proposeAdmit({
+            ...w.setSpec('tc-2', TIMEOUT, 2500, [
+              `member:${TIMEOUT}`,
+              'health',
+            ]),
+            att: actor,
+          });
+          expect(y.status).toBe('admitted');
+          await w.actions.commit(y.id, fence(y));
+          await w.watcherPoll();
+          expect(await attemptStatus(w, other2.ctx.attemptId)).toBe(
+            'invalidated',
+          );
+          const rows = await replanRows(w);
+          const events = [...new Set(rows.map((r) => r.invalidation_event_id))];
+          expect(
+            events,
+            'two events, each with its own held replan',
+          ).toHaveLength(2);
+          const e2 = rows.filter(
+            (r) => r.invalidation_event_id !== e1[0].invalidation_event_id,
+          );
+          expect(e2.map((r) => r.kind)).toEqual(['replan_coalesced']);
+          expect(e2[0].detail).toMatch(
+            /merged into the replan already pending/,
+          );
+          expect(await postconditionCount(w), 'one gate for both').toBe(1);
+          expect(await replanScheduledCount(w)).toBe(0);
+          await expectNoReplanStorm(w);
+
+          await settlePostcondition(w, [
+            'member:db.pool_max',
+            `member:${TIMEOUT}`,
+          ]);
+          expect(await replanScheduledCount(w), 'one replan in total').toBe(1);
+          await expectNoReplanStorm(w);
+        },
+        { need: ['actions', 'hooks', 'cacheKey', 'watcher'] },
+      );
+    });
+
+    it('G2-16k C-10: an unrelated UNGATED event (checkout.health) reaching the held planner keeps it held, is recorded as a merged replan_coalesced, schedules no repair for the planner, and the single release counts toward replanCap', async () => {
+      await withWorld(
+        async (w) => {
+          const run = await swLineage(w);
+          // the planner's plan rests on health, so a health change reaches it
+          const before = await plannerOf(w);
+          await w.recordEvidence(
+            {
+              missionId: w.mission,
+              taskId: before.task_id,
+              attemptId: before.attempt_id,
+            },
+            ['health'],
+          );
+          await w.actions.commit(run.x.id, fence(run.x));
+          await w.watcherPoll(); // the gate opens; the planner is held
+          const held = await plannerOf(w);
+          expect(held.repair?.kind, 'the planner holds a replan').toBe(
+            'replan',
+          );
+          expect(held.status).not.toBe('runnable');
+          expect((await replanRows(w)).map((r) => r.kind)).toEqual([
+            'replan_coalesced',
+          ]);
+
+          // an unrelated, ungated change: health degrades and is registered
+          await w.registerObserved('health', { status: 'degraded' });
+          await w.deliverLatestInvalidation('checkout.health');
+          const healthEvent = (
+            await w.admin.query(
+              `SELECT id FROM ledger.invalidation_events WHERE source_key='checkout.health'
+                ORDER BY created_at DESC, id DESC LIMIT 1`,
+            )
+          ).rows[0].id as string;
+
+          const still = await plannerOf(w);
+          expect(still.status, 'the planner stays held').toBe(held.status);
+          expect(still.status).not.toBe('runnable');
+          const merged = (await replanRows(w)).filter(
+            (r) => r.invalidation_event_id === healthEvent,
+          );
+          expect(merged.map((r) => r.kind)).toEqual(['replan_coalesced']);
+          expect(merged[0].detail).toMatch(/merged into the replan/);
+          const plannerRepairs = await w.admin.query(
+            `SELECT count(*)::int n FROM coordinator.recovery_events
+              WHERE mission_id=$1 AND task_id=$2 AND kind='repair_scheduled'`,
+            [w.mission, before.task_id],
+          );
+          expect(plannerRepairs.rows[0].n, 'no repair for the planner').toBe(0);
+          expect(await replanScheduledCount(w)).toBe(0);
+          await expectNoReplanStorm(w);
+
+          await settlePostcondition(w, ['member:db.pool_max']);
+          expect(
+            await replanScheduledCount(w),
+            'exactly one released replan',
+          ).toBe(1);
+          expect(
+            await replanScheduledCount(w),
+            'the release counts toward replanCap',
+          ).toBeLessThanOrEqual((w.deps as Rec).config.replanCap);
+          await expectNoReplanStorm(w);
         },
         { need: ['actions', 'hooks', 'cacheKey', 'watcher'] },
       );

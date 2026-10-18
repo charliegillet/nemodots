@@ -3,6 +3,9 @@
   "version": 1,
   "class": "conflicting_observations",
   "description": "A stale replica (F4) while /health stays ok, then a banner that claims normal sync progress. Health and the banner conflict with the inventory evidence.",
+  "preconditions": {
+    "visible": ["healthy", "inventory_inconsistent"]
+  },
   "steps": [
     {
       "kind": "set_config",

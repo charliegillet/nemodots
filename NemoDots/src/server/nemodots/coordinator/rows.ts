@@ -57,6 +57,8 @@ export interface MissionRow {
   acceptance_receipt_id: string | null;
   failure_reason: string | null;
   cancellation: Mission['cancellation'];
+  /** NULL: the default selective closure (finding D8). */
+  recovery_scope_rule?: string | null;
   created_at: Date;
   started_at: Date | null;
   finished_at: Date | null;

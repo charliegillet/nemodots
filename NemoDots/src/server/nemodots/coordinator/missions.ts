@@ -26,7 +26,13 @@ import {
 } from './errors.js';
 import { EventBuffer } from './events.js';
 import { carryRepair } from './leases.js';
-import { evaluateOpen, scheduleReplan } from './recovery.js';
+import {
+  evaluateOpen,
+  releaseOrphanedHolds,
+  resolveScopeRule,
+  scheduleReplan,
+  settleStuckInvalidations,
+} from './recovery.js';
 import {
   toMission,
   type AttemptRow,
@@ -34,6 +40,7 @@ import {
   type TaskRow,
 } from './rows.js';
 import {
+  enqueueMissionEvaluate,
   insertTask,
   lockTasks,
   promoteRunnable,
@@ -155,11 +162,25 @@ export async function transitionMission(
 
 // ------------------------------------------------------------------- create
 
+/** Server-side creation options: never part of the HTTP body or a tool input. */
+export interface CreateMissionServerOptions {
+  /** A registered recovery scope rule (default 'selective'); unknown fails creation. */
+  recoveryScopeRule?: string;
+}
+
 export async function createMission(
-  deps: Pick<MissionDeps, 'pool' | 'config' | 'events'>,
+  deps: Pick<MissionDeps, 'pool' | 'config' | 'events'> & {
+    recoveryScopeRules?: CoordinatorDeps['recoveryScopeRules'];
+  },
   request: CreateMissionRequest,
+  serverOptions: CreateMissionServerOptions = {},
 ): Promise<Mission> {
   const parsed = CreateMissionRequestSchema.parse(request);
+  // an unknown rule name fails creation (before anything is written)
+  const scopeRule = resolveScopeRule(
+    deps.recoveryScopeRules,
+    serverOptions.recoveryScopeRule,
+  ).name;
   const { config } = deps;
   if (parsed.mode !== undefined && parsed.mode !== config.mode)
     throw new ModeMismatchError(parsed.mode, config.mode);
@@ -169,8 +190,8 @@ export async function createMission(
     const { rows } = await client.query<MissionRow>(
       `INSERT INTO coordinator.missions (
          id, owner_id, space_id, environment, resource, goal, constraints, mode,
-         status, budgets, admission_min_age_ms, provider)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, 'created', $9::jsonb, $10, $11::jsonb)
+         status, budgets, admission_min_age_ms, provider, recovery_scope_rule)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, 'created', $9::jsonb, $10, $11::jsonb, $12)
        RETURNING *`,
       [
         id,
@@ -184,6 +205,8 @@ export async function createMission(
         JSON.stringify(config.budgets),
         parsed.admission?.minAgeMs ?? 0,
         JSON.stringify(config.provider),
+        // the recovery scope rule is recorded on the mission (D8)
+        scopeRule,
       ],
     );
     const mission = toMission(rows[0]);
@@ -271,6 +294,7 @@ export async function startMission(
 export async function pauseMission(
   deps: MissionDeps,
   missionId: MissionId,
+  reason = 'paused',
 ): Promise<Mission> {
   return withTransaction(deps.pool, async (client) => {
     const tx: TxCtx = { client, events: new EventBuffer(deps.events) };
@@ -278,7 +302,7 @@ export async function pauseMission(
     if (!canTransition('mission', mission.status as MissionStatus, 'paused'))
       throw new MissionStateError(missionId, mission.status, 'pause');
     mission = await transitionMission(tx, mission, 'paused', {
-      reason: 'paused',
+      reason: reason.slice(0, 200),
     });
     // Draining attempts are marked aborted(mission_paused) first; their tasks
     // return to the pool and are not claimable while the mission is paused.
@@ -463,6 +487,9 @@ export async function evaluateMission(
         mission.status !== 'awaiting_acceptance'
       )
         return 'unchanged';
+      // Liveness: a repair held behind a gate that is gone must not wait forever.
+      if (mission.status === 'running')
+        await releaseOrphanedHolds(tx, missionId);
       const tasks = (
         await client.query<
           Pick<TaskRow, 'id' | 'status' | 'role' | 'parent_id'>
@@ -492,10 +519,42 @@ export async function evaluateMission(
       const planned = tasks.filter(
         (task) => task.role !== 'planner' && task.role !== 'postcondition',
       );
-      if (unfinished || !planned.some((task) => task.status === 'succeeded'))
-        return 'unchanged';
+      if (unfinished) return 'unchanged';
+      // Every task is terminal. The mission must now move: it can neither
+      // succeed (nothing produced a result) nor wait (nothing can change).
+      if (
+        planned.length > 0 &&
+        !planned.some((task) => task.status === 'succeeded')
+      ) {
+        failedReason =
+          'no_task_succeeded: every planned task ended failed or cancelled';
+        return 'failed';
+      }
+      if (planned.length === 0) return 'unchanged';
       const open = await evaluateOpen(client, deps, missionId);
-      if (open.open.length > 0) return 'unchanged';
+      if (open.open.length > 0) {
+        // Open invalidations that only the coordinator could close, with no task
+        // left to close them: schedule the missing repair, or settle them as
+        // unrecoverable and fail the mission with an explicit reason.
+        const stuck = open.open.filter(
+          (item) => item.kind === 'task' || item.kind === 'attempt',
+        );
+        if (stuck.length === 0 || stuck.length < open.open.length)
+          return 'unchanged';
+        const settled = await settleStuckInvalidations(
+          tx,
+          deps,
+          missionId,
+          stuck,
+        );
+        await tx.events.flush(client);
+        if (settled.scheduled > 0) {
+          await enqueueMissionEvaluate(client, missionId);
+          return 'running';
+        }
+        failedReason = `repair_not_schedulable: ${stuck.length} invalidation(s) cannot be repaired`;
+        return 'failed';
+      }
       await transitionMission(tx, mission, 'awaiting_acceptance', {
         reason: 'all_tasks_succeeded',
       });
@@ -517,6 +576,40 @@ export async function evaluateMission(
     return 'failed';
   }
   return outcome;
+}
+
+/**
+ * Maintenance safety net: running missions whose tasks are all terminal are
+ * evaluated even when no mission.evaluate message is pending (a lost message,
+ * a crash between the last task settling and its enqueue). Never wedge.
+ */
+export async function evaluateStalled(
+  deps: MissionDeps,
+  limit = 20,
+): Promise<number> {
+  const client = await deps.pool.connect();
+  let ids: string[];
+  try {
+    ids = (
+      await client.query<{ id: string }>(
+        `SELECT m.id FROM coordinator.missions m
+          WHERE m.status = 'running'
+            AND EXISTS (SELECT 1 FROM coordinator.tasks t WHERE t.mission_id = m.id)
+            AND NOT EXISTS (SELECT 1 FROM coordinator.tasks t
+                             WHERE t.mission_id = m.id
+                               AND t.status NOT IN ('succeeded', 'failed', 'cancelled'))
+            AND NOT EXISTS (SELECT 1 FROM coordinator.outbox o
+                             WHERE o.mission_id = m.id AND o.topic = 'mission.evaluate'
+                               AND o.processed_at IS NULL AND o.failed_at IS NULL)
+          ORDER BY m.created_at LIMIT $1`,
+        [limit],
+      )
+    ).rows.map((row) => row.id);
+  } finally {
+    client.release();
+  }
+  for (const id of ids) await evaluateMission(deps, id as MissionId);
+  return ids.length;
 }
 
 function acceptanceVerdict(

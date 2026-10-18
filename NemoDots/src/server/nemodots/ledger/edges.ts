@@ -8,6 +8,7 @@
 // themselves. A batch is all-or-nothing: addEdges runs inside a savepoint.
 //
 // All functions need a client inside an open transaction.
+import { isMutated } from '../config/mutation.js';
 import { randomUUID } from 'node:crypto';
 import type { EdgeKind, PgClient } from '../contracts/index.js';
 import { EdgeError } from './errors.js';
@@ -276,6 +277,8 @@ export async function linkInheritance(
     modelCallIds?: readonly string[];
   },
 ): Promise<AddEdgesResult> {
+  // MUTATION drop_inherited_edges: inheritance is not recorded.
+  if (isMutated('drop_inherited_edges')) return { inserted: 0, existing: 0 };
   const output: NodeRef = { kind: 'task_output', id: link.outputId };
   const to: NodeRef[] = [
     {

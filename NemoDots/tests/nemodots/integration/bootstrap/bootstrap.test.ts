@@ -344,6 +344,10 @@ describe('a separate worker process', () => {
         }
         expect(output).not.toMatch(/BLOCKED|fatal/);
         expect(owner).toMatch(/^worker-main-/);
+        // the claim precedes the model call: wait for the request to arrive
+        const requested = Date.now() + 20_000;
+        while (provider.requests() < 1 && Date.now() < requested)
+          await new Promise((r) => setTimeout(r, 100));
         expect(provider.requests()).toBeGreaterThanOrEqual(1);
 
         // SIGTERM is a clean stop

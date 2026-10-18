@@ -123,6 +123,8 @@ export const RECOVERY_KIND = [
   'attempt_aborted',
   'branch_preserved',
   'repair_coalesced',
+  // oracle-v3: CONTRACTS revision 3 (replan coalescing)
+  'replan_coalesced',
   'invalidation_resolved',
   'mission_paused_closure_cap',
 ] as const;

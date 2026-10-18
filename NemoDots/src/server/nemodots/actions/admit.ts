@@ -11,6 +11,7 @@
 //   6. events; COMMIT
 // `admitted` is durable. Between admission and commit the predicates may
 // become false; the commit transaction detects exactly that.
+import { isMutated } from '../config/mutation.js';
 import type {
   ActionId,
   ActionIntent,
@@ -49,12 +50,14 @@ export async function admit(
     const reclaim =
       intent.status === 'admitted' &&
       intent.dispatcher_lease_expires_at !== null &&
-      (
-        await client.query<{ expired: boolean }>(
-          'SELECT $1::timestamptz <= clock_timestamp() AS expired',
-          [intent.dispatcher_lease_expires_at],
-        )
-      ).rows[0].expired;
+      // MUTATION ignore_fencing: a live lease is re-claimed too.
+      (isMutated('ignore_fencing') ||
+        (
+          await client.query<{ expired: boolean }>(
+            'SELECT $1::timestamptz <= clock_timestamp() AS expired',
+            [intent.dispatcher_lease_expires_at],
+          )
+        ).rows[0].expired);
     // Anything but a fresh proposal or an expired admission is a duplicate
     // delivery: the stored decision is returned and nothing is written.
     if (intent.status !== 'proposed' && !reclaim) return toIntent(intent);

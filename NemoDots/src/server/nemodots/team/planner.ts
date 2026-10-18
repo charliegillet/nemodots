@@ -20,6 +20,7 @@ import { buildContext } from './context-input.js';
 import { failureOutcome } from './failures.js';
 import { callModel } from './model-call.js';
 import { CORRECTION_NOTICE } from './prompts.js';
+import { requireVerifierEnabled } from './policy.js';
 import type { TeamDeps } from './types.js';
 
 export const PLAN_SOURCES = ['checkout.health', 'checkout.config'] as const;
@@ -53,6 +54,7 @@ export type PlanParseResult =
 export function parsePlanText(
   text: string,
   extra?: (raw: unknown) => { cancelTaskIds: TaskId[]; issues: string[] },
+  policy: { requireVerifier: boolean } = { requireVerifier: true },
 ): PlanParseResult {
   let raw: unknown;
   try {
@@ -70,6 +72,31 @@ export function parsePlanText(
     planRaw = { tasks: (raw as { tasks?: unknown })?.tasks };
   }
   const plan = PlanSchema.safeParse(planRaw);
+  if (plan.success)
+    plan.data.tasks.forEach((task, i) => {
+      // A task that cannot observe cannot do any work: a validity rule, not a
+      // choice about the incident.
+      if (!task.capabilities.includes('observe'))
+        issues.push(
+          `tasks[${i}].capabilities must include observe (a task without it cannot read any source)`,
+        );
+      // pre-change verification needs the specialist to delegate a verifier
+      if (
+        policy.requireVerifier &&
+        task.role.endsWith('_specialist') &&
+        !task.capabilities.includes('delegate')
+      )
+        issues.push(
+          `tasks[${i}] is a specialist and its capabilities must include delegate (a verifier must confirm its reading before it proposes a change)`,
+        );
+      if (
+        task.role === 'investigator' &&
+        !task.capabilities.includes('delegate')
+      )
+        issues.push(
+          `tasks[${i}] is an investigator and its capabilities must include delegate (investigators cannot repair; without delegate a diagnosis can never lead to a repair)`,
+        );
+    });
   if (!plan.success)
     issues.push(
       ...plan.error.issues
@@ -171,6 +198,9 @@ export function runPlanner(
         'Using the mission goal and the health and configuration readings in the evidence section, produce the plan: 2 to 6 tasks with roles, capabilities and dependencies, as strict JSON.',
     },
     responseFormat: PLAN_RESPONSE_FORMAT,
-    parse: (text) => parsePlanText(text),
+    parse: (text) =>
+      parsePlanText(text, undefined, {
+        requireVerifier: requireVerifierEnabled(deps.config),
+      }),
   });
 }

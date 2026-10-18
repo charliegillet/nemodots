@@ -16,6 +16,7 @@ import {
   observeObserved,
   proposeSetConfig,
   setConfigInput,
+  settle,
   withEnv,
   type Env,
   type World,
@@ -48,7 +49,7 @@ describe('idempotency', () => {
       const sc = await proposeSetConfig(env, { value: 20 });
       const tampered = {
         ...sc.input,
-        payload: { ...sc.input.payload, value: 50 },
+        payload: { ...sc.input.payload, value: 15 },
       };
       const replay = await env.actions.propose(
         tampered as never,
@@ -58,6 +59,34 @@ describe('idempotency', () => {
       expect(replay.blockReason).toBe('idempotency_conflict');
       expect(
         await liveIntentsOfToolCall(env, sc.world, sc.call.toolCallId),
+      ).toBe(1);
+    }));
+
+  // ADM-06c ruling: the value domain is checked before idempotency, so an
+  // out-of-domain replay is rejected outright and stores nothing.
+  it('cleared: replayed tool call id with an out-of-domain value -> payload_invalid, nothing stored', () =>
+    withEnv(async (env) => {
+      const sc = await proposeSetConfig(env, { value: 20 });
+      const tampered = {
+        ...sc.input,
+        payload: { ...sc.input.payload, value: 50 }, // db.pool_max domain is 1..20
+      };
+      const replay = await settle(
+        env.actions.propose(
+          tampered as never,
+          { ...sc.world.ctx, ...sc.call } as never,
+        ),
+      );
+      expect(replay.ok).toBe(false);
+      expect(!replay.ok && (replay.error as { reason?: string }).reason).toBe(
+        'payload_invalid',
+      );
+      expect(
+        await count(
+          env.admin,
+          'SELECT count(*) AS n FROM coordinator.action_intents WHERE tool_call_id = $1',
+          [sc.call.toolCallId],
+        ),
       ).toBe(1);
     }));
 

@@ -26,6 +26,7 @@ import { WorkspaceStore } from './workspace.js';
 import {
   DEFAULT_AGENT_RUN_TIMEOUT_MS,
   type PlatformConfig,
+  providerBaseUrl,
 } from './platform-config.js';
 import { browserResponse } from './research.js';
 import { answerObserver, type SetupTelemetry } from './setup-telemetry.js';
@@ -41,6 +42,7 @@ import {
 } from './nemodots/interception/provenance-scope.js';
 import { withToolPolicy } from './nemodots/interception/with-tool-policy.js';
 import { digest } from './nemodots/contracts/digest.js';
+export { providerBaseUrl };
 const channelError = () => ({
   type: EventType.RUN_ERROR,
   message:
@@ -141,6 +143,22 @@ export class DotAgent extends AbstractAgent {
             error_class: 'configuration_missing',
           });
           throw new Error('Intelligence and model configuration are required.');
+        }
+        // NemoDots (finding TP-01): there is no implicit provider host. With
+        // OPENAI_BASE_URL missing or unusable, every Dot turn, incident or not,
+        // is refused before any request is made, so the key is never sent to a
+        // host nobody configured.
+        const baseUrl = providerBaseUrl(this.config.baseUrl);
+        if (!baseUrl) {
+          configurationFailure = true;
+          this.setupTelemetry?.capture({
+            kind: 'setup_failed',
+            step: 'setup_required',
+            error_class: 'configuration_missing',
+          });
+          throw new Error(
+            'OPENAI_BASE_URL is required: there is no default provider host.',
+          );
         }
         const initialSettings = this.store.settings();
         // NemoDots: incident Dots (NEMODOTS_INCIDENT_DOT_IDS) never get the
@@ -329,14 +347,20 @@ export class DotAgent extends AbstractAgent {
         const approvals = clientTools.some(
           (tool) => tool.name === connectionActionTool.name,
         );
-        const connected = connectionTools(
-          new ConnectionService(this.workspace.connections),
-          dot.id,
-          input.threadId,
-          check,
-          controller.signal,
-          approvals,
-        );
+        // TOOL_COVERAGE R10: incident Dots have no connections. The tools are
+        // not offered at all (stricter than offering and refusing); a forged
+        // call to one meets an unknown tool, and ConnectionService.call still
+        // refuses incident Dots as a second layer.
+        const connected = incident
+          ? []
+          : connectionTools(
+              new ConnectionService(this.workspace.connections),
+              dot.id,
+              input.threadId,
+              check,
+              controller.signal,
+              approvals,
+            );
         const pages = pageAccess(
           this.workspace,
           dot.spaceId,
@@ -350,7 +374,6 @@ export class DotAgent extends AbstractAgent {
             : [];
         const memories = memoryRows.map((memory) => memory.text);
         const hooks = getInterceptionHooks();
-        const baseUrl = this.config.baseUrl ?? 'https://api.openai.com/v1';
         // Observe the provider exchange only when a sink is installed.
         const telemetry =
           hooks.sink || incident ? createFetchTelemetry() : undefined;

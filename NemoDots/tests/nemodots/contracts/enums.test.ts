@@ -160,6 +160,7 @@ const inline: [string, readonly string[], string[]][] = [
       'attempt_aborted',
       'branch_preserved',
       'repair_coalesced',
+      'replan_coalesced',
       'invalidation_resolved',
       'mission_paused_closure_cap',
     ],

@@ -345,17 +345,19 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
         whileHeld: [{ do: 'commit', intent: 'I' }],
       },
     ],
+    // acceptance-v2: the replacement is never registered in this case, so the
+    // fail-closed code is stale_pending_observation (G3); v1 said stale_version.
     expected: {
       intents: {
         I: {
           status: 'blocked',
-          blockReason: 'stale_version',
+          blockReason: 'stale_pending_observation',
           authorizations: [
             ADMITTED,
             {
               stage: 'commit',
               decision: 'blocked',
-              blockReason: 'stale_version',
+              blockReason: 'stale_pending_observation',
             },
           ],
         },
@@ -804,8 +806,10 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
   },
   {
     id: 'ADM-08',
+    // acceptance-v2: the v1 step (register IA's change, then park IA's commit at
+    // after_lock_before_commit) could not be reached; IA is no longer blocked.
     title:
-      'per-resource independence: branch A blocked, branch B commits unblocked',
+      'per-resource independence: a commit parked holding its rows never delays a commit on another key',
     covers: ['gate2.8'],
     steps: [
       {
@@ -828,13 +832,6 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
       { do: 'admit', intent: 'IA' },
       { do: 'admit', intent: 'IB' },
       {
-        do: 'advance',
-        key: 'routing.inventory_source',
-        value: 'replica_stale',
-        actor: 'injector',
-        register: true,
-      },
-      {
         do: 'hooked',
         point: 'after_lock_before_commit',
         step: { do: 'commit', intent: 'IA' },
@@ -843,14 +840,15 @@ export const ADMISSION_CASES: readonly AdmissionCase[] = [
     ],
     expected: {
       intents: {
-        IA: { status: 'blocked', blockReason: 'stale_version' },
+        IA: { status: 'committed', authorizations: [ADMITTED, COMMITTED] },
         IB: { status: 'committed', authorizations: [ADMITTED, COMMITTED] },
       },
       config: {
-        'routing.inventory_source': { versionDelta: 1, value: 'replica_stale' },
+        'routing.inventory_source': { versionDelta: 1, value: 'primary' },
         'orders.write_enabled': { versionDelta: 1, value: true },
       },
-      actionRows: 1,
+      actionRows: 2,
+      resultReceipts: 2,
       nonBlockingWithinMs: 2000,
     },
   },

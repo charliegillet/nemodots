@@ -18,6 +18,8 @@ import {
   type RecoveryEvent,
   type RecoveryKind,
   type RecoveryPort,
+  type RecoveryScopeRule,
+  type RecoveryScopeTask,
   type SourceKey,
   type TaskId,
 } from '../contracts/index.js';
@@ -67,8 +69,89 @@ import { DEFAULT_REPLAN_CAP, type CoordinatorDeps } from './types.js';
 
 type RecoveryDeps = Pick<
   CoordinatorDeps,
-  'pool' | 'config' | 'events' | 'intents' | 'clock'
+  'pool' | 'config' | 'events' | 'intents' | 'clock' | 'recoveryScopeRules'
 >;
+
+// ------------------------------------------------------------ scope rule (D8)
+
+/**
+ * The default recovery scope: today's selective closure. The interface
+ * (`RecoveryScopeRule`, contracts/ports.ts) is fixed by the contract; the
+ * coordinator applies the result identically for every rule, so only the
+ * scope differs between evaluation arms.
+ */
+export const SELECTIVE_SCOPE_RULE: RecoveryScopeRule = Object.freeze({
+  name: 'selective',
+  select: (input: { closureTaskIds: TaskId[] }) => ({
+    restartTaskIds: input.closureTaskIds,
+  }),
+});
+
+export class UnknownScopeRuleError extends Error {
+  constructor(readonly ruleName: string) {
+    super(`recovery scope rule "${ruleName}" is not registered`);
+    this.name = 'UnknownScopeRuleError';
+  }
+}
+
+/** The registry the coordinator runs with: the built-in `selective` always wins. */
+export function scopeRuleRegistry(
+  registered?: Readonly<Record<string, RecoveryScopeRule>>,
+): Record<string, RecoveryScopeRule> {
+  return { ...(registered ?? {}), selective: SELECTIVE_SCOPE_RULE };
+}
+
+export function resolveScopeRule(
+  registered: Readonly<Record<string, RecoveryScopeRule>> | undefined,
+  name: string | null | undefined,
+): RecoveryScopeRule {
+  const wanted = name ?? 'selective';
+  const rule = scopeRuleRegistry(registered)[wanted];
+  if (!rule) throw new UnknownScopeRuleError(wanted);
+  return rule;
+}
+
+/** Tasks whose own attempts read the superseded or retired receipt directly. */
+async function directReaderTasks(
+  client: pg.PoolClient,
+  missionId: string,
+  receiptId: string,
+): Promise<TaskId[]> {
+  const { rows } = await client.query<{ task_id: string }>(
+    `SELECT DISTINCT n.task_id
+       FROM ledger.dependency_edges e
+       JOIN ledger.dependency_nodes n ON n.kind = 'attempt' AND n.id = e.to_id
+      WHERE e.from_kind = 'receipt' AND e.from_id = $1 AND e.to_kind = 'attempt'
+        AND e.kind = 'evidence' AND e.mission_id = $2 AND n.task_id IS NOT NULL
+      ORDER BY n.task_id`,
+    [receiptId, missionId],
+  );
+  return rows.map((row) => row.task_id as TaskId);
+}
+
+async function loadScopeTasks(
+  client: pg.PoolClient,
+  missionId: string,
+): Promise<RecoveryScopeTask[]> {
+  const { rows } = await client.query<{
+    id: string;
+    parent_id: string | null;
+    role: string;
+    status: string;
+    prerequisites: string[];
+  }>(
+    `SELECT id, parent_id, role, status, prerequisites
+       FROM coordinator.tasks WHERE mission_id = $1 ORDER BY ordinal`,
+    [missionId],
+  );
+  return rows.map((row) => ({
+    id: row.id as TaskId,
+    parentId: row.parent_id as TaskId | null,
+    prerequisites: row.prerequisites as TaskId[],
+    role: row.role as RecoveryScopeTask['role'],
+    status: row.status as RecoveryScopeTask['status'],
+  }));
+}
 
 export interface RecoveryOptions {
   /** A root task invalidation re-invokes the planner (default true; bounded by replanCap). */
@@ -79,6 +162,16 @@ export interface RecoveryOptions {
    * before anything restarts. Wired to pauseMission by createCoordinator.
    */
   pauseOnClosureCap?: (missionId: MissionId) => Promise<void>;
+  /**
+   * Fail closed on a mission whose stamped recovery scope rule this process
+   * does not know (another process created it): pause it with an explicit
+   * reason. Recovery never falls back to the selective closure. Wired to
+   * pauseMission by createCoordinator.
+   */
+  pauseOnUnknownScopeRule?: (
+    missionId: MissionId,
+    reason: string,
+  ) => Promise<void>;
 }
 
 type StoredEvent = InvalidationEvent;
@@ -226,10 +319,19 @@ export async function upsertInvalidation(
 
 // ------------------------------------------------------------ open predicate
 
-interface OpenEvaluation {
-  open: { row: InvalidationRow; why: string }[];
+export interface OpenEvaluation {
+  open: { row: InvalidationRow; why: string; kind: OpenKind }[];
   closed: InvalidationRow[];
 }
+
+/**
+ * Why an invalidation is open: recovery has not run (`unprocessed`, the sweep
+ * handles it), an affected intent is still live (`intent`, the actions package
+ * closes it), or the AFFECTED WORK itself is unrepaired (`attempt` / `task`):
+ * nothing but the coordinator can close those, so once no task is unfinished
+ * they are the ones that must be scheduled or settled as unrecoverable.
+ */
+export type OpenKind = 'unprocessed' | 'intent' | 'attempt' | 'task';
 
 /**
  * The D9 rule. The contract helper openInvalidation() treats an affected
@@ -296,15 +398,70 @@ export async function evaluateOpen(
       }))
     : [];
 
+  // An affected attempt of a task that ended failed or cancelled can never get
+  // a published repair (a replan obsoleted the task, the mission budget or the
+  // task's attempts ran out): it is closed, it does not hold the event open.
+  const deadTask = new Set(
+    attemptRows
+      .filter((row) => {
+        const status = tasks.get(row.task_id)?.status;
+        return status === 'failed' || status === 'cancelled';
+      })
+      .map((row) => row.id),
+  );
+  const liveAttempts = (
+    event: Pick<StoredEvent, 'affected' | 'perMission' | 'missionIds'>,
+    keepActions: boolean,
+  ) => {
+    const strip = (affected: StoredEvent['affected']) => ({
+      ...affected,
+      attemptIds: affected.attemptIds.filter((id) => !deadTask.has(id)),
+      actionIds: keepActions ? affected.actionIds : [],
+    });
+    return {
+      missionIds: event.missionIds,
+      affected: strip(event.affected),
+      perMission: event.perMission.map((entry) => ({
+        ...entry,
+        affected: strip(entry.affected),
+      })),
+    };
+  };
   const result: OpenEvaluation = { open: [], closed: [] };
   for (const row of rows) {
     let why: string | null = null;
-    if (row.processed_at === null) why = 'recovery has not run yet';
-    else if (
-      openInvalidation(row.event, attempts, intents, missionId as string)
-    )
-      why = 'an affected attempt or intent is still open';
-    else {
+    let kind: OpenKind = 'task';
+    if (row.processed_at === null) {
+      why = 'recovery has not run yet';
+      kind = 'unprocessed';
+    } else if (
+      openInvalidation(
+        liveAttempts(row.event, false),
+        attempts,
+        [],
+        missionId as string,
+      )
+    ) {
+      why = 'an affected attempt is still open';
+      kind = 'attempt';
+    } else if (
+      openInvalidation(
+        {
+          ...row.event,
+          affected: { ...row.event.affected, attemptIds: [] },
+          perMission: row.event.perMission.map((entry) => ({
+            ...entry,
+            affected: { ...entry.affected, attemptIds: [] },
+          })),
+        },
+        attempts,
+        intents,
+        missionId as string,
+      )
+    ) {
+      why = 'an affected intent is still open';
+      kind = 'intent';
+    } else {
       const affectedTasks = new Set<string>(row.event.affected.taskIds);
       for (const attemptId of row.event.affected.attemptIds) {
         const taskId = attemptTask.get(attemptId);
@@ -326,7 +483,7 @@ export async function evaluateOpen(
         }
       }
     }
-    if (why) result.open.push({ row, why });
+    if (why) result.open.push({ row, why, kind });
     else result.closed.push(row);
   }
   return result;
@@ -364,6 +521,118 @@ export async function resolveClosedInvalidations(
   return resolved;
 }
 
+/**
+ * Liveness (never wedge): a mission whose tasks are all terminal but whose
+ * invalidations are still open has nothing left that could close them.
+ *   - an affected task that SUCCEEDED but holds no usable, newer output gets a
+ *     repair now while it has attempts left (`repair_scheduled`);
+ *   - otherwise the invalidation is settled as unrecoverable with the explicit
+ *     reason `repair_not_schedulable` (`invalidation_resolved`) and the caller
+ *     fails the mission with that reason.
+ * Returns what it did; only called when no task is unfinished.
+ */
+export async function settleStuckInvalidations(
+  tx: TxCtx,
+  deps: Pick<RecoveryDeps, 'intents'>,
+  missionId: MissionId | string,
+  stuck: readonly { row: InvalidationRow; why: string }[],
+): Promise<{ scheduled: number; unrecoverable: string[] }> {
+  let scheduled = 0;
+  const unrecoverable: string[] = [];
+  for (const { row, why } of stuck) {
+    const affectedTasks = new Set<string>(row.event.affected.taskIds);
+    const attemptRows = (
+      await tx.client.query<{ id: string; task_id: string }>(
+        `SELECT id, task_id FROM coordinator.task_attempts
+          WHERE mission_id = $1 AND id = ANY ($2::uuid[])`,
+        [missionId, row.event.affected.attemptIds],
+      )
+    ).rows;
+    for (const attempt of attemptRows) affectedTasks.add(attempt.task_id);
+    const tasks = await lockTasks(tx.client, [...affectedTasks]);
+    for (const task of tasks) {
+      if (
+        task.status !== 'succeeded' ||
+        task.attempt_count >= task.max_attempts
+      )
+        continue;
+      const latest = (
+        await tx.client.query<{ id: string }>(
+          `SELECT id FROM coordinator.task_attempts WHERE task_id = $1 ORDER BY n DESC LIMIT 1`,
+          [task.id],
+        )
+      ).rows[0];
+      if (!latest) continue;
+      const spec: TaskRepair = {
+        kind: task.role === 'planner' ? 'replan' : 'repair',
+        repairOf: { attemptId: latest.id, invalidationEventId: row.event_id },
+        reason: `unrepaired after invalidation ${row.event_id.slice(0, 16)}`,
+      };
+      await requeueTask(tx, task, { reason: spec.reason, repair: spec });
+      await recordRecovery(tx, {
+        invalidationEventId: row.event_id,
+        missionId: missionId as string,
+        kind: task.role === 'planner' ? 'replan_scheduled' : 'repair_scheduled',
+        taskId: task.id,
+        attemptId: latest.id,
+        detail:
+          'repair scheduled by the liveness check: every task was terminal',
+      });
+      scheduled += 1;
+    }
+    if (scheduled > 0) continue;
+    const { rows } = await tx.client.query<{ resolved_at: Date }>(
+      `UPDATE coordinator.invalidations SET resolved_at = now()
+        WHERE event_id = $1 AND mission_id = $2 AND resolved_at IS NULL
+        RETURNING resolved_at`,
+      [row.event_id, missionId],
+    );
+    if (rows.length === 0) continue;
+    unrecoverable.push(row.event_id);
+    tx.events.add(missionId, {
+      kind: 'invalidation.resolved',
+      invalidationEventId: row.event_id as InvalidationEventId,
+      resolvedAt: iso(rows[0].resolved_at),
+    });
+    await recordRecovery(tx, {
+      invalidationEventId: row.event_id,
+      missionId: missionId as string,
+      kind: 'invalidation_resolved',
+      detail: `repair_not_schedulable: ${why}`,
+    });
+  }
+  return { scheduled, unrecoverable };
+}
+
+/**
+ * A repair held behind a postcondition gate whose gate task is gone (cancelled
+ * by a replan, failed, missing) would stay `invalidated` forever. Releases
+ * every such hold. Safe to call at any time; returns how many were released.
+ */
+export async function releaseOrphanedHolds(
+  tx: TxCtx,
+  missionId: MissionId | string,
+): Promise<number> {
+  const gates = (
+    await tx.client.query<{ gate_task_id: string }>(
+      `SELECT DISTINCT i.gate_task_id
+         FROM coordinator.invalidations i
+         JOIN coordinator.tasks held ON held.mission_id = i.mission_id
+              AND held.status = 'invalidated' AND held.repair IS NOT NULL
+              AND (held.repair -> 'repairOf' ->> 'invalidationEventId') = i.event_id
+        WHERE i.mission_id = $1 AND i.gate_task_id IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM coordinator.tasks gate
+                           WHERE gate.id = i.gate_task_id
+                             AND gate.status NOT IN ('succeeded', 'failed', 'cancelled'))`,
+      [missionId],
+    )
+  ).rows;
+  let released = 0;
+  for (const { gate_task_id } of gates)
+    released += await releaseGate(tx, missionId, gate_task_id);
+  return released;
+}
+
 // --------------------------------------------------------- replan, postcondition
 
 /** replan_scheduled facts of the mission, the bound for root-invalidation and request_replan. */
@@ -387,6 +656,12 @@ export async function scheduleReplan(
   mission: Pick<MissionRow, 'id'>,
   invalidationId: string,
   reason: string,
+  /**
+   * A postcondition task that holds this invalidation's repairs: the replan is
+   * held behind it too (`replan_coalesced`) and released with the repairs
+   * (CONTRACTS 1, revision 3 "replan coalescing").
+   */
+  gateTaskId: string | null = null,
 ): Promise<boolean> {
   const cap = deps.config.replanCap ?? DEFAULT_REPLAN_CAP;
   const planner = (
@@ -410,17 +685,63 @@ export async function scheduleReplan(
     repairOf: { attemptId: latest.id, invalidationEventId: invalidationId },
     reason,
   };
-  await requeueTask(tx, planner, { reason, repair });
+  await requeueTask(tx, planner, {
+    reason,
+    repair,
+    holdInvalidated: gateTaskId !== null,
+  });
   await recordRecovery(tx, {
     invalidationEventId: invalidationId,
     missionId: mission.id,
-    kind: 'replan_scheduled',
+    kind: gateTaskId !== null ? 'replan_coalesced' : 'replan_scheduled',
     taskId: planner.id,
     attemptId: latest.id,
-    detail: reason,
+    detail:
+      gateTaskId !== null
+        ? `replan held behind postcondition task ${gateTaskId}`
+        : reason,
   });
   await enqueueMissionEvaluate(tx.client, mission.id);
   return true;
+}
+
+/**
+ * A second event wants a replan while the planner is already held, runnable or
+ * running one: the replan is MERGED into the pending one. Recorded explicitly
+ * (replan_coalesced) so it is never dropped silently. A planner that is
+ * missing or settled records nothing: no replan is pending.
+ */
+async function recordReplanMerge(
+  tx: TxCtx,
+  mission: Pick<MissionRow, 'id'>,
+  invalidationId: string,
+) {
+  const planner = (
+    await tx.client.query<TaskRow>(
+      `SELECT * FROM coordinator.tasks
+        WHERE mission_id = $1 AND role = 'planner' ORDER BY ordinal LIMIT 1`,
+      [mission.id],
+    )
+  ).rows[0];
+  // A replan is pending while the planner is anything but settled: held,
+  // runnable, or RUNNING one (claiming a replan clears its repair spec, so the
+  // spec cannot be the test). No new replan is scheduled; the event is merged.
+  if (!planner || ['succeeded', 'failed', 'cancelled'].includes(planner.status))
+    return;
+  const latest = (
+    await tx.client.query<{ id: string }>(
+      `SELECT id FROM coordinator.task_attempts WHERE task_id = $1 ORDER BY n DESC LIMIT 1`,
+      [planner.id],
+    )
+  ).rows[0];
+  await recordRecovery(tx, {
+    invalidationEventId: invalidationId,
+    missionId: mission.id,
+    kind: 'replan_coalesced',
+    taskId: planner.id,
+    attemptId: latest?.id ?? null,
+    detail: `merged into the replan already pending (planner ${planner.status})`,
+  });
 }
 
 /**
@@ -488,6 +809,28 @@ export async function ensurePostconditionTask(
 }
 
 /**
+ * Task-row lock order of every recovery writer, after the mission and attempt
+ * rows: the open postcondition task (the gate), then the planner, then the
+ * remaining tasks by id. A publication that completes the gate already holds
+ * the gate when it calls releaseGate, so gate -> planner -> others is the one
+ * order all of them follow.
+ */
+async function lockGateAndPlanner(client: pg.PoolClient, missionId: string) {
+  await client.query(
+    `SELECT id FROM coordinator.tasks
+      WHERE mission_id = $1 AND role = 'postcondition'
+        AND status NOT IN ('succeeded', 'failed', 'cancelled')
+      ORDER BY ordinal FOR UPDATE`,
+    [missionId],
+  );
+  await client.query(
+    `SELECT id FROM coordinator.tasks
+      WHERE mission_id = $1 AND role = 'planner' ORDER BY ordinal FOR UPDATE`,
+    [missionId],
+  );
+}
+
+/**
  * Releases repairs that were coalesced behind a postcondition task once that
  * task is terminal: invalidated -> repairing -> runnable.
  */
@@ -496,6 +839,7 @@ export async function releaseGate(
   missionId: MissionId | string,
   gateTaskId: string,
 ): Promise<number> {
+  await lockGateAndPlanner(tx.client, missionId as string);
   const held = (
     await tx.client.query<TaskRow>(
       `SELECT t.* FROM coordinator.tasks t
@@ -508,14 +852,17 @@ export async function releaseGate(
     )
   ).rows;
   for (const task of held) {
+    const replan = task.repair!.kind === 'replan';
     await requeueTask(tx, task, { reason: 'postcondition_verified' });
     await recordRecovery(tx, {
       invalidationEventId: task.repair!.repairOf!.invalidationEventId,
       missionId: missionId as string,
-      kind: 'repair_scheduled',
+      kind: replan ? 'replan_scheduled' : 'repair_scheduled',
       taskId: task.id,
       attemptId: task.repair!.repairOf!.attemptId,
-      detail: 'repair released after postcondition verification',
+      detail: replan
+        ? 'replan released after postcondition verification'
+        : 'repair released after postcondition verification',
     });
   }
   if (held.length > 0) await enqueueMissionEvaluate(tx.client, missionId);
@@ -533,11 +880,11 @@ const ACTIVE_FOR_REPAIR = new Set([
 /** The recovery transaction body for one mission's copy of an event. */
 export async function processInvalidation(
   tx: TxCtx,
-  deps: Pick<RecoveryDeps, 'config' | 'intents'>,
+  deps: Pick<RecoveryDeps, 'config' | 'intents' | 'recoveryScopeRules'>,
   options: RecoveryOptions,
   mission: MissionRow,
   row: InvalidationRow,
-): Promise<void> {
+): Promise<'processed' | 'unknown_rule'> {
   const missionId = mission.id as MissionId;
   const event = row.event as StoredEvent;
   const eventId = row.event_id;
@@ -551,7 +898,22 @@ export async function processInvalidation(
         WHERE event_id = $1 AND mission_id = $2`,
       [eventId, missionId],
     );
-    return;
+    return 'processed';
+  }
+
+  // The mission's stamped rule (read from the row this transaction already
+  // holds; no lock upgrade) is resolved through THIS process's registry. An
+  // unregistered name writes nothing and leaves the event unprocessed: the
+  // caller pauses the mission with an explicit reason. Never a fallback.
+  let scopeRule: RecoveryScopeRule;
+  try {
+    scopeRule = resolveScopeRule(
+      deps.recoveryScopeRules,
+      mission.recovery_scope_rule,
+    );
+  } catch (error) {
+    if (error instanceof UnknownScopeRuleError) return 'unknown_rule';
+    throw error;
   }
 
   if (event.closure.capped || event.reason === 'closure_cap_exceeded')
@@ -564,12 +926,34 @@ export async function processInvalidation(
 
   // 1. Status first: abort affected attempts that are still running.
   const listed = await lockAttempts(tx.client, affected.attemptIds, missionId);
-  const taskIds = [
+  const defaultTaskIds = [
     ...new Set([
       ...affected.taskIds,
       ...listed.map((attempt) => attempt.task_id),
     ]),
   ];
+  // The scope rule decides WHICH tasks are restarted; everything below is the
+  // same code for every rule. The built-in selective rule is the closure above
+  // and costs nothing extra; any other rule is chosen by the mission's
+  // recovery_scope_rule (set at creation by the server, never by a client).
+  let taskIds = defaultTaskIds;
+  if (scopeRule !== SELECTIVE_SCOPE_RULE) {
+    const tasks = await loadScopeTasks(tx.client, missionId);
+    const known = new Set<string>(tasks.map((task) => task.id));
+    const decision = scopeRule.select({
+      missionId,
+      closureTaskIds: defaultTaskIds as TaskId[],
+      directReaderTaskIds: await directReaderTasks(
+        tx.client,
+        missionId,
+        event.oldReceiptId,
+      ),
+      tasks,
+    });
+    taskIds = [...new Set<string>(decision.restartTaskIds)].filter((id) =>
+      known.has(id),
+    );
+  }
   const extra = taskIds.length
     ? (
         await tx.client.query<AttemptRow>(
@@ -613,6 +997,7 @@ export async function processInvalidation(
   );
 
   // 3. Repairs.
+  await lockGateAndPlanner(tx.client, missionId);
   const tasks = await lockTasks(tx.client, taskIds);
   const latest = new Map<string, string>(
     taskIds.length
@@ -671,15 +1056,32 @@ export async function processInvalidation(
       repairOf: { attemptId, invalidationEventId: eventId },
       reason: `evidence ${event.sourceKey} changed (${event.reason})`,
     };
+    const planner = task.role === 'planner';
+    // A task held behind an open gate stays held whatever later event reaches
+    // it (invalidated WITH a repair spec: the closure alone marks tasks
+    // invalidated without one). The later event merges into the pending
+    // repair / replan and is recorded; it never releases the hold, and every
+    // planner run is recorded as replan_* so it counts toward the cap.
+    if (task.status === 'invalidated' && task.repair) {
+      await recordRecovery(tx, {
+        invalidationEventId: eventId,
+        missionId,
+        kind: planner ? 'replan_coalesced' : 'repair_coalesced',
+        taskId: task.id,
+        attemptId,
+        detail: `merged into the ${planner ? 'replan' : 'repair'} held behind a postcondition task`,
+      });
+      continue;
+    }
     if (task.status === 'runnable' || task.status === 'repairing') {
       if (task.repair) {
         await recordRecovery(tx, {
           invalidationEventId: eventId,
           missionId,
-          kind: 'repair_coalesced',
+          kind: planner ? 'replan_coalesced' : 'repair_coalesced',
           taskId: task.id,
           attemptId,
-          detail: 'a repair attempt is already scheduled for this task',
+          detail: `a ${planner ? 'replan' : 'repair'} attempt is already scheduled for this task`,
         });
         continue;
       }
@@ -699,7 +1101,13 @@ export async function processInvalidation(
     await recordRecovery(tx, {
       invalidationEventId: eventId,
       missionId,
-      kind: held ? 'repair_coalesced' : 'repair_scheduled',
+      kind: held
+        ? planner
+          ? 'replan_coalesced'
+          : 'repair_coalesced'
+        : planner
+          ? 'replan_scheduled'
+          : 'repair_scheduled',
       taskId: task.id,
       attemptId,
       detail: held
@@ -727,13 +1135,17 @@ export async function processInvalidation(
         mission,
         eventId,
         `root task invalidated by ${event.sourceKey}`,
+        gate?.id ?? null,
       )
     )
       scheduledAny = true;
+    else await recordReplanMerge(tx, mission, eventId);
   }
 
   // 5. Branches that are not affected keep running untouched.
-  for (const taskId of entry.preserved.taskIds)
+  for (const taskId of scopeRule === SELECTIVE_SCOPE_RULE
+    ? entry.preserved.taskIds
+    : entry.preserved.taskIds.filter((id) => !taskIds.includes(id)))
     await recordRecovery(tx, {
       invalidationEventId: eventId,
       missionId,
@@ -752,6 +1164,7 @@ export async function processInvalidation(
   );
   if (scheduledAny) await enqueueMissionEvaluate(tx.client, missionId);
   await resolveClosedInvalidations(tx, deps, missionId);
+  return 'processed';
 }
 
 async function recordClosedIntents(
@@ -883,21 +1296,43 @@ export function createRecovery(
   }
 
   async function processOne(missionId: string, eventId: string) {
-    await withTransaction(deps.pool, async (client) => {
-      const tx = txCtx(client);
-      const mission = await lockMissionShared(client, missionId);
-      if (!mission) return;
-      const row = (
-        await client.query<InvalidationRow>(
-          `SELECT * FROM coordinator.invalidations
+    const unknownRule = await withTransaction<string | null>(
+      deps.pool,
+      async (client) => {
+        const tx = txCtx(client);
+        const mission = await lockMissionShared(client, missionId);
+        if (!mission) return null;
+        const row = (
+          await client.query<InvalidationRow>(
+            `SELECT * FROM coordinator.invalidations
             WHERE event_id = $1 AND mission_id = $2 FOR UPDATE`,
-          [eventId, missionId],
+            [eventId, missionId],
+          )
+        ).rows[0];
+        if (!row || row.processed_at !== null) return null;
+        const outcome = await processInvalidation(
+          tx,
+          deps,
+          options,
+          mission,
+          row,
+        );
+        await tx.events.flush(client);
+        return outcome === 'unknown_rule'
+          ? (mission.recovery_scope_rule ?? 'selective')
+          : null;
+      },
+    );
+    // Fail closed, outside the transaction: pause with an explicit reason.
+    if (unknownRule && options.pauseOnUnknownScopeRule)
+      await options
+        .pauseOnUnknownScopeRule(
+          missionId as MissionId,
+          `recovery_scope_rule_unregistered: ${unknownRule}`,
         )
-      ).rows[0];
-      if (!row || row.processed_at !== null) return;
-      await processInvalidation(tx, deps, options, mission, row);
-      await tx.events.flush(client);
-    });
+        .catch((error) => {
+          if (!(error instanceof MissionStateError)) throw error;
+        });
   }
 
   async function onInvalidation(event: InvalidationEvent) {

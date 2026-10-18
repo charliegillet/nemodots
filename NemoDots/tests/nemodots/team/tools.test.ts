@@ -1,14 +1,19 @@
 // Tool policy: capability checks, scope checks, identity and provenance of
 // propose_action, runbook catalogue. Scripted model policies (labelled doubles).
 import { describe, expect, it } from 'vitest';
-import { digest } from '../../../src/server/nemodots/contracts/index.js';
+import {
+  allowedCapabilities,
+  digest,
+} from '../../../src/server/nemodots/contracts/index.js';
 import { precheckDelegation } from '../../../src/server/nemodots/team/index.js';
 import {
   calls,
   claimed,
   digestToUuid,
+  noDefect,
   rig,
   runHandler,
+  StubObserver,
   text,
   toolResultsOf,
   uuid,
@@ -202,7 +207,7 @@ describe('scope: identity and citations never come from the model', () => {
       }),
       text('done'),
     ]);
-    await runHandler(r, claimed('investigator'));
+    await runHandler(r, claimed('cache_specialist'));
     const results = toolResultsOf(r.inference.requests.at(-1)!);
     expect(results.map((x) => x.body.error)).toEqual([
       'invalid_arguments',
@@ -230,7 +235,7 @@ describe('scope: identity and citations never come from the model', () => {
       }),
       text('done'),
     ]);
-    await runHandler(r, claimed('investigator'));
+    await runHandler(r, claimed('cache_specialist'));
     const results = toolResultsOf(r.inference.requests.at(-1)!);
     expect(results[1].body).toMatchObject({
       ok: false,
@@ -269,7 +274,7 @@ describe('scope: identity and citations never come from the model', () => {
       }),
       text('done'),
     ];
-    await runHandler(r, claimed('investigator'));
+    await runHandler(r, claimed('cache_specialist'));
     expect(r.coordinator.findings).toHaveLength(1);
     expect(r.coordinator.findings[0]).toMatchObject({
       supportingReceiptIds: [receiptId],
@@ -287,7 +292,7 @@ describe('scope: identity and citations never come from the model', () => {
       calls({ id: 's', name: 'get_task_status', args: { taskId: uuid() } }),
       text('done'),
     ]);
-    await runHandler(r, claimed('investigator'));
+    await runHandler(r, claimed('cache_specialist'));
     expect(toolResultsOf(r.inference.requests.at(-1)!)[0].body).toMatchObject({
       ok: false,
       error: 'task_not_found',
@@ -405,6 +410,7 @@ describe('propose_action (specialists)', () => {
         args: { reason: 'plan no longer fits' },
       }),
       text('done'),
+      noDefect(),
     ]);
     await runHandler(ok, claimed('investigator'));
     expect(ok.coordinator.replans).toEqual(['plan no longer fits']);
@@ -418,7 +424,7 @@ describe('runbooks (I13)', () => {
       calls({ id: 'r', name: 'read_runbook', args: { id: 'acceptance' } }),
       text('done'),
     ]);
-    await runHandler(r, claimed('investigator'));
+    await runHandler(r, claimed('cache_specialist'));
     const results = toolResultsOf(r.inference.requests.at(-1)!);
     expect(
       (results[0].body.runbooks as { id: string }[]).map((x) => x.id),
@@ -438,7 +444,7 @@ describe('runbooks (I13)', () => {
       calls({ id: 'r', name: 'read_runbook', args: { id } }),
       text('done'),
     ]);
-    await runHandler(r, claimed('investigator'));
+    await runHandler(r, claimed('cache_specialist'));
     const body = toolResultsOf(r.inference.requests.at(-1)!)[0].body;
     expect(body.ok).toBe(false);
     expect(['invalid_arguments', 'unknown_runbook']).toContain(body.error);
@@ -449,9 +455,181 @@ describe('runbooks (I13)', () => {
       calls({ id: 'u', name: 'run_sql', args: { q: 'select 1' } }),
       text('done'),
     ]);
-    await runHandler(r, claimed('investigator'));
+    await runHandler(r, claimed('cache_specialist'));
     expect(toolResultsOf(r.inference.requests.at(-1)!)[0].body.error).toBe(
       'unknown_tool',
     );
+  });
+});
+
+describe('rev3 D5: the investigator → specialist → propose path', () => {
+  const investigatorCaps = [
+    'observe',
+    'delegate',
+    'publish_finding',
+    'request_replan',
+  ] as const;
+
+  it('capability grants: only a specialist delegated by a parent holding delegate gets propose_*', () => {
+    const propose = ['propose_config_change', 'propose_cache_flush'];
+    const grants = (
+      role: Parameters<typeof allowedCapabilities>[0],
+      parent: Parameters<typeof allowedCapabilities>[1],
+    ) => allowedCapabilities(role, parent).filter((c) => propose.includes(c));
+    expect(grants('cache_specialist', [...investigatorCaps])).toEqual(propose);
+    expect(grants('database_specialist', [...investigatorCaps])).toEqual([
+      'propose_config_change',
+    ]);
+    // a parent without delegate grants nothing
+    expect(grants('cache_specialist', ['observe', 'publish_finding'])).toEqual(
+      [],
+    );
+    // verifiers and investigators never get propose caps, whoever the parent is
+    expect(grants('verifier', [...investigatorCaps])).toEqual([]);
+    expect(grants('investigator', [...investigatorCaps])).toEqual([]);
+    // an investigator cannot propose itself
+    expect(allowedCapabilities('investigator', null)).not.toContain(
+      'propose_config_change',
+    );
+  });
+
+  it('a specialist delegated by an investigator proposes through the action port; the investigator itself is refused', async () => {
+    const receiptId = digestToUuid(`${SOURCE}:1:${JSON.stringify(config)}`);
+    const delegated = configRig([
+      calls({ id: 'o', name: 'observe_source', args: { sourceKey: SOURCE } }),
+      propose({ supportingReceiptIds: [receiptId] }, 'p'),
+      text('proposed'),
+    ]);
+    // capabilities exactly as the coordinator computes them for the child
+    const childCaps = allowedCapabilities('cache_specialist', [
+      ...([
+        'observe',
+        'delegate',
+        'publish_finding',
+        'request_replan',
+      ] as const),
+    ]);
+    const outcome = await runHandler(
+      delegated,
+      claimed('cache_specialist', { capabilities: childCaps }),
+    );
+    expect(outcome.type).toBe('output');
+    expect(delegated.actions.proposals).toHaveLength(1);
+    expect(delegated.actions.proposals[0].ctx).toMatchObject({
+      role: 'cache_specialist',
+      toolCallId: 'p',
+    });
+
+    const parent = configRig([
+      calls({ id: 'o', name: 'observe_source', args: { sourceKey: SOURCE } }),
+      propose({ supportingReceiptIds: [receiptId] }, 'p'),
+      text('cannot'),
+      noDefect(),
+    ]);
+    await runHandler(parent, claimed('investigator'));
+    expect(parent.actions.proposals).toHaveLength(0);
+  });
+});
+
+describe('name-keyed lookups are own-property only (TP-21)', () => {
+  it.each([
+    'constructor',
+    'toString',
+    'hasOwnProperty',
+    '__proto__',
+    'valueOf',
+    'isPrototypeOf',
+  ])(
+    'the tool name %s is answered with unknown_tool and the attempt continues',
+    async (name) => {
+      const r = configRig([calls({ id: 'x', name, args: {} }), text('done')]);
+      const outcome = await runHandler(r, claimed('cache_specialist'));
+      expect(outcome.type).toBe('output');
+      expect(toolResultsOf(r.inference.requests.at(-1)!)[0].body).toMatchObject(
+        {
+          ok: false,
+          error: 'unknown_tool',
+        },
+      );
+    },
+  );
+
+  it('read_runbook and get_task_status with prototype-key ids are refused, not crashed on', async () => {
+    const r = configRig([
+      calls({ id: 'a', name: 'read_runbook', args: { id: 'constructor' } }),
+      calls({
+        id: 'b',
+        name: 'get_task_status',
+        args: { taskId: '__proto__' },
+      }),
+      text('done'),
+    ]);
+    await runHandler(r, claimed('cache_specialist'));
+    const results = toolResultsOf(r.inference.requests.at(-1)!);
+    expect(results[0].body.ok).toBe(false);
+    expect(results[1].body.ok).toBe(false);
+  });
+});
+
+describe('observe_source on a family with no reader (TP-68)', () => {
+  const unsupported = (family: string) =>
+    Object.assign(new Error(`source ${family} is not served`), {
+      name: 'UnsupportedSourceError',
+    });
+
+  it.each([
+    ['opendots.page/abc', 'opendots.page/{pageId}'],
+    ['opendots.memory/m1', 'opendots.memory/{memoryId}'],
+    ['runbook/acceptance', 'runbook/{id}'],
+    ['checkout.acceptance', 'checkout.acceptance'],
+  ])(
+    '%s returns source_unavailable naming the family and the attempt continues',
+    async (sourceKey, family) => {
+      const r = configRig([
+        calls({ id: 'u', name: 'observe_source', args: { sourceKey } }),
+        calls({
+          id: 'ok',
+          name: 'observe_source',
+          args: { sourceKey: 'checkout.health' },
+        }),
+        text('carried on'),
+      ]);
+      r.observer.observe = async (_context, input) => {
+        if (input.sourceKey === sourceKey) throw unsupported(sourceKey);
+        return StubObserver.prototype.observe.call(r.observer, _context, input);
+      };
+      const outcome = await runHandler(r, claimed('cache_specialist'));
+      expect(outcome).toMatchObject({
+        type: 'output',
+        output: { content: { summary: 'carried on' } },
+      });
+      const results = toolResultsOf(r.inference.requests.at(-1)!);
+      expect(results[0].body).toMatchObject({
+        ok: false,
+        error: 'source_unavailable',
+        family,
+      });
+      expect(String(results[0].body.message)).toContain(family);
+      expect(results[1].body.ok).toBe(true);
+      // nothing was added to the read set for the refused key
+      expect(r.coordinator.readSets).toHaveLength(1);
+    },
+  );
+
+  it('other observer failures still propagate to the host (fence, support, database)', async () => {
+    const r = configRig([
+      calls({
+        id: 'u',
+        name: 'observe_source',
+        args: { sourceKey: 'checkout.health' },
+      }),
+      text('never'),
+    ]);
+    r.observer.observe = async () => {
+      throw Object.assign(new Error('boom'), { name: 'FenceError' });
+    };
+    await expect(
+      runHandler(r, claimed('cache_specialist')),
+    ).rejects.toMatchObject({ name: 'FenceError' });
   });
 });

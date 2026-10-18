@@ -411,6 +411,17 @@ export interface World {
   // lazily resolved production entries
   watcher(): Promise<Rec>;
   watcherPoll(): Promise<void>;
+  /** Records receipts as read by any attempt (ledger evidence edges only, no fence). */
+  recordEvidence(
+    at: { missionId: string; taskId: string; attemptId: string },
+    labels: string[],
+  ): Promise<void>;
+  /**
+   * Hands the newest ledger invalidation event of `sourceKey`, rebuilt from its
+   * row, to the real RecoveryPort.onInvalidation, as the watcher does after a
+   * registration. For observed sources, which watcherPoll does not poll here.
+   */
+  deliverLatestInvalidation(sourceKey: string): Promise<void>;
   control(): Promise<Rec>;
 }
 
@@ -452,9 +463,47 @@ async function requireEntries(need: readonly Need[]) {
     );
 }
 
+/**
+ * Strictness (lead ruling 2026-10-18): at most one replan_scheduled per
+ * invalidation event per mission, however many root tasks the event hit. One
+ * replan per root task would be a planning storm that defeats selective repair.
+ * withWorld runs it after every passing scenario; tests may call it earlier.
+ */
+export async function expectNoReplanStorm(w: World) {
+  // One replan per event per mission: at most one held (replan_coalesced) and
+  // at most one executed (replan_scheduled); when both exist the scheduled one
+  // is the release of the held one and comes after it.
+  const storms = await w.admin.query(
+    `SELECT mission_id, invalidation_event_id,
+            count(*) FILTER (WHERE kind = 'replan_scheduled')::int AS scheduled,
+            count(*) FILTER (WHERE kind = 'replan_coalesced')::int AS coalesced,
+            min(created_at) FILTER (WHERE kind = 'replan_coalesced') AS held_at,
+            min(created_at) FILTER (WHERE kind = 'replan_scheduled') AS run_at
+       FROM coordinator.recovery_events
+      WHERE kind IN ('replan_scheduled', 'replan_coalesced')
+      GROUP BY mission_id, invalidation_event_id`,
+  );
+  const bad = storms.rows.filter(
+    (r) =>
+      r.scheduled > 1 ||
+      r.coalesced > 1 ||
+      (r.coalesced === 1 &&
+        r.scheduled === 1 &&
+        new Date(r.run_at) < new Date(r.held_at)),
+  );
+  expect(
+    bad,
+    'at most one replan (held, then released) per invalidation event per mission',
+  ).toEqual([]);
+}
+
 export async function withWorld<T>(
   fn: (w: World) => Promise<T>,
-  opts: { need?: Need[] } = {},
+  /**
+   * `planner: false` creates missions WITHOUT a succeeded planner, for the
+   * no-replan path (coordinator/recovery.ts scheduleReplan returns false).
+   */
+  opts: { need?: Need[]; planner?: boolean } = {},
 ): Promise<T> {
   const need = opts.need ?? ['actions', 'hooks', 'cacheKey'];
   await requireEntries(need);
@@ -503,10 +552,13 @@ export async function withWorld<T>(
         fault,
         watch,
         need,
+        planner: opts.planner ?? true,
         mkPool,
         cleanup,
       });
-      return await fn(world);
+      const result = await fn(world);
+      await expectNoReplanStorm(world);
+      return result;
     } finally {
       await world?.clearHooks().catch(() => {});
       for (const c of cleanup.reverse())
@@ -523,6 +575,7 @@ async function build(c: {
   fault: RedisFault;
   watch: RedisWatch;
   need: readonly Need[];
+  planner: boolean;
   mkPool: (url: string, name: string, max?: number) => pg.Pool;
   cleanup: (() => Promise<void> | void)[];
 }): Promise<World> {
@@ -586,6 +639,29 @@ async function build(c: {
           workerModel: 'fx',
         }),
       ],
+    );
+    // Every real mission has a planner whose plan succeeded; recovery only
+    // replans when one exists (coordinator/recovery.ts scheduleReplan). A
+    // harness without it hid the root-invalidation replan path (lead ruling
+    // 2026-10-18). The planner is succeeded and its mission under replanCap
+    // (no replan recorded yet), so "exactly one replan" can hold.
+    if (!c.planner) return id;
+    const plannerTask = randomUUID();
+    await admin.query(
+      `INSERT INTO coordinator.tasks
+         (id, mission_id, parent_id, depth, ordinal, title, question, role, capabilities,
+          status, generation, budget)
+       SELECT $1, m.id, NULL, 0, 0, 'g2 plan', 'g2 acceptance goal', 'planner', '{}'::text[],
+              'succeeded', m.generation, $3::jsonb
+         FROM coordinator.missions m WHERE m.id = $2`,
+      [plannerTask, id, JSON.stringify(TASK_BUDGET)],
+    );
+    await admin.query(
+      `INSERT INTO coordinator.task_attempts
+         (id, task_id, mission_id, n, kind, status, generation, lease_owner,
+          fencing_token, lease_expires_at, lease_renewed_at)
+       VALUES ($1, $2, $3, 1, 'initial', 'published', 0, 'acc2-planner', 1, now(), now())`,
+      [randomUUID(), plannerTask, id],
     );
     return id;
   };
@@ -1440,6 +1516,43 @@ async function build(c: {
         ledger: LEDGER_EVENTS.ledger,
         log: (entry: Rec) => watcherLog.push(entry),
       }));
+    },
+    async recordEvidence(at, labels) {
+      await tx(app, (cl) =>
+        recordReadSet(cl, {
+          missionId: at.missionId,
+          taskId: at.taskId,
+          attemptId: at.attemptId,
+          receiptIds: labels.map((l) => receiptId(l)),
+        }),
+      );
+    },
+    async deliverLatestInvalidation(sourceKey) {
+      const row = (
+        await admin.query(
+          `SELECT * FROM ledger.invalidation_events WHERE source_key=$1
+            ORDER BY created_at DESC, id DESC LIMIT 1`,
+          [sourceKey],
+        )
+      ).rows[0];
+      if (!row) throw new Error(`no invalidation event for ${sourceKey}`);
+      await createRecovery(deps).onInvalidation({
+        id: row.id,
+        missionIds: row.mission_ids,
+        sourceKey: row.source_key,
+        oldReceiptId: row.old_receipt_id,
+        newReceiptId: row.new_receipt_id,
+        reason: row.reason,
+        selfWrite: row.self_write,
+        graphVersion: Number(row.graph_version),
+        affected: row.affected,
+        perMission: row.per_mission,
+        closure: row.closure,
+        resolvedAt: row.resolved_at
+          ? new Date(row.resolved_at).toISOString()
+          : null,
+        createdAt: new Date(row.created_at).toISOString(),
+      } as never);
     },
     async watcherPoll() {
       // Watcher.pass: one pass regardless of leadership, over the controlled

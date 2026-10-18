@@ -9,6 +9,7 @@ export default defineConfig({
       // W5.2/W5.3 adversarial suites run against the same stack.
       'tests/nemodots/adversarial/**/*.test.ts',
     ],
+    setupFiles: ['tests/nemodots/helpers/pg-error-guard.ts'],
     testTimeout: 30_000,
     hookTimeout: 30_000,
   },

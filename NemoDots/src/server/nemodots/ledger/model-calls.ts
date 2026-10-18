@@ -13,6 +13,7 @@
 // on the provider after the author's lease was lost keeps its cost accounting
 // (inference_attempts rows with outcome 'orphaned_fence') and nothing else:
 // no record, no snapshot, no edges, no output reuse.
+import { isMutated } from '../config/mutation.js';
 import {
   ContextSnapshotSchema,
   InferenceAttemptSchema,
@@ -226,7 +227,10 @@ function modelCallEdges(
     edges.push({ kind: 'evidence', from: receipt, to: attempt });
   }
   // Inheritance: outputs/handoffs injected into the context.
-  for (const artifact of snapshot.injected.inheritedArtifacts) {
+  // MUTATION drop_inherited_edges: the inheritance edges are never written.
+  for (const artifact of isMutated('drop_inherited_edges')
+    ? []
+    : snapshot.injected.inheritedArtifacts) {
     if (artifact.kind !== 'task_output' && artifact.kind !== 'handoff')
       continue;
     if (!UUID.test(artifact.id)) continue;

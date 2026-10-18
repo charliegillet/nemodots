@@ -8,6 +8,7 @@
 //   after_lock_before_commit     commit: every predicate passed and the
 //                                mutation is written, before COMMIT
 //   after_commit_before_dispatch committed in PostgreSQL, effect not started
+//   after_claim_before_effect    dispatch claimed, Redis not touched yet
 //   after_effect_before_record   Redis effect done, outcome not yet recorded
 //
 // A hook never runs inside a context that holds a transaction open across a
@@ -21,6 +22,7 @@ export const HOOK_NAMES = Object.freeze([
   'before_lock',
   'after_lock_before_commit',
   'after_commit_before_dispatch',
+  'after_claim_before_effect',
   'after_effect_before_record',
 ] as const);
 export type HookName = (typeof HOOK_NAMES)[number];
