@@ -310,10 +310,5 @@ export async function sweepSettlements(
       alreadySettled: false,
     });
   }
-  return applySettlements(
-    deps.recovery,
-    settlements,
-    deps.emit,
-    deps.check,
-  );
+  return applySettlements(deps.recovery, settlements, deps.emit, deps.check);
 }

@@ -107,10 +107,12 @@ describe('the watcher with the real actions package (wiring: actions.settleFromH
         // the coordinator was told by settleFromHistory, exactly once
         expect(told).toEqual([[proposed.id, 'verified']]);
         expect(events.filter((e) => e.type === 'error')).toEqual([]);
-        expect(
-          events.filter((e) => e.type === 'self_write_settled'),
-        ).toEqual([
-          { type: 'self_write_settled', actionId: proposed.id, outcome: 'verified' },
+        expect(events.filter((e) => e.type === 'self_write_settled')).toEqual([
+          {
+            type: 'self_write_settled',
+            actionId: proposed.id,
+            outcome: 'verified',
+          },
         ]);
       } finally {
         await watcher.stop();
@@ -174,9 +176,9 @@ describe('the watcher with onSelfWriteSettled wired to the coordinator alone', (
         expect((errors[0] as { message: string }).message).toContain(
           'actions.settleFromHistory',
         );
-        expect(
-          events.filter((e) => e.type === 'self_write_settled'),
-        ).toEqual([]);
+        expect(events.filter((e) => e.type === 'self_write_settled')).toEqual(
+          [],
+        );
 
         // every later poll retries (the sweep) but does not repeat the report
         await watcher.runCycle();

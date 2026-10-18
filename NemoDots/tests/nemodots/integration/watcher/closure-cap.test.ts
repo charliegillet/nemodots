@@ -179,7 +179,9 @@ describe('closure cap exceeded: work that already published', () => {
       // task A published a finding that rests on the receipt, task B still runs
       const mission = await missionReading(env, [[member(K)], [member(K)]]);
       const outputId = await publishOutput(env, mission, 0);
-      expect(await taskStatus(env, mission.attempts[0].taskId)).toBe('succeeded');
+      expect(await taskStatus(env, mission.attempts[0].taskId)).toBe(
+        'succeeded',
+      );
 
       await injectorWrite(env, K, 'catalog-b');
       const cycle = await watcher.runCycle();

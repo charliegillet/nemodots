@@ -93,7 +93,10 @@ describe('an observed sample that is older than the ledger head', () => {
             return read;
           }
           // the second read of the watcher sees the truth after the tool's
-          return { ...read, normalizedValue: { ...value, status: 'recovered' } };
+          return {
+            ...read,
+            normalizedValue: { ...value, status: 'recovered' },
+          };
         },
       };
       const watcher = env.watcher({ readers });
@@ -103,7 +106,7 @@ describe('an observed sample that is older than the ledger head', () => {
       // revision 2 is the tool's reading; revision 3 is the watcher's SECOND
       // read. The stale first sample ('ok') is never a revision.
       expect(rows.map((r) => [r.revision, r.status])).toEqual([
-        [1, first.normalizedValue && (first.normalizedValue as { status: string }).status],
+        [1, (first.normalizedValue as { status: string }).status],
         [2, 'degraded-newer'],
         [3, 'recovered'],
       ]);
@@ -113,7 +116,9 @@ describe('an observed sample that is older than the ledger head', () => {
       expect(outcome).toMatchObject({ outcome: 'registered', revision: 3 });
       expect(
         env.events.filter((e) => e.type === 'stale_sample_discarded'),
-      ).toEqual([{ type: 'stale_sample_discarded', sourceKey: HEALTH, attempt: 1 }]);
+      ).toEqual([
+        { type: 'stale_sample_discarded', sourceKey: HEALTH, attempt: 1 },
+      ]);
       expect((await receiptsOf(env, HEALTH)).map((r) => r.status)).toEqual([
         'superseded',
         'superseded',
@@ -139,7 +144,10 @@ describe('an observed sample that is older than the ledger head', () => {
           const value = read.normalizedValue as Record<string, unknown>;
           if (calls === 1) {
             // the watcher's sample is an older, different reading ...
-            const stale = { ...read, normalizedValue: { ...value, status: 'stale-blip' } };
+            const stale = {
+              ...read,
+              normalizedValue: { ...value, status: 'stale-blip' },
+            };
             // ... and a tool re-reads the head value LATER (a confirmation)
             await sleep(20);
             await toolRegisters(env, value, first.missionId);
@@ -152,9 +160,13 @@ describe('an observed sample that is older than the ledger head', () => {
       const [outcome] = await watcher.observe([HEALTH]);
 
       // no revision for the stale blip; the second read equals the head: confirmation
-      expect((await receiptsOf(env, HEALTH)).map((r) => r.revision)).toEqual([1]);
+      expect((await receiptsOf(env, HEALTH)).map((r) => r.revision)).toEqual([
+        1,
+      ]);
       expect(outcome).toMatchObject({ outcome: 'confirmed', revision: 1 });
-      expect(await confirmationCount(env, HEALTH)).toBe(confirmationsBefore + 2);
+      expect(await confirmationCount(env, HEALTH)).toBe(
+        confirmationsBefore + 2,
+      );
       expect(
         env.events.filter((e) => e.type === 'stale_sample_discarded'),
       ).toHaveLength(1);
@@ -176,15 +188,24 @@ describe('an observed sample that is older than the ledger head', () => {
           const value = read.normalizedValue as Record<string, unknown>;
           // every read races with a tool that registers something newer
           await sleep(5);
-          await toolRegisters(env, { ...value, status: `newer-${n}` }, first.missionId);
-          return { ...read, normalizedValue: { ...value, status: `sample-${n}` } };
+          await toolRegisters(
+            env,
+            { ...value, status: `newer-${n}` },
+            first.missionId,
+          );
+          return {
+            ...read,
+            normalizedValue: { ...value, status: `sample-${n}` },
+          };
         },
       };
       const [outcome] = await env.watcher({ readers }).observe([HEALTH]);
       expect(outcome).toMatchObject({ outcome: 'rejected' });
       // only the tools' readings were registered
       const rows = await observedAts(env, HEALTH);
-      expect(rows.every((r, i) => i === 0 || r.status?.startsWith('newer-'))).toBe(true);
+      expect(
+        rows.every((r, i) => i === 0 || r.status?.startsWith('newer-')),
+      ).toBe(true);
     });
   });
 });

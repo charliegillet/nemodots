@@ -336,7 +336,9 @@ describe('ordering of registration and settlement', () => {
         status: 'committed',
       });
       expect(
-        env.events.filter((e) => e.type === 'error' && e.where === 'onSelfWriteSettled'),
+        env.events.filter(
+          (e) => e.type === 'error' && e.where === 'onSelfWriteSettled',
+        ),
       ).toHaveLength(1);
 
       // the walk never sees row 2 again (the ledger moved past it); the sweep
@@ -413,41 +415,50 @@ describe('ordering of registration and settlement', () => {
 // coordinator dependency lands, vitest reports each of them as unexpectedly
 // passing: remove `.fails` then.
 describe('ARCHITECTURE 5.4 expectations owned by the ledger and the coordinator', () => {
-  it.fails('verified self-write: the proposing attempt and its task are not invalidated', async () => {
-    await withWatcherEnv(async (env) => {
-      const { watcher, mission, actionId } = await setup(env);
-      await actionCommit(env, { actionId, key: K, value: 'catalog-b' });
-      await watcher.observe([member(K)]);
-      expect(await attemptStatus(env, mission.attempts[0].attemptId)).not.toBe(
-        'invalidated',
-      );
-      expect(await taskStatus(env, mission.attempts[0].taskId)).not.toBe(
-        'invalidated',
-      );
-    });
-  });
+  it.fails(
+    'verified self-write: the proposing attempt and its task are not invalidated',
+    async () => {
+      await withWatcherEnv(async (env) => {
+        const { watcher, mission, actionId } = await setup(env);
+        await actionCommit(env, { actionId, key: K, value: 'catalog-b' });
+        await watcher.observe([member(K)]);
+        expect(
+          await attemptStatus(env, mission.attempts[0].attemptId),
+        ).not.toBe('invalidated');
+        expect(await taskStatus(env, mission.attempts[0].taskId)).not.toBe(
+          'invalidated',
+        );
+      });
+    },
+  );
 
-  it.fails('verified self-write: no replan is scheduled for the proposing root task', async () => {
-    await withWatcherEnv(async (env) => {
-      const { watcher, mission, actionId } = await setup(env);
-      await actionCommit(env, { actionId, key: K, value: 'catalog-b' });
-      await watcher.observe([member(K)]);
-      expect(await recoveryKinds(env, mission.missionId)).not.toContain(
-        'replan_scheduled',
-      );
-    });
-  });
+  it.fails(
+    'verified self-write: no replan is scheduled for the proposing root task',
+    async () => {
+      await withWatcherEnv(async (env) => {
+        const { watcher, mission, actionId } = await setup(env);
+        await actionCommit(env, { actionId, key: K, value: 'catalog-b' });
+        await watcher.observe([member(K)]);
+        expect(await recoveryKinds(env, mission.missionId)).not.toContain(
+          'replan_scheduled',
+        );
+      });
+    },
+  );
 
-  it.fails('C7 (a foreign write landed last): no postcondition task is scheduled', async () => {
-    await withWatcherEnv(async (env) => {
-      const { mission, actionId } = await setup(env);
-      await actionCommit(env, { actionId, key: K, value: 'catalog-b' });
-      await injectorWrite(env, K, 'catalog-injected');
-      await env.watcher().observe([member(K)]);
-      expect(await postconditionTasks(env, mission.missionId)).toEqual([]);
-      expect(await recoveryKinds(env, mission.missionId)).not.toContain(
-        'postcondition_scheduled',
-      );
-    });
-  });
+  it.fails(
+    'C7 (a foreign write landed last): no postcondition task is scheduled',
+    async () => {
+      await withWatcherEnv(async (env) => {
+        const { mission, actionId } = await setup(env);
+        await actionCommit(env, { actionId, key: K, value: 'catalog-b' });
+        await injectorWrite(env, K, 'catalog-injected');
+        await env.watcher().observe([member(K)]);
+        expect(await postconditionTasks(env, mission.missionId)).toEqual([]);
+        expect(await recoveryKinds(env, mission.missionId)).not.toContain(
+          'postcondition_scheduled',
+        );
+      });
+    },
+  );
 });

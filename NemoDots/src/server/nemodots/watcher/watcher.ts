@@ -580,7 +580,8 @@ export function createWatcher(deps: WatcherDeps): Watcher {
             sourceKey: item.key,
             attempt,
           });
-          if (attempt >= MAX_RACE_ATTEMPTS) return outcome(item.key, 'rejected');
+          if (attempt >= MAX_RACE_ATTEMPTS)
+            return outcome(item.key, 'rejected');
           item = await sampleObserved({ key: item.key, type: item.type });
           continue;
         }

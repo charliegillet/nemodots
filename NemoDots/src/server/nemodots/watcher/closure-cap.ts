@@ -156,7 +156,9 @@ export async function buildCoarseInvalidation(
     const modelCallIds = new Set<string>();
     const outputIds = new Set<string>();
     const actionIds = new Set(
-      intents.filter((row) => row.mission_id === missionId).map((row) => row.id),
+      intents
+        .filter((row) => row.mission_id === missionId)
+        .map((row) => row.id),
     );
     for (const row of mine) {
       if (row.kind === 'attempt') {
