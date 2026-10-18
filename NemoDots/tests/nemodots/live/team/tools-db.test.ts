@@ -118,7 +118,7 @@ describe('team tools over PostgreSQL', () => {
       expect(afterSecond.confirmations - afterFirst.confirmations).toBe(1);
       expect(afterSecond.readSet).toBe(afterFirst.readSet);
 
-      await expect(call('redis.stats', 'tc-3')).rejects.toMatchObject({
+      await expect(call('opendots.page/home', 'tc-3')).rejects.toMatchObject({
         code: 'source_unavailable',
       });
       await expect(call('checkout.secrets', 'tc-4')).rejects.toMatchObject({

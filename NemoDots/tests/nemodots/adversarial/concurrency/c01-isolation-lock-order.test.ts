@@ -436,7 +436,7 @@ describe('C1 collection-first lock order', () => {
             { key: 'db.statement_timeout_ms', value: 6000, collection: false },
             { key: 'orders.write_enabled', value: false, collection: false },
           ];
-          const intents = [];
+          const intents: Awaited<ReturnType<typeof intentWithVector>>[] = [];
           const fences: number[] = [];
           for (const [i, pipeline] of pipelines.entries()) {
             const intent = await intentWithVector(
