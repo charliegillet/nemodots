@@ -110,6 +110,47 @@ export function safeDigest(value: unknown): string {
   }
 }
 
+/**
+ * Canonical page projection: the same revision digests identically whether it
+ * came from the prompt context, a read_space_page result (which adds a url) or
+ * the onRevision hook. Extra fields such as url are dropped.
+ */
+export function pageDigest(page: {
+  id: string;
+  spaceId: string;
+  title: string;
+  content: string;
+  parentId: string | null;
+  revision: number;
+}): string {
+  return safeDigest({
+    id: page.id,
+    spaceId: page.spaceId,
+    title: page.title,
+    content: page.content,
+    parentId: page.parentId ?? null,
+    revision: page.revision,
+  });
+}
+
+/** list_space_pages items carry no content; they digest as their own shape. */
+export function pageSummaryDigest(page: {
+  id: string;
+  spaceId: string;
+  title: string;
+  parentId: string | null;
+  revision: number;
+}): string {
+  return safeDigest({
+    shape: 'page_summary',
+    id: page.id,
+    spaceId: page.spaceId,
+    title: page.title,
+    parentId: page.parentId ?? null,
+    revision: page.revision,
+  });
+}
+
 function jsonSchemaOf(schema: unknown): unknown {
   try {
     return convertSchemaToJsonSchema(schema as never) ?? null;
@@ -183,7 +224,7 @@ export function createProvenanceMiddleware(
   };
 
   async function resolve(query: ReceiptQuery): Promise<DependencyEntry | null> {
-    const cacheKey = `${query.sourceKey}|${query.sourceRevision}|${query.contentDigest}`;
+    const cacheKey = `${query.sourceKey}|${query.sourceRevision}|${query.shape ?? ''}|${query.contentDigest}`;
     if (receiptCache.has(cacheKey)) return receiptCache.get(cacheKey) ?? null;
     let entry: DependencyEntry | null = null;
     if (runtime?.resolveReceipt) {
@@ -225,6 +266,7 @@ export function createProvenanceMiddleware(
         sourceKey,
         sourceRevision: page.revision,
         contentDigest: page.digest,
+        shape: 'page',
       });
       if (entry) {
         entries.push(entry);
@@ -246,6 +288,7 @@ export function createProvenanceMiddleware(
         sourceKey,
         sourceRevision: null,
         contentDigest: memory.digest,
+        shape: 'memory',
       });
       if (entry) {
         entries.push(entry);
@@ -468,7 +511,8 @@ export function createProvenanceMiddleware(
           ? value
           : []
         : [value]
-    ) as { id?: unknown; revision?: unknown }[];
+    ) as Record<string, unknown>[];
+    const summary = toolName === 'list_space_pages';
     const found: DependencyEntry[] = [];
     for (const item of items) {
       if (
@@ -481,7 +525,10 @@ export function createProvenanceMiddleware(
       const entry = await resolve({
         sourceKey,
         sourceRevision: item.revision,
-        contentDigest: safeDigest(item),
+        contentDigest: summary
+          ? pageSummaryDigest(item as Parameters<typeof pageSummaryDigest>[0])
+          : pageDigest(item as Parameters<typeof pageDigest>[0]),
+        shape: summary ? 'page_summary' : 'page',
       });
       if (entry) found.push(entry);
       else readUnresolved.push(sourceKey);

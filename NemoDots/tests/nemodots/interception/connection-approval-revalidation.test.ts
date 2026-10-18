@@ -74,12 +74,14 @@ function world(options: { incident?: boolean } = {}) {
       ? { ok: false, receiptId: bad, detail: 'superseded' }
       : { ok: true };
   };
+  // The Dot that asks for the approval is not incident while the executor
+  // creates it (incident Dots cannot use connection tools at all); tests add
+  // it to the list afterwards. Revalidation only applies to listed Dots.
+  const incident = new Set<string>(options.incident ? [f.dot.id] : []);
   const policy = createToolPolicy({
-    // The Dot that asks for the approval is never incident in the executor
-    // tests (incident Dots cannot use connection tools at all).
-    incidentDotIds: options.incident ? [f.dot.id] : ['some-other-dot'],
+    incidentDotIds: () => incident,
     revalidateApproval: createApprovalRevalidator({
-      isIncidentDot: (id) => (options.incident ? id === f.dot.id : false),
+      isIncidentDot: (id) => incident.has(id),
       checkCurrent,
     }),
   });
@@ -91,7 +93,17 @@ function world(options: { incident?: boolean } = {}) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ approvalId, toolCallId }),
     });
-  return { ...f, sent, service, connection, routes, post, superseded, checks };
+  return {
+    ...f,
+    sent,
+    service,
+    connection,
+    routes,
+    post,
+    superseded,
+    checks,
+    incident,
+  };
 }
 
 /** Drives DotAgent so the approval is created by the connection tool executor. */
@@ -235,6 +247,7 @@ describe('revalidation in front of the approval callback', () => {
   it('returns 409 stale_evidence when a bound receipt was superseded, runs nothing and claims nothing', async () => {
     const w = world();
     const { approvalId } = await approvalThroughExecutor(w);
+    w.incident.add(w.dot.id);
     const vector =
       w.workspace.connections.approval(approvalId)!.dependencyVector!;
     w.superseded.add(vector[0].receiptId);
@@ -257,6 +270,7 @@ describe('revalidation in front of the approval callback', () => {
   it('executes exactly once when the evidence is unchanged', async () => {
     const w = world();
     const { approvalId } = await approvalThroughExecutor(w);
+    w.incident.add(w.dot.id);
     const first = await w.post('approve-1', approvalId);
     expect(first.status).toBe(200);
     expect(await first.json()).toMatchObject({
@@ -403,6 +417,77 @@ describe('NULL vector per Dot kind', () => {
     });
     expect(w.workspace.connections.approval(id)!.dependencyVector).toEqual([]);
     expect((await w.post('call-1', id)).status).toBe(200);
+  });
+});
+
+describe('policy gate on revalidation', () => {
+  const bound = (w: ReturnType<typeof world>, vector: unknown[] | null) =>
+    w.workspace.connections.createApproval({
+      threadId: 'thread',
+      dotId: w.dot.id,
+      connectionId: w.connection.id,
+      tool: 'send_mail',
+      arguments: { to: 'a@example.com' },
+      ...(vector ? { dependencyVector: vector as never } : {}),
+    });
+  const entry = {
+    sourceKey: 'opendots.page/p',
+    sourceRevision: 1,
+    receiptId: '5d6c7e0e-6f6a-4a55-9a64-0d1d4f5b7a10',
+  };
+
+  it('refuses a NULL vector for a listed incident Dot even without any revalidator', async () => {
+    const w = world();
+    setActivePolicy(createToolPolicy({ incidentDotIds: [w.dot.id] }));
+    const response = await w.post('c1', bound(w, null));
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: 'unbound_evidence' });
+    expect(w.sent).not.toHaveBeenCalled();
+  });
+
+  it('uses the policy list, not the revalidator predicate, to decide who is incident', async () => {
+    const w = world();
+    setActivePolicy(
+      createToolPolicy({
+        incidentDotIds: [w.dot.id],
+        revalidateApproval: createApprovalRevalidator({
+          isIncidentDot: () => false,
+          checkCurrent: async () => ({ ok: true }),
+        }),
+      }),
+    );
+    const response = await w.post('c1', bound(w, null));
+    expect(response.status).toBe(409);
+    expect(w.sent).not.toHaveBeenCalled();
+  });
+
+  it('fails closed (503) for an incident Dot with a bound vector and no evidence check', async () => {
+    const w = world();
+    setActivePolicy(createToolPolicy({ incidentDotIds: [w.dot.id] }));
+    const response = await w.post('c1', bound(w, [entry]));
+    expect(response.status).toBe(503);
+    expect(w.sent).not.toHaveBeenCalled();
+    expect(w.workspace.connections.action('thread', 'c1')).toBeUndefined();
+  });
+
+  it('is a no-op for ordinary Dots with the list empty, even when the ledger check would throw', async () => {
+    const w = world();
+    const checkCurrent = vi.fn(async () => {
+      throw new Error('pg down');
+    });
+    setActivePolicy(
+      createToolPolicy({
+        incidentDotIds: [],
+        revalidateApproval: createApprovalRevalidator({
+          isIncidentDot: () => false,
+          checkCurrent,
+        }),
+      }),
+    );
+    const response = await w.post('c1', bound(w, [entry]));
+    expect(response.status).toBe(200);
+    expect(checkCurrent).not.toHaveBeenCalled();
+    expect(w.sent).toHaveBeenCalledTimes(1);
   });
 });
 

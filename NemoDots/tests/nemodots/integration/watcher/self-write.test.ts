@@ -59,7 +59,13 @@ describe('a verified self-write', () => {
         await actionCommit(env, { actionId, key: K, value: 'catalog-b' }),
       ).toBe(2);
 
-      await watcher.runCycle();
+      // observe(), not runCycle(): the settlement sweep must not be what settles
+      const [observed] = await watcher.observe([member(K)]);
+      expect(observed).toMatchObject({
+        outcome: 'registered',
+        revision: 2,
+        selfWrite: 'verified',
+      });
 
       expect(env.settled).toEqual([{ actionId, outcome: 'verified' }]);
       expect(await intentStatus(env, actionId)).toEqual({
@@ -123,7 +129,7 @@ describe('a self-write that does not match its intent', () => {
       // the intent says catalog-b; the row that carries its marker says otherwise
       await actionCommit(env, { actionId, key: K, value: 'catalog-other' });
 
-      await watcher.runCycle();
+      await watcher.observe([member(K)]);
 
       expect(env.settled).toEqual([{ actionId, outcome: 'failed' }]);
       expect(await intentStatus(env, actionId)).toEqual({
@@ -163,7 +169,12 @@ describe('C7: the watcher was stopped while two writers changed the key', () => 
       expect((await configState(env, K)).version).toBe(3);
 
       const restarted = env.watcher();
-      await restarted.runCycle();
+      const [observed] = await restarted.observe([member(K)]);
+      expect(observed).toMatchObject({
+        outcome: 'registered',
+        revision: 3,
+        selfWrite: 'none',
+      });
 
       const receipts = await receiptsOf(env, member(K));
       // revision 2 never got a receipt: the watcher jumped from 1 to 3
@@ -217,7 +228,7 @@ describe('what is not a self-write', () => {
       );
       expect(stored.rows[0].caused_by_action_id).toBeNull();
 
-      await watcher.runCycle();
+      await watcher.observe([member(K)]);
       expect(env.settled).toEqual([]);
       expect(await headOf(env, member(K))).toMatchObject({
         revision: 2,
@@ -289,6 +300,39 @@ describe('the settlement sweep', () => {
       expect((await intentStatus(env, actionId)).status).toBe('verified');
       // the sweep registers nothing
       expect(await receiptsOf(env, member(K))).toHaveLength(2);
+    });
+  });
+});
+
+describe('ordering of settlement and registration', () => {
+  it('settles the intent BEFORE the receipt exists, so a crash in between is repaired by the next poll', async () => {
+    await withWatcherEnv(async (env) => {
+      const { actionId } = await setup(env);
+      await actionCommit(env, { actionId, key: K, value: 'catalog-b' });
+      const seen: number[] = [];
+      const watcher = env.watcher({
+        recovery: {
+          ...env.recovery,
+          async onSelfWriteSettled(id, outcome) {
+            seen.push((await receiptsOf(env, member(K))).length);
+            // the process dies right after the first settle attempt
+            throw new Error(`crash before registering (${id}, ${outcome})`);
+          },
+        },
+      });
+      await watcher.observe([member(K)]);
+      // the receipt was not registered yet when the settle ran (1 receipt: rev 1)
+      expect(seen).toEqual([1]);
+      expect(await intentStatus(env, actionId)).toMatchObject({
+        status: 'committed',
+      });
+
+      // the walk repeats on the next poll (the ledger still stands at revision 1
+      // or, if it did register, the sweep finds the committed intent)
+      const next = env.watcher();
+      await next.runCycle();
+      expect(env.settled).toEqual([{ actionId, outcome: 'verified' }]);
+      expect((await intentStatus(env, actionId)).status).toBe('verified');
     });
   });
 });

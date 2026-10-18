@@ -36,7 +36,7 @@ import { getInterceptionRuntime } from './nemodots/interception/active-runtime.j
 import { createFetchTelemetry } from './nemodots/interception/fetch-telemetry.js';
 import {
   createProvenanceMiddleware,
-  safeDigest,
+  pageDigest,
 } from './nemodots/interception/provenance-middleware.js';
 import {
   createTurnScope,
@@ -396,7 +396,7 @@ export class DotAgent extends AbstractAgent {
                     {
                       pageId: pageContext.id,
                       revision: pageContext.revision,
-                      digest: safeDigest(pageContext),
+                      digest: pageDigest(pageContext),
                     },
                   ]
                 : [],

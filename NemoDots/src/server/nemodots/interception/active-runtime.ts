@@ -56,8 +56,16 @@ export interface ReceiptQuery {
   sourceKey: string;
   /** null for sources without a revision (memories). */
   sourceRevision: number | null;
-  /** Digest of the content exactly as the model saw it. */
+  /**
+   * Digest of the content as the model saw it, computed over a canonical
+   * projection (see pageDigest / pageSummaryDigest) so that the prompt, a
+   * read_space_page result and the onRevision hook agree for one revision.
+   * Resolvers should match on (sourceKey, sourceRevision); the digest is a
+   * cross-check, and `shape` says which projection it covers.
+   */
   contentDigest: string;
+  /** 'page' = full page, 'page_summary' = list item without content, 'memory'. */
+  shape?: 'page' | 'page_summary' | 'memory';
 }
 
 export interface TurnIdentity {

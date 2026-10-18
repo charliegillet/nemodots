@@ -333,11 +333,28 @@ export function createToolPolicy(options: ToolPolicyOptions): ActivePolicy {
         'Computer actions by agents are disabled for incident Dots.',
       );
     },
-    revalidateApproval: options.revalidateApproval
-      ? (
-          request: ApprovalRevalidationRequest,
-        ): ApprovalVerdict | Promise<ApprovalVerdict> =>
-          options.revalidateApproval!(request)
-      : undefined,
+    // Always installed. The gate is this policy's own incident list (one
+    // source of truth): an ordinary Dot passes untouched, so an empty list is a
+    // true no-op and a ledger outage never blocks plain OpenDots approvals. For
+    // an incident Dot a NULL vector is refused, and a bound vector needs an
+    // evidence check; without one it fails closed (the route answers 503).
+    revalidateApproval: async (
+      request: ApprovalRevalidationRequest,
+    ): Promise<ApprovalVerdict> => {
+      if (!isIncidentDot(request.dotId)) return { ok: true };
+      if (request.vector === null)
+        return {
+          ok: false,
+          code: 'unbound_evidence',
+          message:
+            'This approval request has no recorded evidence to check, so it cannot run for an incident Dot. Ask the Dot to try again.',
+        };
+      if (request.vector.length === 0) return { ok: true };
+      if (!options.revalidateApproval)
+        throw new Error(
+          'No evidence check is installed for incident Dot approvals.',
+        );
+      return options.revalidateApproval(request);
+    },
   };
 }

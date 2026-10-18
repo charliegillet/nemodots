@@ -184,6 +184,32 @@ describe('provenance snapshot recording', () => {
   });
 });
 
+describe('receipt queries', () => {
+  it('give the prompt page and the read_space_page result the same digest for an unchanged revision', async () => {
+    const f = dotFixture();
+    const page = attachPage(f);
+    const queries: Array<{ sourceKey: string; contentDigest: string }> = [];
+    const { runtime } = recordingRuntime({
+      resolveReceipt: (query) => {
+        queries.push(query);
+        return null;
+      },
+    });
+    setInterceptionRuntime(runtime);
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        toolCallResponse('read_space_page', { id: page.id }),
+      )
+      .mockResolvedValueOnce(textResponse('Read it.'));
+    await run(f);
+    const digests = queries
+      .filter((q) => q.sourceKey === `opendots.page/${page.id}`)
+      .map((q) => q.contentDigest);
+    expect(digests.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(digests).size).toBe(1);
+  });
+});
+
 describe('incident Dot tool refusal', () => {
   const editCall = (page: { id: string; revision: number }) =>
     toolCallResponse('edit_space_page', {

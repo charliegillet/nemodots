@@ -3,6 +3,8 @@ import { lastValueFrom, toArray } from 'rxjs';
 import { toolDefinition } from '@tanstack/ai';
 import { z } from 'zod';
 import {
+  pageDigest,
+  pageSummaryDigest,
   addToScopeVector,
   createProvenanceMiddleware,
   createTurnScope,
@@ -234,5 +236,24 @@ describe('model call outcomes through DotAgent', () => {
         toolCallId: 'c1',
       }),
     ).toBeUndefined();
+  });
+});
+
+describe('page digests agree across surfaces', () => {
+  it('digests one revision identically in the prompt and in a read_space_page result (url stripped)', () => {
+    const page = {
+      id: 'p1',
+      spaceId: 's1',
+      title: 'T',
+      content: 'C',
+      parentId: null,
+      revision: 4,
+      createdAt: 'x',
+      updatedAt: 'y',
+    };
+    const read = { ...page, url: '/#/spaces/s1/pages/p1' };
+    expect(pageDigest(read)).toBe(pageDigest(page));
+    expect(pageDigest({ ...page, content: 'D' })).not.toBe(pageDigest(page));
+    expect(pageSummaryDigest(page)).not.toBe(pageDigest(page));
   });
 });
