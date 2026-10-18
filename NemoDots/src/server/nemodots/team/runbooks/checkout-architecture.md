@@ -34,6 +34,5 @@ Every configuration key has a version that increases on each change. The set of 
 - `checkout.inventory/<sku>`: the database quantity and the quantity the API reports for one SKU, plus a `consistent` flag. SKUs are written `SKU-` followed by four digits; sample more than one.
 - `redis.stats`: how many cache keys exist per `namespace:schema` suffix, the namespace the configuration currently selects, and whether Redis is reachable.
 - `checkout.config` lists which configuration keys exist; `checkout.config/<key>` returns `{key, value, version}` for one key.
-- `checkout.acceptance`: the outcome of the independent acceptance check, if one has run.
 
 A symptom in one source is rarely the whole story. Compare sources before concluding, and say in a finding which receipts support a claim.

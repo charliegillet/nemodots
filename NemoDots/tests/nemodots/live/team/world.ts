@@ -88,6 +88,27 @@ export function simulatedCheckoutReaders(pool: pg.Pool): SourceReaderPort {
         };
         return { normalizedValue: value, raw: value, revisionHint: null };
       }
+      if (key === 'redis.stats') {
+        const value = {
+          reachable: true,
+          activeNamespace: 'ns-main',
+          keyCounts: { 'ns-main:v2': 12 },
+        };
+        return { normalizedValue: value, raw: value, revisionHint: null };
+      }
+      if (key === 'checkout.orders.recent') {
+        const value = { countBucket: '1-10', statuses: ['confirmed'] };
+        return { normalizedValue: value, raw: value, revisionHint: null };
+      }
+      if (key.startsWith('checkout.inventory/')) {
+        const value = {
+          sku: key.slice('checkout.inventory/'.length),
+          authorityQuantity: 40,
+          apiQuantity: 40,
+          consistent: true,
+        };
+        return { normalizedValue: value, raw: value, revisionHint: null };
+      }
       return authority.read(key, scope);
     },
   };

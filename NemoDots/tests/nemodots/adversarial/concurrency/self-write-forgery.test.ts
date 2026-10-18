@@ -14,7 +14,8 @@
 // trigger, the propose_action tool schema and payload, every other strict tool
 // schema, the scenario manifest, the owner-edit input, and the actor column.
 // Residuals are stated as such (admin owns the triggers; the ledger stores a
-// caller-supplied selfWrite as given).
+// caller-supplied selfWrite as given). The history surface (injector INSERT of
+// a future version row) is finding CW-7.
 import { describe, expect, it } from 'vitest';
 import {
   loadScenario,
@@ -26,8 +27,10 @@ import { withTransaction } from '../../../../src/server/nemodots/db/tx.js';
 import { registerObservation } from '../../../../src/server/nemodots/ledger/index.js';
 import { createOwnerEdit } from '../../../../src/server/nemodots/watcher/index.js';
 import {
+  actionHistory,
   admitAndCommit,
   configState,
+  externalChange,
   historyRows,
   intentStatus,
   memberReceipt,
@@ -35,6 +38,7 @@ import {
   proposeCtx,
   scenario,
   sourceRef,
+  valueDigest,
   watcherRig,
   withWorld,
   type World,
@@ -404,4 +408,106 @@ describe('self-write marker forgery: the ledger', () => {
       });
     });
   });
+});
+
+// FINDING CW-7 (medium): the injector holds a raw INSERT grant on
+// checkout.config_versions (0004_checkout.ts) and the triggers only null the
+// marker; nothing ties a history row to the key's head. The injector can
+// therefore squat version head+1 of a key with a row that has no matching
+// config_entries change. The next writer of that key (action commit, owner
+// edit, injector) computes the same version and hits the history primary key:
+// an untyped 23505 instead of ARCHITECTURE 5.1 step 7's `stale_version`, and
+// every later writer of the key fails the same way (the key is bricked).
+// Safety holds (no write lands). The `it.fails` tests state the expected
+// behaviour and pass while the defence is absent; flip them to `it` when fixed.
+describe('history surface of the authority (injector INSERT grant)', () => {
+  const squat = (version: number) =>
+    `INSERT INTO checkout.config_versions
+       (key, version, value, before_digest, after_digest, caused_by_actor)
+     VALUES ('db.pool_max', ${version}, '20'::jsonb, '${valueDigest(10)}', '${valueDigest(20)}', 'injector')`;
+  const outcomeOf = (work: Promise<unknown>) =>
+    work.then(
+      () => 'ok',
+      (error: { code?: string; name?: string }) =>
+        error.code ?? error.name ?? 'error',
+    );
+
+  it('UPDATE and DELETE of an action history row are refused to the injector (append-only)', async () => {
+    await withWorld(async (world) => {
+      const { intent } = await committedAction(world);
+      const update = await outcomeOf(
+        world.injector.query(
+          "UPDATE checkout.config_versions SET after_digest = 'x' WHERE caused_by_action_id = $1",
+          [intent.id],
+        ),
+      );
+      const removal = await outcomeOf(
+        world.injector.query(
+          'DELETE FROM checkout.config_versions WHERE caused_by_action_id = $1',
+          [intent.id],
+        ),
+      );
+      expect(update).toBe('42501');
+      expect(removal).toBe('42501');
+      expect(await actionHistory(world, intent.id)).toHaveLength(1);
+    });
+  });
+
+  it('safety: with the successor version squatted, the commit writes nothing and the intent stays recoverable (admitted or blocked)', async () => {
+    await withWorld(async (world) => {
+      const s = await scenario(world);
+      const intent = await proposePool(world, s, 20);
+      const admitted = await world.service.admit(intent.id, 'dispatcher-a');
+      expect(admitted.status).toBe('admitted');
+      expect(await outcomeOf(world.injector.query(squat(2)))).toBe('ok');
+      await outcomeOf(
+        world.service.commit(intent.id, admitted.dispatch!.fence),
+      );
+      const head = await configState(world, 'db.pool_max');
+      expect(head.version).toBe(1); // the authority did not move
+      expect(head.value).toBe(10);
+      expect(await actionHistory(world, intent.id)).toHaveLength(0);
+      expect(['admitted', 'blocked']).toContain(
+        (await intentStatus(world, intent.id)).status,
+      );
+    });
+  });
+
+  it.fails(
+    'FINDING CW-7a: a commit whose successor version is squatted is blocked(stale_version), not an untyped 23505',
+    async () => {
+      await withWorld(async (world) => {
+        const s = await scenario(world);
+        const intent = await proposePool(world, s, 20);
+        const admitted = await world.service.admit(intent.id, 'dispatcher-a');
+        await world.injector.query(squat(2));
+        const result = await world.service.commit(
+          intent.id,
+          admitted.dispatch!.fence,
+        );
+        expect(result.status).toBe('blocked');
+        expect(result.blockReason).toBe('stale_version');
+      });
+    },
+  );
+
+  it.fails(
+    'FINDING CW-7b: the injector cannot insert a history row ahead of the key head',
+    async () => {
+      await withWorld(async (world) => {
+        expect(await outcomeOf(world.injector.query(squat(2)))).not.toBe('ok');
+      });
+    },
+  );
+
+  it.fails(
+    'FINDING CW-7c: a squatted history row cannot brick the key: a later unconditional write still lands',
+    async () => {
+      await withWorld(async (world) => {
+        await world.injector.query(squat(2));
+        const version = await externalChange(world, 'db.pool_max', 14);
+        expect(version).toBeGreaterThan(1);
+      });
+    },
+  );
 });

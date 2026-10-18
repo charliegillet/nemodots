@@ -5,6 +5,27 @@ import { sleep, withLiveWorld } from './world.js';
 const log = (...a: unknown[]) =>
   appendFileSync('/tmp/w4dbg.log', a.join(' ') + '\n');
 
+function spy(c: ReturnType<typeof liveClient>) {
+  return {
+    mode: 'live',
+    host: () => c.host(),
+    listModels: () => c.listModels(),
+    async complete(req: never, ctx: never) {
+      const r = await c.complete(req, ctx);
+      const msgs = (req as { messages: { role: string; content: string }[] })
+        .messages;
+      const last = msgs[msgs.length - 1];
+      log('REQ last=', last.role, JSON.stringify(last.content).slice(0, 400));
+      log(
+        'RESP',
+        r.outcome,
+        JSON.stringify(r.toolCalls.map((t) => [t.name, t.arguments])),
+        JSON.stringify((r.content ?? '').slice(0, 200)),
+      );
+      return r;
+    },
+  };
+}
 it('debug investigator', async () => {
   const env = requireLive();
   const model = process.env.OPENAI_MODEL!.trim();
@@ -27,10 +48,13 @@ it('debug investigator', async () => {
       ] as never[],
       concurrency: 3,
       pollMs: 200,
-      handler: world.handlerFor(liveClient(env, { maxInFlight: 4 }) as never, {
-        planner: model,
-        worker: model,
-      }),
+      handler: world.handlerFor(
+        spy(liveClient(env, { maxInFlight: 4 })) as never,
+        {
+          planner: model,
+          worker: model,
+        },
+      ),
       onError: (e) => log('HOST ERROR', (e as Error).stack),
       onRun: (r) =>
         log(
@@ -44,7 +68,7 @@ it('debug investigator', async () => {
         ),
     });
     host.start();
-    await sleep(150_000);
+    await sleep(100_000);
     await host.stop();
     const t = await world.admin.query(
       'SELECT left(id::text,8) id, role, status, depth FROM coordinator.tasks',

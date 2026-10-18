@@ -20,7 +20,7 @@ import {
   type HandlerHelpers,
   type HandlerOutcome,
 } from '../coordinator/worker-host.js';
-import { createAttemptBudget } from './budget.js';
+import { MAX_LOOP_ITERATIONS, createAttemptBudget } from './budget.js';
 import { WORKER_MAX_TOKENS, runModelCall } from './call.js';
 import { BudgetExhaustedError, ToolError } from './errors.js';
 import { toContextReceipt, toEntry } from './evidence.js';
@@ -181,7 +181,10 @@ export async function runWorker(
       commonInstructions: COMMON_INSTRUCTIONS,
       roleInstructions: roleText,
       mission: { goal: mission.goal, constraints: mission.constraints },
-      task: { title: claimed.task.title, question: claimed.task.question },
+      task: {
+        title: claimed.task.title,
+        question: `${claimed.task.question}\n\nTurn ${budget.iterations} of at most ${Math.min(claimed.task.maxIterations, MAX_LOOP_ITERATIONS)}.`,
+      },
       runbooks: deps.runbooks.all(),
       receipts: evidence,
       inheritedArtifacts: artifacts,
