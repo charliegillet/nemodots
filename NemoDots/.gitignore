@@ -1,0 +1,24 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+.opendots/
+artifacts/
+playwright-report/
+test-results/
+docs/superpowers/
+RESEARCH.md
+.DS_Store
+
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Local hosted-project selection
+.copilotkit/
+
+# NemoDots local stack data, eval results and run artifacts
+.local/
+evals/nemodots/results/

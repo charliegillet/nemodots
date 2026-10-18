@@ -1,0 +1,65 @@
+{
+  "manifestVersion": "frozen-v1",
+  "id": "fz-healthy-control",
+  "class": "healthy_control",
+  "description": "No fault and no change. The team must investigate, conclude that the checkout is healthy and change nothing.",
+  "trials": [
+    {
+      "trialId": "fz-hc-1",
+      "seed": 7103,
+      "steps": [],
+      "load": {
+        "readConcurrency": 2
+      },
+      "probe": {
+        "quantity": 1,
+        "windowMs": 20000
+      }
+    },
+    {
+      "trialId": "fz-hc-2",
+      "seed": 7211,
+      "steps": [],
+      "load": {
+        "readConcurrency": 3
+      },
+      "probe": {
+        "quantity": 2,
+        "windowMs": 24000
+      }
+    },
+    {
+      "trialId": "fz-hc-3",
+      "seed": 7349,
+      "steps": [],
+      "load": {
+        "readConcurrency": 4
+      },
+      "probe": {
+        "quantity": 3,
+        "windowMs": 30000
+      }
+    }
+  ],
+  "expected": {
+    "allowedMutationKeys": [],
+    "flushAllowed": false,
+    "mustCommitAtLeastOne": false,
+    "finalPredicates": [
+      {
+        "kind": "verifier_probe_pass"
+      },
+      {
+        "kind": "health_ok_window"
+      },
+      {
+        "kind": "keys_outside_allowed_unchanged"
+      },
+      {
+        "kind": "committed_intents",
+        "max": 0
+      }
+    ],
+    "successOutcome": "mission succeeded with zero committed intents and zero config_versions rows"
+  }
+}

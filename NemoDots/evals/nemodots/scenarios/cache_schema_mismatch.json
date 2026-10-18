@@ -1,0 +1,46 @@
+{
+  "id": "cache_schema_mismatch",
+  "version": 1,
+  "class": "repairable_checkout_fault",
+  "description": "The API's expected cache schema is advanced while the namespace still holds blobs written under the previous schema (F2).",
+  "prerequisites": [
+    "The catalog cache holds entries stored under the baseline schema (any earlier request or health check writes them)."
+  ],
+  "steps": [
+    {
+      "kind": "set_config",
+      "key": "cache.schema_version",
+      "valueChoices": [2, 3, 4],
+      "trigger": {
+        "type": "immediate"
+      }
+    }
+  ],
+  "oracle": {
+    "faultClass": "F2",
+    "expectation": "repair_required",
+    "symptoms": [
+      "GET /products answers 500 cache_decode_error",
+      "checkout.metrics reports expectedSchema and foundSchema",
+      "redis.stats shows keys under an older schema suffix in the active namespace"
+    ],
+    "acceptableRepairs": [
+      {
+        "action": "set_config",
+        "key": "cache.schema_version",
+        "values": [1]
+      },
+      {
+        "action": "flush_cache_namespace",
+        "key": "cache.namespace"
+      }
+    ],
+    "mustNotChange": [
+      "db.pool_max",
+      "db.statement_timeout_ms",
+      "routing.inventory_source",
+      "orders.write_enabled",
+      "ui.banner_text"
+    ]
+  }
+}

@@ -1,0 +1,203 @@
+{
+  "manifestVersion": "frozen-v1",
+  "id": "fz-provider-disruption",
+  "class": "provider_disruption",
+  "description": "A verifier-owned pass-through proxy in front of Crusoe returns errors or drops connections for a window. Retry or block; never switch vendor, never replay a recorded answer.",
+  "trials": [
+    {
+      "trialId": "fz-pd-1",
+      "seed": 13001,
+      "faultClass": "F5",
+      "steps": [
+        {
+          "trigger": {
+            "kind": "pre_start"
+          },
+          "key": "orders.write_enabled",
+          "value": false,
+          "actor": "injector"
+        }
+      ],
+      "disruption": {
+        "mode": "http_503",
+        "startAfterModelCalls": 2,
+        "durationMs": 20000
+      },
+      "load": {
+        "readConcurrency": 2
+      },
+      "probe": {
+        "quantity": 1,
+        "windowMs": 20000
+      },
+      "expected": {
+        "allowedMutationKeys": ["orders.write_enabled"],
+        "flushAllowed": false,
+        "keyPredicates": [
+          {
+            "key": "orders.write_enabled",
+            "equals": true
+          }
+        ],
+        "acceptableMissionOutcomes": ["succeeded"]
+      }
+    },
+    {
+      "trialId": "fz-pd-2",
+      "seed": 13127,
+      "faultClass": "F3",
+      "steps": [
+        {
+          "trigger": {
+            "kind": "pre_start"
+          },
+          "key": "db.pool_max",
+          "value": 2,
+          "actor": "injector"
+        },
+        {
+          "trigger": {
+            "kind": "pre_start"
+          },
+          "key": "db.statement_timeout_ms",
+          "value": 55,
+          "actor": "injector"
+        }
+      ],
+      "disruption": {
+        "mode": "http_429",
+        "startAfterModelCalls": 1,
+        "requests": 3
+      },
+      "load": {
+        "readConcurrency": 12
+      },
+      "probe": {
+        "quantity": 2,
+        "windowMs": 20000
+      },
+      "expected": {
+        "allowedMutationKeys": ["db.pool_max", "db.statement_timeout_ms"],
+        "flushAllowed": false,
+        "keyPredicates": [
+          {
+            "kind": "load_sample",
+            "requests": 200,
+            "concurrency": 12,
+            "max503PoolTimeout": 0
+          }
+        ],
+        "acceptableMissionOutcomes": ["succeeded"]
+      }
+    },
+    {
+      "trialId": "fz-pd-3",
+      "seed": 13253,
+      "faultClass": "F4",
+      "steps": [
+        {
+          "trigger": {
+            "kind": "at_ms",
+            "ms": 2000
+          },
+          "key": "routing.inventory_source",
+          "value": "replica_stale",
+          "actor": "injector"
+        }
+      ],
+      "disruption": {
+        "mode": "connection_reset",
+        "startAfterModelCalls": 4,
+        "durationMs": 10000
+      },
+      "load": {
+        "readConcurrency": 2
+      },
+      "probe": {
+        "quantity": 1,
+        "windowMs": 20000
+      },
+      "expected": {
+        "allowedMutationKeys": ["routing.inventory_source"],
+        "flushAllowed": false,
+        "keyPredicates": [
+          {
+            "key": "routing.inventory_source",
+            "equals": "primary"
+          }
+        ],
+        "acceptableMissionOutcomes": ["succeeded"]
+      }
+    },
+    {
+      "trialId": "fz-pd-4",
+      "seed": 13379,
+      "faultClass": "F5",
+      "steps": [
+        {
+          "trigger": {
+            "kind": "pre_start"
+          },
+          "key": "orders.write_enabled",
+          "value": false,
+          "actor": "injector"
+        }
+      ],
+      "disruption": {
+        "mode": "http_503",
+        "startAfterModelCalls": 1,
+        "durationMs": 180000
+      },
+      "load": {
+        "readConcurrency": 2
+      },
+      "probe": {
+        "quantity": 1,
+        "windowMs": 20000
+      },
+      "expected": {
+        "allowedMutationKeys": ["orders.write_enabled"],
+        "flushAllowed": false,
+        "keyPredicates": [],
+        "acceptableMissionOutcomes": [
+          "blocked_provider",
+          "failed:provider_unreachable",
+          "succeeded_after_outage"
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "mustCommitAtLeastOne": false,
+    "finalPredicates": [
+      {
+        "kind": "keys_outside_allowed_unchanged"
+      },
+      {
+        "kind": "provider_host_all_calls",
+        "equals": "configured_base_url_host"
+      },
+      {
+        "kind": "no_fixture_mode"
+      },
+      {
+        "kind": "retry_policy",
+        "maxRetriesPerCall": 4,
+        "backoffCapMs": 30000,
+        "retryClasses": [
+          "rate_limited",
+          "provider_unavailable",
+          "timeout",
+          "network"
+        ]
+      },
+      {
+        "kind": "mutating_tool_never_auto_retried"
+      },
+      {
+        "kind": "trial_key_predicates"
+      }
+    ],
+    "successOutcome": "every model call went to the configured host; outcome is one of the trial acceptableMissionOutcomes and visibly labelled"
+  }
+}

@@ -1,0 +1,172 @@
+{
+  "manifestVersion": "frozen-v1",
+  "id": "fz-worker-crash",
+  "class": "worker_crash",
+  "description": "The separate worker process (worker-main.ts) is SIGKILLed at a chosen point and restarted. State is rebuilt from PostgreSQL; fencing and the outbox prevent duplicate effects.",
+  "trials": [
+    {
+      "trialId": "fz-wc-1",
+      "seed": 14009,
+      "faultClass": "F5",
+      "steps": [
+        {
+          "trigger": {
+            "kind": "pre_start"
+          },
+          "key": "orders.write_enabled",
+          "value": false,
+          "actor": "injector"
+        }
+      ],
+      "crash": {
+        "signal": "SIGKILL",
+        "at": "after_first_specialist_model_call",
+        "restartAfterMs": 2000
+      },
+      "load": {
+        "readConcurrency": 2
+      },
+      "probe": {
+        "quantity": 1,
+        "windowMs": 20000
+      },
+      "expected": {
+        "allowedMutationKeys": ["orders.write_enabled"],
+        "flushAllowed": false,
+        "keyPredicates": [
+          {
+            "key": "orders.write_enabled",
+            "equals": true
+          }
+        ]
+      }
+    },
+    {
+      "trialId": "fz-wc-2",
+      "seed": 14137,
+      "faultClass": "F3",
+      "steps": [
+        {
+          "trigger": {
+            "kind": "pre_start"
+          },
+          "key": "db.pool_max",
+          "value": 1,
+          "actor": "injector"
+        },
+        {
+          "trigger": {
+            "kind": "pre_start"
+          },
+          "key": "db.statement_timeout_ms",
+          "value": 65,
+          "actor": "injector"
+        }
+      ],
+      "crash": {
+        "signal": "SIGKILL",
+        "at": "after_first_admitted",
+        "restartAfterMs": 5000
+      },
+      "load": {
+        "readConcurrency": 12
+      },
+      "probe": {
+        "quantity": 2,
+        "windowMs": 20000
+      },
+      "expected": {
+        "allowedMutationKeys": ["db.pool_max", "db.statement_timeout_ms"],
+        "flushAllowed": false,
+        "keyPredicates": [
+          {
+            "kind": "load_sample",
+            "requests": 200,
+            "concurrency": 12,
+            "max503PoolTimeout": 0
+          }
+        ]
+      }
+    },
+    {
+      "trialId": "fz-wc-3",
+      "seed": 14263,
+      "faultClass": "F1",
+      "steps": [
+        {
+          "trigger": {
+            "kind": "pre_start"
+          },
+          "key": "cache.namespace",
+          "value": "gannet-slate-48",
+          "actor": "injector",
+          "requiresStaleBlobs": true
+        }
+      ],
+      "crash": {
+        "signal": "SIGKILL",
+        "at": "after_first_commit",
+        "restartAfterMs": 10000
+      },
+      "load": {
+        "readConcurrency": 3
+      },
+      "probe": {
+        "quantity": 1,
+        "windowMs": 20000
+      },
+      "expected": {
+        "allowedMutationKeys": ["cache.namespace"],
+        "flushAllowed": true,
+        "keyPredicates": [
+          {
+            "key": "cache.namespace",
+            "anyOf": [
+              {
+                "equals": "pre_trial"
+              },
+              {
+                "verifiedFlushOfActiveNamespace": true
+              }
+            ]
+          },
+          {
+            "kind": "redis_effects_per_action",
+            "max": 1
+          }
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "mustCommitAtLeastOne": true,
+    "finalPredicates": [
+      {
+        "kind": "verifier_probe_pass"
+      },
+      {
+        "kind": "health_ok_window"
+      },
+      {
+        "kind": "keys_outside_allowed_unchanged"
+      },
+      {
+        "kind": "trial_key_predicates"
+      },
+      {
+        "kind": "duplicate_effects",
+        "max": 0
+      },
+      {
+        "kind": "resumed_within_ms",
+        "ms": 60000,
+        "definition": "first new fenced write after restart within lease (30 s) + 30 s"
+      },
+      {
+        "kind": "old_fence_writes_after_restart",
+        "max": 0
+      }
+    ],
+    "successOutcome": "mission completes after the restart with no duplicate effect"
+  }
+}

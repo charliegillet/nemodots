@@ -1,0 +1,32 @@
+{
+  "format": "nemodots.inference.fixture.v1",
+  "label": "Hand-authored text completion fixture (not live evidence)",
+  "provenance": "hand-authored",
+  "host": "fixture.local",
+  "models": ["nvidia/NVIDIA-Nemotron-3-Super-120B-A12B"],
+  "entries": [
+    {
+      "key": "265c93a34b3cc85d5836ab0a34953943026ead8987687ddabcd21bff5815f0bf",
+      "request": {
+        "model": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B",
+        "systemDigest": "561042253fe36e358c88b4b2e9c2474a25cebde03717e04be1ae9e7983b2b21e",
+        "messageCount": 1,
+        "toolSchemaHash": null
+      },
+      "response": {
+        "modelReturned": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B",
+        "reasoning": null,
+        "content": "pong",
+        "finishReason": "stop",
+        "outcome": "completed",
+        "usage": {
+          "promptTokens": 30,
+          "completionTokens": 3,
+          "cachedTokens": 0,
+          "reasoningTokens": null
+        },
+        "toolCalls": []
+      }
+    }
+  ]
+}

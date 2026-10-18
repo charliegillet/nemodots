@@ -1,0 +1,15 @@
+prod (non-dev) packages in lockfile: 936
+789  MIT
+56  ISC
+50  Apache-2.0
+18  BSD-3-Clause
+12  MPL-2.0
+4  BSD-2-Clause
+2  Unlicense
+1  (Apache-2.0 AND BSD-3-Clause)
+1  (MPL-2.0 OR Apache-2.0)
+1  (AFL-2.1 OR BSD-3-Clause)
+1  UNKNOWN
+1  0BSD
+---- flagged:
+node_modules/khroma => UNKNOWN

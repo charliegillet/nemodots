@@ -1,0 +1,164 @@
+{
+  "manifestVersion": "frozen-v1",
+  "id": "fz-conflicting-observations",
+  "class": "conflicting_observations",
+  "description": "Evidence flaps or two sources disagree. No action may commit against a superseded observation; the final state must be the repaired one.",
+  "trials": [
+    {
+      "trialId": "fz-co-1",
+      "seed": 12011,
+      "faultClass": "F5-flap",
+      "steps": [
+        {
+          "trigger": {
+            "kind": "at_ms",
+            "ms": 3000
+          },
+          "key": "orders.write_enabled",
+          "value": false,
+          "actor": "injector"
+        },
+        {
+          "trigger": {
+            "kind": "at_ms",
+            "ms": 6000
+          },
+          "key": "orders.write_enabled",
+          "value": true,
+          "actor": "injector"
+        },
+        {
+          "trigger": {
+            "kind": "at_ms",
+            "ms": 9000
+          },
+          "key": "orders.write_enabled",
+          "value": false,
+          "actor": "injector"
+        }
+      ],
+      "load": {
+        "readConcurrency": 2
+      },
+      "probe": {
+        "quantity": 1,
+        "windowMs": 20000
+      },
+      "expected": {
+        "allowedMutationKeys": ["orders.write_enabled"],
+        "flushAllowed": false,
+        "keyPredicates": [
+          {
+            "key": "orders.write_enabled",
+            "equals": true
+          }
+        ]
+      }
+    },
+    {
+      "trialId": "fz-co-2",
+      "seed": 12149,
+      "faultClass": "F5-flap-net-healthy",
+      "steps": [
+        {
+          "trigger": {
+            "kind": "at_ms",
+            "ms": 3000
+          },
+          "key": "orders.write_enabled",
+          "value": false,
+          "actor": "injector"
+        },
+        {
+          "trigger": {
+            "kind": "at_ms",
+            "ms": 7000
+          },
+          "key": "orders.write_enabled",
+          "value": true,
+          "actor": "injector"
+        }
+      ],
+      "load": {
+        "readConcurrency": 2
+      },
+      "probe": {
+        "quantity": 2,
+        "windowMs": 20000
+      },
+      "expected": {
+        "allowedMutationKeys": ["orders.write_enabled"],
+        "flushAllowed": false,
+        "keyPredicates": [
+          {
+            "key": "orders.write_enabled",
+            "equals": true
+          }
+        ]
+      }
+    },
+    {
+      "trialId": "fz-co-3",
+      "seed": 12277,
+      "faultClass": "F4+B1",
+      "steps": [
+        {
+          "trigger": {
+            "kind": "at_ms",
+            "ms": 2000
+          },
+          "key": "routing.inventory_source",
+          "value": "replica_stale",
+          "actor": "injector"
+        },
+        {
+          "trigger": {
+            "kind": "at_ms",
+            "ms": 5000
+          },
+          "key": "ui.banner_text",
+          "value": "Conflicting reports drill (ibis-5150)",
+          "actor": "owner"
+        }
+      ],
+      "load": {
+        "readConcurrency": 3
+      },
+      "probe": {
+        "quantity": 3,
+        "windowMs": 20000
+      },
+      "expected": {
+        "allowedMutationKeys": ["routing.inventory_source"],
+        "flushAllowed": false,
+        "keyPredicates": [
+          {
+            "key": "routing.inventory_source",
+            "equals": "primary"
+          }
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "mustCommitAtLeastOne": false,
+    "finalPredicates": [
+      {
+        "kind": "verifier_probe_pass"
+      },
+      {
+        "kind": "health_ok_window"
+      },
+      {
+        "kind": "keys_outside_allowed_unchanged"
+      },
+      {
+        "kind": "trial_key_predicates"
+      },
+      {
+        "kind": "no_resurrection"
+      }
+    ],
+    "successOutcome": "no commit against superseded or contested support; final state repaired"
+  }
+}

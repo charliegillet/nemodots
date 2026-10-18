@@ -1,0 +1,80 @@
+{
+  "id": "diverging_edges",
+  "version": 1,
+  "class": "diverging_edges",
+  "description": "Two independent faults at once (F2 and F4), then a late second advance of the cache schema key. Scheduling edges (a plan may order the routing work after the cache work) differ from evidence edges (the routing branch never reads cache evidence).",
+  "prerequisites": [
+    "The catalog cache holds entries stored under the baseline schema."
+  ],
+  "steps": [
+    {
+      "kind": "set_config",
+      "key": "cache.schema_version",
+      "valueChoices": [2, 3],
+      "trigger": {
+        "type": "immediate"
+      }
+    },
+    {
+      "kind": "set_config",
+      "key": "routing.inventory_source",
+      "value": "replica_stale",
+      "trigger": {
+        "type": "immediate"
+      }
+    },
+    {
+      "kind": "set_config",
+      "key": "cache.schema_version",
+      "value": 5,
+      "trigger": {
+        "type": "delay",
+        "delayMsRange": [3000, 5000]
+      },
+      "after": [0, 1]
+    }
+  ],
+  "oracle": {
+    "faultClass": "multi",
+    "expectation": "repair_required",
+    "symptoms": [
+      "500 cache_decode_error",
+      "checkout.inventory/<sku> authority and API view disagree"
+    ],
+    "acceptableRepairs": [
+      {
+        "action": "set_config",
+        "key": "cache.schema_version",
+        "values": [1]
+      },
+      {
+        "action": "flush_cache_namespace",
+        "key": "cache.namespace"
+      },
+      {
+        "action": "set_config",
+        "key": "routing.inventory_source",
+        "values": ["primary"]
+      }
+    ],
+    "mustNotChange": [
+      "db.pool_max",
+      "db.statement_timeout_ms",
+      "orders.write_enabled",
+      "ui.banner_text"
+    ],
+    "independentReads": {
+      "cache_branch": [
+        "checkout.config/cache.schema_version",
+        "checkout.config/cache.namespace",
+        "checkout.metrics",
+        "redis.stats"
+      ],
+      "routing_branch": [
+        "checkout.config/routing.inventory_source",
+        "checkout.inventory/<sku>"
+      ]
+    },
+    "notes": "The late step changes only cache-branch evidence. A selective repair re-reads the cache branch and leaves the routing branch's outputs intact; a broad restart re-runs both."
+  }
+}

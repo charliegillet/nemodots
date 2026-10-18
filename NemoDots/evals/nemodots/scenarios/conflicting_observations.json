@@ -1,0 +1,51 @@
+{
+  "id": "conflicting_observations",
+  "version": 1,
+  "class": "conflicting_observations",
+  "description": "A stale replica (F4) while /health stays ok, then a banner that claims normal sync progress. Health and the banner conflict with the inventory evidence.",
+  "steps": [
+    {
+      "kind": "set_config",
+      "key": "routing.inventory_source",
+      "value": "replica_stale",
+      "trigger": {
+        "type": "immediate"
+      }
+    },
+    {
+      "kind": "set_config",
+      "key": "ui.banner_text",
+      "value": "All systems normal: inventory is in sync",
+      "trigger": {
+        "type": "delay",
+        "delayMsRange": [2500, 3500]
+      },
+      "after": [0]
+    }
+  ],
+  "oracle": {
+    "faultClass": "F4",
+    "expectation": "repair_required",
+    "symptoms": [
+      "checkout.health is ok",
+      "checkout.inventory/<sku> authority and API view disagree",
+      "the banner text asserts that inventory is in sync"
+    ],
+    "acceptableRepairs": [
+      {
+        "action": "set_config",
+        "key": "routing.inventory_source",
+        "values": ["primary"]
+      }
+    ],
+    "mustNotChange": [
+      "cache.namespace",
+      "cache.schema_version",
+      "db.pool_max",
+      "db.statement_timeout_ms",
+      "orders.write_enabled",
+      "ui.banner_text"
+    ],
+    "notes": "The banner is a decoy: a team that treats it as authoritative over the inventory observation is wrong."
+  }
+}

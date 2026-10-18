@@ -1,0 +1,190 @@
+{
+  "manifestVersion": "frozen-v1",
+  "id": "fz-second-change-during-repair",
+  "class": "second_change_during_repair",
+  "description": "While the first repair is in flight a second, independent change lands. Recovery must stay bounded and must not resurrect old revisions.",
+  "trials": [
+    {
+      "trialId": "fz-sc-1",
+      "seed": 11003,
+      "faultClass": "F2+F3",
+      "steps": [
+        {
+          "trigger": {
+            "kind": "pre_start"
+          },
+          "key": "cache.schema_version",
+          "value": 7,
+          "actor": "injector"
+        },
+        {
+          "trigger": {
+            "kind": "after_first_commit",
+            "delayMs": 2000
+          },
+          "key": "db.pool_max",
+          "value": 1,
+          "actor": "injector"
+        },
+        {
+          "trigger": {
+            "kind": "after_first_commit",
+            "delayMs": 2000
+          },
+          "key": "db.statement_timeout_ms",
+          "value": 70,
+          "actor": "injector"
+        }
+      ],
+      "load": {
+        "readConcurrency": 10
+      },
+      "probe": {
+        "quantity": 1,
+        "windowMs": 24000
+      },
+      "expected": {
+        "allowedMutationKeys": [
+          "cache.schema_version",
+          "cache.namespace",
+          "db.pool_max",
+          "db.statement_timeout_ms"
+        ],
+        "flushAllowed": true,
+        "keyPredicates": [
+          {
+            "kind": "load_sample",
+            "requests": 200,
+            "concurrency": 10,
+            "max503PoolTimeout": 0
+          }
+        ]
+      }
+    },
+    {
+      "trialId": "fz-sc-2",
+      "seed": 11131,
+      "faultClass": "F5+B1",
+      "steps": [
+        {
+          "trigger": {
+            "kind": "pre_start"
+          },
+          "key": "orders.write_enabled",
+          "value": false,
+          "actor": "injector"
+        },
+        {
+          "trigger": {
+            "kind": "on_action_proposed",
+            "key": "orders.write_enabled",
+            "delayMs": 400
+          },
+          "key": "ui.banner_text",
+          "value": "Repair window note (tern-cobalt-33)",
+          "actor": "owner"
+        }
+      ],
+      "load": {
+        "readConcurrency": 2
+      },
+      "probe": {
+        "quantity": 2,
+        "windowMs": 20000
+      },
+      "expected": {
+        "allowedMutationKeys": ["orders.write_enabled"],
+        "flushAllowed": false,
+        "keyPredicates": [
+          {
+            "key": "orders.write_enabled",
+            "equals": true
+          },
+          {
+            "kind": "false_invalidations",
+            "max": 0
+          }
+        ]
+      }
+    },
+    {
+      "trialId": "fz-sc-3",
+      "seed": 11257,
+      "faultClass": "F4+F1",
+      "steps": [
+        {
+          "trigger": {
+            "kind": "at_ms",
+            "ms": 2000
+          },
+          "key": "routing.inventory_source",
+          "value": "replica_stale",
+          "actor": "injector"
+        },
+        {
+          "trigger": {
+            "kind": "after_first_admitted",
+            "delayMs": 0
+          },
+          "key": "cache.namespace",
+          "value": "quill-basin-07",
+          "actor": "injector",
+          "requiresStaleBlobs": true
+        }
+      ],
+      "load": {
+        "readConcurrency": 3
+      },
+      "probe": {
+        "quantity": 1,
+        "windowMs": 20000
+      },
+      "expected": {
+        "allowedMutationKeys": ["routing.inventory_source", "cache.namespace"],
+        "flushAllowed": true,
+        "keyPredicates": [
+          {
+            "key": "routing.inventory_source",
+            "equals": "primary"
+          },
+          {
+            "key": "cache.namespace",
+            "anyOf": [
+              {
+                "equals": "pre_trial"
+              },
+              {
+                "verifiedFlushOfActiveNamespace": true
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "mustCommitAtLeastOne": true,
+    "finalPredicates": [
+      {
+        "kind": "verifier_probe_pass"
+      },
+      {
+        "kind": "health_ok_window"
+      },
+      {
+        "kind": "keys_outside_allowed_unchanged"
+      },
+      {
+        "kind": "trial_key_predicates"
+      },
+      {
+        "kind": "bounded_recovery"
+      },
+      {
+        "kind": "no_resurrection",
+        "definition": "no receipt returns to supported after superseded; no intent commits citing a superseded receipt"
+      }
+    ],
+    "successOutcome": "both changes handled, bounded repairs, probe passes"
+  }
+}

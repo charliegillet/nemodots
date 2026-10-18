@@ -1,0 +1,12 @@
+
+> opendots@0.1.0 check-format
+> prettier --check src tests *.json *.ts *.js index.html public .github Dockerfile "compose*.yml" deployment README.md docs .env.example --ignore-unknown
+
+Checking formatting...
+[warn] docs/nemodots/audit/CRUSOE_SMOKE_PRE.md
+[warn] docs/nemodots/audit/FRONTEND.md
+[warn] docs/nemodots/BUILD_PROMPT.md
+[warn] docs/nemodots/TEST_PROMPT.md
+[warn] Code style issues found in 4 files. Run Prettier with --write to fix.
+npm run check-format  2.74s user 0.12s system 210% cpu 1.357 total
+check-format exit=1

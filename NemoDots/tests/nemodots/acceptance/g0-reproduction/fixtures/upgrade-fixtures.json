@@ -1,0 +1,529 @@
+{
+  "version": "g0-upgrade-fixtures-v1",
+  "source": "Hand-written from docs/nemodots/CONTRACTS.md (closed enums, id formats, digest format) and the column lists of the migrations. Inserted in foreign-key order. One sentinel row per table; every sentinel must survive every later migration unchanged.",
+  "notes": [
+    "Value types: strings, numbers and booleans are literal; objects and arrays for jsonb columns are written as {\"$jsonb\": ...}; arrays for text[]/uuid[] columns are plain JSON arrays; timestamps are ISO strings.",
+    "A row with \"op\": \"update\" changes a row the migration itself created (checkout.config_collection singleton)."
+  ],
+  "groups": {
+    "0001_bootstrap": {
+      "creates": [],
+      "reason": "0001 creates schemas, roles and grants but no table, so it has no sentinel rows."
+    },
+    "0002_ledger": {
+      "creates": [
+        "ledger.sources",
+        "ledger.observation_receipts",
+        "ledger.source_revisions",
+        "ledger.receipt_confirmations",
+        "ledger.receipt_transitions",
+        "ledger.context_snapshots",
+        "ledger.model_call_records",
+        "ledger.inference_attempts",
+        "ledger.dependency_nodes",
+        "ledger.dependency_edges",
+        "ledger.invalidation_events"
+      ],
+      "rows": [
+        {
+          "table": "ledger.sources",
+          "values": {
+            "id": "00000000-0000-4000-8000-000000000101",
+            "owner_id": "acc0-owner",
+            "environment": "test",
+            "resource": "checkout",
+            "key": "cache.namespace",
+            "source_type": "controlled_config",
+            "authority": "controlled"
+          }
+        },
+        {
+          "table": "ledger.sources",
+          "values": {
+            "id": "00000000-0000-4000-8000-000000000102",
+            "owner_id": "acc0-owner",
+            "environment": "test",
+            "resource": "checkout",
+            "key": "checkout.health",
+            "source_type": "probe",
+            "authority": "observed"
+          }
+        },
+        {
+          "table": "ledger.observation_receipts",
+          "values": {
+            "id": "00000000-0000-4000-8000-000000000201",
+            "source_id": "00000000-0000-4000-8000-000000000101",
+            "source_revision": 1,
+            "collection_revision": 1,
+            "mission_id": "00000000-0000-4000-8000-000000000301",
+            "space_id": "acc0-space",
+            "observed_at": "2026-10-17T10:00:00Z",
+            "content_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+            "normalized_value": { "$jsonb": { "value": "catalog-a" } },
+            "raw_ref": { "$jsonb": { "tool": "read_config" } },
+            "status": "supported",
+            "status_version": 0,
+            "trust": "controlled_authority",
+            "provenance_kind": "watcher",
+            "tool_call_id": "tc-acc0-1",
+            "self_write": "none",
+            "negative": null,
+            "expires_at": "2026-10-18T10:00:00Z"
+          }
+        },
+        {
+          "table": "ledger.observation_receipts",
+          "values": {
+            "id": "00000000-0000-4000-8000-000000000202",
+            "source_id": "00000000-0000-4000-8000-000000000102",
+            "source_revision": 1,
+            "mission_id": "00000000-0000-4000-8000-000000000301",
+            "observed_at": "2026-10-17T10:00:01Z",
+            "content_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+            "normalized_value": { "$jsonb": { "status": "ok" } },
+            "status": "supported",
+            "trust": "probe",
+            "provenance_kind": "probe",
+            "self_write": "none"
+          }
+        },
+        {
+          "table": "ledger.source_revisions",
+          "values": {
+            "source_id": "00000000-0000-4000-8000-000000000101",
+            "source_revision": 1,
+            "receipt_id": "00000000-0000-4000-8000-000000000201",
+            "content_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+            "created_at": "2026-10-17T10:00:00Z"
+          }
+        },
+        {
+          "table": "ledger.receipt_confirmations",
+          "values": {
+            "receipt_id": "00000000-0000-4000-8000-000000000201",
+            "confirmed_at": "2026-10-17T10:05:00Z",
+            "provenance_kind": "watcher"
+          }
+        },
+        {
+          "table": "ledger.receipt_transitions",
+          "values": {
+            "receipt_id": "00000000-0000-4000-8000-000000000201",
+            "from_status": "supported",
+            "to_status": "contested",
+            "reason": "conflicting_observation",
+            "at": "2026-10-17T10:06:00Z",
+            "event_id": "evt-acc0-1"
+          }
+        },
+        {
+          "table": "ledger.context_snapshots",
+          "values": {
+            "id": "00000000-0000-4000-8000-000000000401",
+            "mission_id": "00000000-0000-4000-8000-000000000301",
+            "context_schema_version": "v1",
+            "layout": "cache_aware",
+            "prefix_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+            "prefix_length": 100,
+            "context_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+            "context_length": 250,
+            "tool_schema_hash": "5555555555555555555555555555555555555555555555555555555555555555",
+            "injected": { "$jsonb": [{ "kind": "receipt", "id": "r1" }] },
+            "dependency_vector": { "$jsonb": [] },
+            "volatile_now": "2026-10-17T10:07:00Z",
+            "created_at": "2026-10-17T10:07:00Z"
+          }
+        },
+        {
+          "table": "ledger.model_call_records",
+          "values": {
+            "id": "00000000-0000-4000-8000-000000000501",
+            "scope": { "$jsonb": { "ownerId": "acc0-owner" } },
+            "mission_id": "00000000-0000-4000-8000-000000000301",
+            "task_id": "00000000-0000-4000-8000-000000000601",
+            "attempt_id": "00000000-0000-4000-8000-000000000701",
+            "role": "worker",
+            "model_requested": "acc0-model",
+            "model_returned": "acc0-model",
+            "provider_host": "127.0.0.1:1",
+            "provider_mode": "fixture",
+            "context_snapshot_id": "00000000-0000-4000-8000-000000000401",
+            "outcome": "completed",
+            "output_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+            "output_dependency_vector": { "$jsonb": [] },
+            "tool_calls": { "$jsonb": [] },
+            "created_at": "2026-10-17T10:08:00Z"
+          }
+        },
+        {
+          "table": "ledger.inference_attempts",
+          "values": {
+            "model_call_id": "00000000-0000-4000-8000-000000000501",
+            "n": 1,
+            "mission_id": "00000000-0000-4000-8000-000000000301",
+            "task_id": "00000000-0000-4000-8000-000000000601",
+            "attempt_id": "00000000-0000-4000-8000-000000000701",
+            "role": "worker",
+            "model_requested": "acc0-model",
+            "provider_host": "127.0.0.1:1",
+            "provider_mode": "fixture",
+            "started_at": "2026-10-17T10:08:00Z",
+            "http_status": 200,
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "finish_reason": "stop",
+            "streamed": false,
+            "outcome": "recorded"
+          }
+        },
+        {
+          "table": "ledger.dependency_nodes",
+          "values": {
+            "kind": "receipt",
+            "id": "00000000-0000-4000-8000-000000000201"
+          }
+        },
+        {
+          "table": "ledger.dependency_nodes",
+          "values": {
+            "kind": "task",
+            "id": "00000000-0000-4000-8000-000000000601",
+            "mission_id": "00000000-0000-4000-8000-000000000301",
+            "task_id": "00000000-0000-4000-8000-000000000601"
+          }
+        },
+        {
+          "table": "ledger.dependency_edges",
+          "values": {
+            "id": "00000000-0000-4000-8000-000000000801",
+            "mission_id": "00000000-0000-4000-8000-000000000301",
+            "kind": "evidence",
+            "from_kind": "receipt",
+            "from_id": "00000000-0000-4000-8000-000000000201",
+            "to_kind": "task",
+            "to_id": "00000000-0000-4000-8000-000000000601"
+          }
+        },
+        {
+          "table": "ledger.invalidation_events",
+          "values": {
+            "id": "7777777777777777777777777777777777777777777777777777777777777777",
+            "source_id": "00000000-0000-4000-8000-000000000101",
+            "source_key": "checkout.config/cache.namespace",
+            "old_receipt_id": "00000000-0000-4000-8000-000000000201",
+            "new_receipt_id": null,
+            "reason": "newer_observation",
+            "self_write": "none",
+            "graph_version": 1,
+            "mission_ids": {
+              "$jsonb": ["00000000-0000-4000-8000-000000000301"]
+            },
+            "affected": {
+              "$jsonb": {
+                "modelCallIds": [],
+                "attemptIds": [],
+                "outputIds": [],
+                "actionIds": [],
+                "taskIds": []
+              }
+            },
+            "per_mission": { "$jsonb": [] },
+            "closure": {
+              "$jsonb": { "depth": 0, "nodes": 0, "capped": false }
+            }
+          }
+        }
+      ]
+    },
+    "0003_coordinator": {
+      "creates": [
+        "coordinator.missions",
+        "coordinator.tasks",
+        "coordinator.task_attempts",
+        "coordinator.task_outputs",
+        "coordinator.findings",
+        "coordinator.invalidations",
+        "coordinator.recovery_events",
+        "coordinator.outbox",
+        "coordinator.outbox_applied",
+        "coordinator.events"
+      ],
+      "rows": [
+        {
+          "table": "coordinator.missions",
+          "values": {
+            "id": "00000000-0000-4000-8000-000000000301",
+            "owner_id": "acc0-owner",
+            "space_id": "acc0-space",
+            "environment": "test",
+            "resource": "checkout",
+            "goal": "Restore the checkout application.",
+            "constraints": { "$jsonb": ["no destructive actions"] },
+            "mode": "fixture",
+            "status": "created",
+            "budgets": {
+              "$jsonb": {
+                "maxTasks": 24,
+                "maxDepth": 3,
+                "maxBreadth": 6,
+                "maxTokens": 100000,
+                "maxInferenceCalls": 100,
+                "maxWallClockMs": 600000
+              }
+            },
+            "admission_min_age_ms": 0,
+            "provider": {
+              "$jsonb": {
+                "host": "127.0.0.1:1",
+                "plannerModel": "acc0-model",
+                "workerModel": "acc0-model"
+              }
+            }
+          }
+        },
+        {
+          "table": "coordinator.tasks",
+          "values": {
+            "id": "00000000-0000-4000-8000-000000000601",
+            "mission_id": "00000000-0000-4000-8000-000000000301",
+            "parent_id": null,
+            "depth": 0,
+            "ordinal": 0,
+            "title": "Investigate the checkout",
+            "question": "What is wrong with checkout?",
+            "role": "investigator",
+            "capabilities": ["observe", "delegate", "publish_finding"],
+            "status": "pending",
+            "generation": 0,
+            "budget": {
+              "$jsonb": {
+                "maxIterations": 8,
+                "maxTokens": 20000,
+                "maxChildren": 3
+              }
+            }
+          }
+        },
+        {
+          "table": "coordinator.tasks",
+          "values": {
+            "id": "00000000-0000-4000-8000-000000000602",
+            "mission_id": "00000000-0000-4000-8000-000000000301",
+            "parent_id": "00000000-0000-4000-8000-000000000601",
+            "depth": 1,
+            "ordinal": 1,
+            "title": "Verify the repair",
+            "question": "Did the repair take effect?",
+            "role": "verifier",
+            "capabilities": ["observe"],
+            "status": "pending",
+            "generation": 0,
+            "prerequisites": ["00000000-0000-4000-8000-000000000601"],
+            "budget": {
+              "$jsonb": {
+                "maxIterations": 4,
+                "maxTokens": 10000,
+                "maxChildren": 0
+              }
+            },
+            "justification": "A verifier is needed to check the repair independently."
+          }
+        },
+        {
+          "table": "coordinator.task_attempts",
+          "values": {
+            "id": "00000000-0000-4000-8000-000000000701",
+            "task_id": "00000000-0000-4000-8000-000000000601",
+            "mission_id": "00000000-0000-4000-8000-000000000301",
+            "n": 1,
+            "kind": "initial",
+            "status": "running",
+            "generation": 0,
+            "lease_owner": "worker-acc0",
+            "fencing_token": 1,
+            "lease_expires_at": "2026-10-17T11:00:00Z",
+            "lease_renewed_at": "2026-10-17T10:30:00Z",
+            "read_set_receipt_ids": ["00000000-0000-4000-8000-000000000201"],
+            "model_call_ids": ["00000000-0000-4000-8000-000000000501"]
+          }
+        },
+        {
+          "table": "coordinator.task_outputs",
+          "values": {
+            "id": "00000000-0000-4000-8000-000000000901",
+            "task_id": "00000000-0000-4000-8000-000000000601",
+            "attempt_id": "00000000-0000-4000-8000-000000000701",
+            "mission_id": "00000000-0000-4000-8000-000000000301",
+            "kind": "finding",
+            "content": { "$jsonb": { "claim": "cache namespace looks stale" } },
+            "digest": "8888888888888888888888888888888888888888888888888888888888888888",
+            "usable": true,
+            "unusable_reason": null
+          }
+        },
+        {
+          "table": "coordinator.findings",
+          "values": {
+            "id": "00000000-0000-4000-8000-000000000a01",
+            "mission_id": "00000000-0000-4000-8000-000000000301",
+            "task_id": "00000000-0000-4000-8000-000000000601",
+            "attempt_id": "00000000-0000-4000-8000-000000000701",
+            "claim": "The cache namespace appears to have changed.",
+            "supporting_receipt_ids": ["00000000-0000-4000-8000-000000000201"],
+            "confidence": "medium"
+          }
+        },
+        {
+          "table": "coordinator.invalidations",
+          "values": {
+            "event_id": "7777777777777777777777777777777777777777777777777777777777777777",
+            "mission_id": "00000000-0000-4000-8000-000000000301",
+            "event": { "$jsonb": { "reason": "newer_observation" } },
+            "source_key": "checkout.config/cache.namespace",
+            "reason": "newer_observation",
+            "self_write": "none"
+          }
+        },
+        {
+          "table": "coordinator.recovery_events",
+          "values": {
+            "id": "00000000-0000-4000-8000-000000000b01",
+            "invalidation_event_id": "7777777777777777777777777777777777777777777777777777777777777777",
+            "mission_id": "00000000-0000-4000-8000-000000000301",
+            "kind": "repair_scheduled",
+            "task_id": "00000000-0000-4000-8000-000000000601",
+            "detail": "repair scheduled for the acceptance sentinel"
+          }
+        },
+        {
+          "table": "coordinator.outbox",
+          "values": {
+            "id": 9001,
+            "mission_id": "00000000-0000-4000-8000-000000000301",
+            "topic": "acc0.sentinel",
+            "payload": { "$jsonb": { "n": 1 } },
+            "dedupe_key": "acc0-sentinel-9001"
+          }
+        },
+        {
+          "table": "coordinator.outbox_applied",
+          "values": {
+            "outbox_id": 9001,
+            "handler": "acc0-handler"
+          }
+        },
+        {
+          "table": "coordinator.events",
+          "values": {
+            "mission_id": "00000000-0000-4000-8000-000000000301",
+            "kind": "heartbeat",
+            "payload": { "$jsonb": { "kind": "heartbeat" } }
+          }
+        }
+      ]
+    },
+    "0004_checkout": {
+      "creates": [
+        "checkout.products",
+        "checkout.inventory",
+        "checkout.inventory_replica",
+        "checkout.orders",
+        "checkout.order_items",
+        "checkout.config_entries",
+        "checkout.config_versions",
+        "checkout.config_collection",
+        "control.scenario_runs",
+        "control.fault_schedules"
+      ],
+      "rows": [
+        {
+          "table": "checkout.products",
+          "values": {
+            "sku": "ACC0-SKU-1",
+            "name": "Acceptance sentinel",
+            "category": "test",
+            "price_cents": 1250,
+            "listed": true
+          }
+        },
+        {
+          "table": "checkout.inventory",
+          "values": { "sku": "ACC0-SKU-1", "quantity": 7 }
+        },
+        {
+          "table": "checkout.inventory_replica",
+          "values": { "sku": "ACC0-SKU-1", "quantity": 9 }
+        },
+        {
+          "table": "checkout.orders",
+          "values": {
+            "id": "00000000-0000-4000-8000-000000000c01",
+            "status": "confirmed",
+            "customer": "acc0-customer",
+            "total_cents": 2500,
+            "probe_run_id": "acc0-probe-run-1"
+          }
+        },
+        {
+          "table": "checkout.order_items",
+          "values": {
+            "order_id": "00000000-0000-4000-8000-000000000c01",
+            "sku": "ACC0-SKU-1",
+            "quantity": 2,
+            "price_cents": 1250
+          }
+        },
+        {
+          "table": "checkout.config_entries",
+          "values": {
+            "key": "cache.namespace",
+            "value": { "$jsonb": "catalog-a" },
+            "version": 1,
+            "caused_by_actor": "seed"
+          }
+        },
+        {
+          "table": "checkout.config_versions",
+          "values": {
+            "key": "cache.namespace",
+            "version": 1,
+            "value": { "$jsonb": "catalog-a" },
+            "after_digest": "9999999999999999999999999999999999999999999999999999999999999999",
+            "caused_by_actor": "seed"
+          }
+        },
+        {
+          "table": "checkout.config_collection",
+          "op": "update",
+          "where": { "singleton": true },
+          "values": { "version": 7 }
+        },
+        {
+          "table": "control.scenario_runs",
+          "values": {
+            "id": "00000000-0000-4000-8000-000000000d01",
+            "scenario_id": "acc0-scenario",
+            "seed": 1,
+            "manifest_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "status": "completed",
+            "detail": { "$jsonb": { "note": "sentinel" } }
+          }
+        },
+        {
+          "table": "control.fault_schedules",
+          "values": {
+            "run_id": "00000000-0000-4000-8000-000000000d01",
+            "step_index": 0,
+            "kind": "set_config",
+            "config_key": "cache.namespace",
+            "resolved_value": { "$jsonb": "catalog-b" },
+            "trigger": "immediate",
+            "status": "pending"
+          }
+        }
+      ]
+    }
+  },
+  "exceptions": {}
+}

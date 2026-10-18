@@ -1,0 +1,227 @@
+// Shared flows for the gate 4 test files.
+import { afterAll } from 'vitest';
+import { type EventTail, type NemoApi } from './api.js';
+import { NEUTRAL_CONSTRAINTS, NEUTRAL_GOAL } from './config.js';
+import {
+  type Provider,
+  type ProviderScript,
+  startProvider,
+} from './provider.js';
+import {
+  injectConfig,
+  readConfig,
+  startSystem,
+  type System,
+  type SystemOptions,
+} from './system.js';
+import { newProposerState, type ProposerState } from './scenarios.js';
+import { specDigest } from './spec.js';
+import type { MissionSnapshot } from '../../../../src/server/nemodots/contracts/index.js';
+
+/**
+ * Lazily starts the system on first use inside a test, so a missing entry
+ * point fails every test that needs it with the same explicit message (a
+ * failing beforeAll would leave the tests unreported instead of failed).
+ */
+export interface LazySystemOptions {
+  model?: string;
+  script?: ProviderScript;
+  upstream?: { baseUrl: string; apiKey: string };
+  system?: Omit<SystemOptions, 'providerUrl' | 'providerModel'>;
+  providerPort: number;
+}
+export function lazySystem(
+  input: LazySystemOptions | (() => LazySystemOptions),
+) {
+  let starting: Promise<{ system: System; provider: Provider }> | null = null;
+  const get = () => {
+    starting ??= (async () => {
+      const options = typeof input === 'function' ? input() : input;
+      const model = options.model ?? 'acc4-scripted-model';
+      const provider = await startProvider({
+        port: options.providerPort,
+        model,
+        script: options.script,
+        upstream: options.upstream,
+      });
+      try {
+        const system = await startSystem({
+          ...(options.system ?? {}),
+          providerUrl: provider.url,
+          providerModel: model,
+        });
+        return { system, provider };
+      } catch (error) {
+        await provider.close();
+        throw error;
+      }
+    })();
+    return starting;
+  };
+  afterAll(async () => {
+    if (!starting) return;
+    const started = await starting.catch(() => null);
+    if (started) {
+      await started.system.stop().catch(() => undefined);
+      await started.provider.close().catch(() => undefined);
+    }
+  }, 120_000);
+  return get;
+}
+
+/** Creates a goal-only mission (the gate-6 neutral goal, no fault named) and starts it. */
+export async function launchMission(
+  api: NemoApi,
+  options: { admissionMinAgeMs?: number; start?: boolean } = {},
+) {
+  const mission = await api.createMission({
+    goal: NEUTRAL_GOAL,
+    constraints: NEUTRAL_CONSTRAINTS,
+    ...(options.admissionMinAgeMs !== undefined
+      ? { admission: { minAgeMs: options.admissionMinAgeMs } }
+      : {}),
+  });
+  const tail = api.tail(mission.id).start();
+  if (options.start !== false) await api.lifecycle(mission.id, 'start');
+  return { mission, tail };
+}
+
+export async function finish(api: NemoApi, missionId: string, tail: EventTail) {
+  await api.lifecycle(missionId, 'cancel', [200, 409]).catch(() => undefined);
+  await tail.stop();
+}
+
+/** A value different from `current` inside the key's documented domain (oracle spec-enums). */
+export function alternateValue(
+  key: string,
+  current: unknown,
+): string | number | boolean {
+  switch (key) {
+    case 'cache.schema_version': {
+      const n = Number(current);
+      return n >= 9 ? n - 1 : n + 1;
+    }
+    case 'db.pool_max': {
+      const n = Number(current);
+      return n >= 20 ? n - 1 : n + 1;
+    }
+    case 'db.statement_timeout_ms': {
+      const n = Number(current);
+      return n >= 30000 ? n - 100 : n + 100;
+    }
+    case 'routing.inventory_source':
+      return current === 'primary' ? 'replica_stale' : 'primary';
+    case 'orders.write_enabled':
+      return !(current === true || current === 'true');
+    case 'cache.namespace':
+      return current === 'acc4-alt' ? 'acc4-alt2' : 'acc4-alt';
+    case 'ui.banner_text':
+      return `banner ${Date.now()}`;
+    default:
+      throw new Error(`no alternate value defined for ${key}`);
+  }
+}
+
+/** A cache.schema_version (domain 1..9) that differs from every value in `exclude`. */
+export function distinctSchemaVersion(exclude: readonly unknown[]): number {
+  const taken = new Set(exclude.map((v) => Number(v)));
+  for (let n = 1; n <= 9; n += 1) if (!taken.has(n)) return n;
+  throw new Error('no free cache.schema_version');
+}
+
+/**
+ * Out-of-band change through the injector role (see injectConfig): the app's
+ * own routes are not involved, so a receipt that follows was discovered by the
+ * watcher. `before` is the live value/version from the verifier role.
+ */
+export async function changeSource(
+  system: System,
+  key: string,
+  value?: string | number | boolean,
+) {
+  const before = await readConfig(system, key);
+  const next = value ?? alternateValue(key, before.value);
+  const result = await injectConfig(system, key, next);
+  return { before, next, result };
+}
+
+/** Waits for a receipt.registered of `sourceKey` with revision >= minRevision after an event id. */
+export async function waitRegistered(
+  tail: EventTail,
+  sourceKey: string,
+  minRevision: number,
+  afterEventId: number,
+  timeoutMs: number,
+  label = `receipt.registered for ${sourceKey} >= r${minRevision}`,
+) {
+  await tail.until(
+    (events) =>
+      events.some(
+        (e) =>
+          e.id > afterEventId &&
+          e.payload.kind === 'receipt.registered' &&
+          e.payload.sourceKey === sourceKey &&
+          e.payload.sourceRevision >= minRevision,
+      ),
+    timeoutMs,
+    label,
+  );
+  return tail
+    .of('receipt.registered')
+    .find(
+      (e) =>
+        e.id > afterEventId &&
+        e.payload.sourceKey === sourceKey &&
+        e.payload.sourceRevision >= minRevision,
+    )!;
+}
+
+/**
+ * A NOT_MET precondition: the scenario did not reach the state the assertion
+ * needs, so the case cannot be judged. Fails the test with an explicit marker
+ * instead of misattributing the outcome to the product.
+ */
+export function notMet(reason: string): never {
+  throw new Error(`NOT_MET: ${reason}`);
+}
+
+export function snapshotSummary(snapshot: MissionSnapshot) {
+  return {
+    status: snapshot.mission.status,
+    tasks: snapshot.tasks.map((t) => `${t.title}:${t.status}`),
+  };
+}
+
+/**
+ * Prepares ALPHA's admissible proposal against the live world: a value
+ * different from the current one and the spec digest of the value actually
+ * stored (read through the verifier role, never scraped from a tool result).
+ */
+export async function prepareProposer(
+  sys: System,
+  state: ProposerState,
+  overrides: Partial<ProposerState> = {},
+) {
+  Object.assign(state, newProposerState(), overrides);
+  const current = await readConfig(sys, 'cache.schema_version');
+  state.value = alternateValue('cache.schema_version', current.value);
+  state.currentDigest = specDigest(current.value);
+  return current;
+}
+
+export const sleep = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** Rejects with an explicit label instead of hanging when a gate or wait never completes. */
+export function within<T>(promise: Promise<T>, ms: number, label: string) {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(
+        () =>
+          reject(new Error(`Timed out after ${ms} ms waiting for ${label}`)),
+        ms,
+      ),
+    ),
+  ]);
+}

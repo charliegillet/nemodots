@@ -1,0 +1,39 @@
+{
+  "id": "pool_starvation",
+  "version": 1,
+  "class": "repairable_checkout_fault",
+  "description": "The business connection pool is shrunk to a size that cannot serve ordinary concurrency (F3).",
+  "steps": [
+    {
+      "kind": "set_config",
+      "key": "db.pool_max",
+      "value": 1,
+      "trigger": {
+        "type": "delay",
+        "delayMsRange": [0, 1500]
+      }
+    }
+  ],
+  "oracle": {
+    "faultClass": "F3",
+    "expectation": "repair_required",
+    "symptoms": [
+      "Concurrent requests answer 503 pool_timeout",
+      "GET /health is degraded with pool_exhausted"
+    ],
+    "acceptableRepairs": [
+      {
+        "action": "set_config",
+        "key": "db.pool_max"
+      }
+    ],
+    "mustNotChange": [
+      "cache.namespace",
+      "cache.schema_version",
+      "routing.inventory_source",
+      "orders.write_enabled",
+      "ui.banner_text"
+    ],
+    "notes": "Any db.pool_max >= 2 restores health (the /health capacity self-test runs 8 concurrent 40 ms units on its own pool of that size with a 200 ms acquire timeout; measured: 1 fails, 2 passes); the baseline is not required."
+  }
+}

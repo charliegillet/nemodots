@@ -1,0 +1,6 @@
+
+> opendots@0.1.0 lint
+> eslint src tests vite.config.ts
+
+npm run lint  1.93s user 0.18s system 168% cpu 1.251 total
+lint exit=0

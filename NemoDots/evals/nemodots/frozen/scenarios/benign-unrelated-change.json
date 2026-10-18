@@ -1,0 +1,113 @@
+{
+  "manifestVersion": "frozen-v1",
+  "id": "fz-benign-unrelated-change",
+  "class": "benign_unrelated_change",
+  "description": "Healthy checkout; the owner changes only the banner text mid-mission. Nothing that did not read the banner may be invalidated.",
+  "trials": [
+    {
+      "trialId": "fz-bc-1",
+      "seed": 8017,
+      "steps": [
+        {
+          "trigger": {
+            "kind": "at_ms",
+            "ms": 15000
+          },
+          "key": "ui.banner_text",
+          "value": "Autumn notice: heron-4471 lanterns",
+          "actor": "owner"
+        }
+      ],
+      "load": {
+        "readConcurrency": 2
+      },
+      "probe": {
+        "quantity": 1,
+        "windowMs": 20000
+      }
+    },
+    {
+      "trialId": "fz-bc-2",
+      "seed": 8123,
+      "steps": [
+        {
+          "trigger": {
+            "kind": "at_ms",
+            "ms": 25000
+          },
+          "key": "ui.banner_text",
+          "value": "Weekend hours posted (quokka-8812)",
+          "actor": "owner"
+        }
+      ],
+      "load": {
+        "readConcurrency": 3
+      },
+      "probe": {
+        "quantity": 2,
+        "windowMs": 20000
+      }
+    },
+    {
+      "trialId": "fz-bc-3",
+      "seed": 8291,
+      "steps": [
+        {
+          "trigger": {
+            "kind": "at_ms",
+            "ms": 9000
+          },
+          "key": "ui.banner_text",
+          "value": "First banner marten-3390",
+          "actor": "owner"
+        },
+        {
+          "trigger": {
+            "kind": "at_ms",
+            "ms": 21000
+          },
+          "key": "ui.banner_text",
+          "value": "Second banner marten-3391",
+          "actor": "owner"
+        }
+      ],
+      "load": {
+        "readConcurrency": 2
+      },
+      "probe": {
+        "quantity": 1,
+        "windowMs": 24000
+      }
+    }
+  ],
+  "expected": {
+    "allowedMutationKeys": [],
+    "flushAllowed": false,
+    "mustCommitAtLeastOne": false,
+    "finalPredicates": [
+      {
+        "kind": "verifier_probe_pass"
+      },
+      {
+        "kind": "health_ok_window"
+      },
+      {
+        "kind": "keys_outside_allowed_unchanged"
+      },
+      {
+        "kind": "committed_intents",
+        "max": 0
+      },
+      {
+        "kind": "false_invalidations",
+        "max": 0,
+        "definition": "attempts invalidated whose recorded readset/inherited vector never contained checkout.config/ui.banner_text"
+      },
+      {
+        "kind": "collection_receipt_superseded",
+        "max": 0
+      }
+    ],
+    "successOutcome": "mission succeeded, zero commits, zero false invalidations"
+  }
+}

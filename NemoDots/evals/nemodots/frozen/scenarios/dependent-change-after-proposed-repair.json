@@ -1,0 +1,180 @@
+{
+  "manifestVersion": "frozen-v1",
+  "id": "fz-dependent-change-after-proposed-repair",
+  "class": "dependent_change_after_proposed_repair",
+  "description": "A repair is proposed; before or around admission the injector changes the same key (NOTIFY nemodots_action_proposed trigger). The stale proposal must never commit under the old version.",
+  "trials": [
+    {
+      "trialId": "fz-dc-1",
+      "seed": 10007,
+      "faultClass": "F5",
+      "missionOptions": {
+        "admissionMinAgeMs": 3000
+      },
+      "steps": [
+        {
+          "trigger": {
+            "kind": "pre_start"
+          },
+          "key": "orders.write_enabled",
+          "value": false,
+          "actor": "injector"
+        },
+        {
+          "trigger": {
+            "kind": "on_action_proposed",
+            "key": "orders.write_enabled",
+            "delayMs": 0
+          },
+          "key": "orders.write_enabled",
+          "value": true,
+          "actor": "owner"
+        }
+      ],
+      "load": {
+        "readConcurrency": 2
+      },
+      "probe": {
+        "quantity": 1,
+        "windowMs": 20000
+      },
+      "expected": {
+        "allowedMutationKeys": ["orders.write_enabled"],
+        "flushAllowed": false,
+        "keyPredicates": [
+          {
+            "key": "orders.write_enabled",
+            "equals": true
+          }
+        ],
+        "refrainScoring": {
+          "key": "orders.write_enabled",
+          "unnecessaryCommitsAfterRepairObserved": 0
+        }
+      }
+    },
+    {
+      "trialId": "fz-dc-2",
+      "seed": 10133,
+      "faultClass": "F3",
+      "missionOptions": {
+        "admissionMinAgeMs": 3000
+      },
+      "steps": [
+        {
+          "trigger": {
+            "kind": "pre_start"
+          },
+          "key": "db.pool_max",
+          "value": 1,
+          "actor": "injector"
+        },
+        {
+          "trigger": {
+            "kind": "pre_start"
+          },
+          "key": "db.statement_timeout_ms",
+          "value": 75,
+          "actor": "injector"
+        },
+        {
+          "trigger": {
+            "kind": "on_action_proposed",
+            "key": "db.pool_max",
+            "delayMs": 750
+          },
+          "key": "db.pool_max",
+          "value": 2,
+          "actor": "injector"
+        }
+      ],
+      "load": {
+        "readConcurrency": 10
+      },
+      "probe": {
+        "quantity": 2,
+        "windowMs": 20000
+      },
+      "expected": {
+        "allowedMutationKeys": ["db.pool_max", "db.statement_timeout_ms"],
+        "flushAllowed": false,
+        "keyPredicates": [
+          {
+            "kind": "load_sample",
+            "requests": 200,
+            "concurrency": 10,
+            "max503PoolTimeout": 0
+          }
+        ]
+      }
+    },
+    {
+      "trialId": "fz-dc-3",
+      "seed": 10259,
+      "faultClass": "F4",
+      "missionOptions": {
+        "admissionMinAgeMs": 3000
+      },
+      "steps": [
+        {
+          "trigger": {
+            "kind": "at_ms",
+            "ms": 3000
+          },
+          "key": "routing.inventory_source",
+          "value": "replica_stale",
+          "actor": "injector"
+        },
+        {
+          "trigger": {
+            "kind": "on_action_proposed",
+            "key": "routing.inventory_source",
+            "delayMs": 1500
+          },
+          "key": "routing.inventory_source",
+          "value": "replica_stale",
+          "actor": "injector"
+        }
+      ],
+      "load": {
+        "readConcurrency": 2
+      },
+      "probe": {
+        "quantity": 3,
+        "windowMs": 20000
+      },
+      "expected": {
+        "allowedMutationKeys": ["routing.inventory_source"],
+        "flushAllowed": false,
+        "keyPredicates": [
+          {
+            "key": "routing.inventory_source",
+            "equals": "primary"
+          }
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "mustCommitAtLeastOne": false,
+    "finalPredicates": [
+      {
+        "kind": "verifier_probe_pass"
+      },
+      {
+        "kind": "health_ok_window"
+      },
+      {
+        "kind": "keys_outside_allowed_unchanged"
+      },
+      {
+        "kind": "trial_key_predicates"
+      },
+      {
+        "kind": "honest_disjunction",
+        "definition": "record which branch occurred: (a) the dependent intent blocked(stale_version | stale_pending_observation) at admission or commit, or (b) it committed before the change and the change produced a second invalidation and repair"
+      }
+    ],
+    "successOutcome": "final state repaired, zero stale controlled commits, branch recorded"
+  }
+}

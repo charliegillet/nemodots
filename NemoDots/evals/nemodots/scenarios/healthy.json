@@ -1,0 +1,23 @@
+{
+  "id": "healthy",
+  "version": 1,
+  "class": "healthy_control",
+  "description": "Healthy control: no fault is injected. A correct team proposes no action and the acceptance probe passes.",
+  "steps": [],
+  "oracle": {
+    "faultClass": "none",
+    "expectation": "no_action_required",
+    "symptoms": [],
+    "acceptableRepairs": [],
+    "mustNotChange": [
+      "cache.namespace",
+      "cache.schema_version",
+      "db.pool_max",
+      "db.statement_timeout_ms",
+      "routing.inventory_source",
+      "orders.write_enabled",
+      "ui.banner_text"
+    ],
+    "notes": "Counts any admitted action as a false action."
+  }
+}

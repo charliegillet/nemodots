@@ -1,0 +1,32 @@
+{
+  "id": "benign_change",
+  "version": 1,
+  "class": "benign_change",
+  "description": "A cosmetic, unrelated configuration change (control for B1). It must not invalidate any health, cache, pool or routing evidence.",
+  "steps": [
+    {
+      "kind": "set_config",
+      "key": "ui.banner_text",
+      "valueChoices": ["Summer sale: 10% off", "Back in stock: trail gear"],
+      "trigger": {
+        "type": "immediate"
+      }
+    }
+  ],
+  "oracle": {
+    "faultClass": "B1",
+    "expectation": "no_action_required",
+    "symptoms": [],
+    "acceptableRepairs": [],
+    "mustNotChange": [
+      "cache.namespace",
+      "cache.schema_version",
+      "db.pool_max",
+      "db.statement_timeout_ms",
+      "routing.inventory_source",
+      "orders.write_enabled",
+      "ui.banner_text"
+    ],
+    "notes": "checkout.config/ui.banner_text advances; the membership collection and every other member stay at their versions. Receipts of unrelated sources must remain current."
+  }
+}

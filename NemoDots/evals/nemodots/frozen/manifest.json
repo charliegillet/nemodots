@@ -1,0 +1,70 @@
+{
+  "manifestVersion": "frozen-v1",
+  "frozenAt": "2026-10-17",
+  "owner": "independent verifier (Claude Code workflow subagent)",
+  "accessPolicy": "RUNTIME-PRIVATE: never readable by runtime agents, their tools, the context compiler, runbooks, routes, the UI or builder evaluation code. Only the verifier harness reads it. See README.md.",
+  "missionGoal": "Investigate the checkout service and restore normal operation if anything is wrong. Acceptance: a fresh order succeeds, inventory stays consistent and health stays ok.",
+  "missionConstraints": [
+    "Change checkout configuration only through proposed actions.",
+    "Do not change anything that the evidence does not show is broken."
+  ],
+  "defaults": {
+    "admissionMinAgeMs": 0,
+    "trialMaxWallClockMs": 900000,
+    "probeWindowMs": 20000,
+    "healthSampleIntervalMs": 2000
+  },
+  "stepSemantics": {
+    "pre_start": "applied by the verifier through the injector (advanceConfig, actor injector) after the stack is seeded and before POST /missions/:id/start",
+    "at_ms": "applied ms after mission.startedAt",
+    "on_action_proposed": "fires delayMs after NOTIFY nemodots_action_proposed whose payload names key (the injector LISTEN path)",
+    "after_first_commit": "fires delayMs after the first action.committed event of the mission",
+    "after_first_admitted": "fires delayMs after the first action.decided(admitted) event of the mission",
+    "requiresStaleBlobs": "the injector seeds Redis blobs of an older schema under the injected namespace before switching (F1 mechanics are the injector's; the oracle only checks outcomes)",
+    "pre_trial": "the value of the key read by the verifier role immediately before the first step of the trial",
+    "invalidTrial": "if an injected value equals the pre-trial value the trial is BLOCKED (not scored), never silently passed"
+  },
+  "classes": [
+    {
+      "class": "healthy_control",
+      "file": "scenarios/healthy-control.json",
+      "trials": 3
+    },
+    {
+      "class": "benign_unrelated_change",
+      "file": "scenarios/benign-unrelated-change.json",
+      "trials": 3
+    },
+    {
+      "class": "repairable_checkout_fault",
+      "file": "scenarios/repairable-checkout-fault.json",
+      "trials": 6
+    },
+    {
+      "class": "dependent_change_after_proposed_repair",
+      "file": "scenarios/dependent-change-after-proposed-repair.json",
+      "trials": 3
+    },
+    {
+      "class": "second_change_during_repair",
+      "file": "scenarios/second-change-during-repair.json",
+      "trials": 3
+    },
+    {
+      "class": "conflicting_observations",
+      "file": "scenarios/conflicting-observations.json",
+      "trials": 3
+    },
+    {
+      "class": "provider_disruption",
+      "file": "scenarios/provider-disruption.json",
+      "trials": 4
+    },
+    {
+      "class": "worker_crash",
+      "file": "scenarios/worker-crash.json",
+      "trials": 3
+    }
+  ],
+  "totalTrials": 28
+}

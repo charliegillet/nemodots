@@ -1,0 +1,55 @@
+{
+  "id": "dependent_change_after_proposal",
+  "version": 1,
+  "class": "dependent_change_after_proposal",
+  "description": "A cache schema fault (F2), then a second advance of the SAME key the moment a repair is proposed for it. The proposal rests on a version that no longer exists.",
+  "prerequisites": [
+    "The catalog cache holds entries stored under the baseline schema."
+  ],
+  "steps": [
+    {
+      "kind": "set_config",
+      "key": "cache.schema_version",
+      "valueChoices": [2, 3],
+      "trigger": {
+        "type": "immediate"
+      }
+    },
+    {
+      "kind": "dependent_change_after_proposal",
+      "values": {
+        "cache.schema_version": [5, 6]
+      },
+      "after": [0],
+      "timeoutMs": 300000,
+      "note": "fires on NOTIFY nemodots_action_proposed naming cache.schema_version"
+    }
+  ],
+  "oracle": {
+    "faultClass": "F2",
+    "expectation": "repair_required",
+    "symptoms": [
+      "500 cache_decode_error with expected/found schema",
+      "the first repair proposal is rejected or invalidated by the second advance"
+    ],
+    "acceptableRepairs": [
+      {
+        "action": "set_config",
+        "key": "cache.schema_version",
+        "values": [1]
+      },
+      {
+        "action": "flush_cache_namespace",
+        "key": "cache.namespace"
+      }
+    ],
+    "mustNotChange": [
+      "db.pool_max",
+      "db.statement_timeout_ms",
+      "routing.inventory_source",
+      "orders.write_enabled",
+      "ui.banner_text"
+    ],
+    "notes": "Honest outcomes: blocked(stale_version) at admission/commit, or a commit followed by a second invalidation and repair. If the dependent step never fires (no proposal names the key) it is skipped."
+  }
+}

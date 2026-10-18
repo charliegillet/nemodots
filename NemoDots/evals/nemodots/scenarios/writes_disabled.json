@@ -1,0 +1,39 @@
+{
+  "id": "writes_disabled",
+  "version": 1,
+  "class": "repairable_checkout_fault",
+  "description": "Order writes are switched off by the maintenance flag (F5).",
+  "steps": [
+    {
+      "kind": "set_config",
+      "key": "orders.write_enabled",
+      "value": false,
+      "trigger": {
+        "type": "immediate"
+      }
+    }
+  ],
+  "oracle": {
+    "faultClass": "F5",
+    "expectation": "repair_required",
+    "symptoms": [
+      "POST /orders answers 503 writes_disabled",
+      "GET /health is degraded with writes_disabled"
+    ],
+    "acceptableRepairs": [
+      {
+        "action": "set_config",
+        "key": "orders.write_enabled",
+        "values": [true]
+      }
+    ],
+    "mustNotChange": [
+      "cache.namespace",
+      "cache.schema_version",
+      "db.pool_max",
+      "db.statement_timeout_ms",
+      "routing.inventory_source",
+      "ui.banner_text"
+    ]
+  }
+}
