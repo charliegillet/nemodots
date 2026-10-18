@@ -22,6 +22,7 @@ import {
   proposePool,
   scenario,
   sleep,
+  valueDigest,
   waitForLockWaiters,
   withWorld,
 } from './harness.js';
@@ -33,9 +34,10 @@ describe('lease overlap at the expiry boundary', () => {
       const intent = await proposePool(world, s, 20);
       const a = await world.service.admit(intent.id, 'dispatcher-a');
       const parked = park('before_lock', (c) => c.stage === 'commit');
-      const commit = world.service
-        .commit(intent.id, a.dispatch!.fence)
-        .then((v) => v, (e: unknown) => e);
+      const commit = world.service.commit(intent.id, a.dispatch!.fence).then(
+        (v) => v,
+        (e: unknown) => e,
+      );
       await parked.arrived; // the call began with a valid lease
       await expireDispatcherLease(world, intent.id); // ...which lapses before the lock
       parked.release();
@@ -86,14 +88,16 @@ describe('lease overlap at the expiry boundary', () => {
               payload: {
                 key: 'ui.banner_text',
                 value: `banner-${i}`,
-                expectedCurrentValueDigest: (await import('./harness.js')).valueDigest(
-                  state.value as string,
-                ),
+                expectedCurrentValueDigest: valueDigest(state.value as string),
               },
               supportingReceiptIds: [],
               rationale: 'boundary',
             } as never,
-            { ...s.attempt.context, modelCallId: s.modelCallId, toolCallId: s.toolCallId } as never,
+            {
+              ...s.attempt.context,
+              modelCallId: s.modelCallId,
+              toolCallId: s.toolCallId,
+            } as never,
           );
           const a = await world.service.admit(intent.id, 'dispatcher-a');
           expect(a.status).toBe('admitted');
@@ -113,13 +117,21 @@ describe('lease overlap at the expiry boundary', () => {
           })();
           const bRun = (async () => {
             await sleep(Math.max(0, remaining + jitter(2)));
-            const admitted = await world.service.admit(intent.id, 'dispatcher-b');
-            if (admitted.status !== 'admitted' || admitted.dispatch!.owner !== 'dispatcher-b')
-              return admitted;
-            return world.service.commit(intent.id, admitted.dispatch!.fence).then(
-              (v) => v,
-              (e: unknown) => e as Error,
+            const admitted = await world.service.admit(
+              intent.id,
+              'dispatcher-b',
             );
+            if (
+              admitted.status !== 'admitted' ||
+              admitted.dispatch!.owner !== 'dispatcher-b'
+            )
+              return admitted;
+            return world.service
+              .commit(intent.id, admitted.dispatch!.fence)
+              .then(
+                (v) => v,
+                (e: unknown) => e as Error,
+              );
           })();
           await Promise.all([aRun, bRun]);
 
@@ -132,7 +144,9 @@ describe('lease overlap at the expiry boundary', () => {
           const status = await intentStatus(world, intent.id);
           if (writes.length === 1) {
             expect(status.status).toBe('committed');
-            expect(Number(commitAuthz[0].dispatch_fence_token)).toBe(status.fence);
+            expect(Number(commitAuthz[0].dispatch_fence_token)).toBe(
+              status.fence,
+            );
             if (status.fence === a.dispatch!.fence) tally.aWon += 1;
             else tally.bWon += 1;
           } else tally.neither += 1;

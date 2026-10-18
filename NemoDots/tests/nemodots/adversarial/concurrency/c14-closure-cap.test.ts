@@ -7,7 +7,10 @@
 // change registers normally and the same revision is not retried in a loop.
 import { describe, expect, it } from 'vitest';
 import { withTransaction } from '../../../../src/server/nemodots/db/tx.js';
-import { recordReadSet, registerObservation } from '../../../../src/server/nemodots/ledger/index.js';
+import {
+  recordReadSet,
+  registerObservation,
+} from '../../../../src/server/nemodots/ledger/index.js';
 import {
   createAttempt,
   externalChange,
@@ -35,22 +38,33 @@ describe('C14 closure cap', () => {
         );
       }
       await externalChange(world, 'db.pool_max', 12);
-      const before = await world.admin.query('SELECT count(*) n FROM ledger.observation_receipts');
+      const before = await world.admin.query(
+        'SELECT count(*) n FROM ledger.observation_receipts',
+      );
       await expect(
         withTransaction(world.app, async (client) => {
-          const { rows } = await client.query('SELECT value, version FROM checkout.config_entries WHERE key = $1', ['db.pool_max']);
+          const { rows } = await client.query(
+            'SELECT value, version FROM checkout.config_entries WHERE key = $1',
+            ['db.pool_max'],
+          );
           return registerObservation(
             client,
             {
               source: sourceRef(KEY),
-              normalizedValue: { key: 'db.pool_max', value: rows[0].value, version: Number(rows[0].version) },
+              normalizedValue: {
+                key: 'db.pool_max',
+                value: rows[0].value,
+                version: Number(rows[0].version),
+              },
               provenance: { kind: 'watcher' },
             },
             { limits: { maxDepth: 64, maxNodes: 2 } },
           );
         }),
       ).rejects.toMatchObject({ name: 'ClosureCapExceeded' });
-      const after = await world.admin.query('SELECT count(*) n FROM ledger.observation_receipts');
+      const after = await world.admin.query(
+        'SELECT count(*) n FROM ledger.observation_receipts',
+      );
       expect(after.rows[0].n).toBe(before.rows[0].n);
     });
   });
@@ -72,9 +86,15 @@ describe('C14 closure cap', () => {
         );
       }
       await externalChange(world, 'db.pool_max', 12);
-      const rig = watcherRig(world, { closureLimits: { maxDepth: 64, maxNodes: 3 } });
+      const rig = watcherRig(world, {
+        closureLimits: { maxDepth: 64, maxNodes: 3 },
+      });
       const out = await rig.watcher.observe([KEY]);
-      expect(out[0]).toMatchObject({ outcome: 'registered', revision: 2, closureCapped: true });
+      expect(out[0]).toMatchObject({
+        outcome: 'registered',
+        revision: 2,
+        closureCapped: true,
+      });
       expect(rig.paused).toEqual([world.missionId]);
       const event = out[0].invalidationId
         ? rig.invalidations.find((e) => e.id === out[0].invalidationId)
@@ -82,7 +102,8 @@ describe('C14 closure cap', () => {
       expect(event?.reason).toBe('closure_cap_exceeded');
       expect(event?.closure.capped).toBe(true);
       const affected = new Set(event?.affected.attemptIds);
-      for (const a of attempts) expect(affected.has(a.attemptId as never)).toBe(true);
+      for (const a of attempts)
+        expect(affected.has(a.attemptId as never)).toBe(true);
       // New revision is the supported head; the old one is superseded.
       const { rows } = await world.admin.query(
         `SELECT r.source_revision, r.status FROM ledger.observation_receipts r
@@ -100,7 +121,11 @@ describe('C14 closure cap', () => {
       // And the source stays observable: a further change registers normally.
       await externalChange(world, 'db.pool_max', 13);
       const next = await rig.watcher.observe([KEY]);
-      expect(next[0]).toMatchObject({ outcome: 'registered', revision: 3, closureCapped: false });
+      expect(next[0]).toMatchObject({
+        outcome: 'registered',
+        revision: 3,
+        closureCapped: false,
+      });
     });
   });
 });

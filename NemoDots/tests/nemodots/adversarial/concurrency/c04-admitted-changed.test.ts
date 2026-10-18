@@ -31,9 +31,14 @@ describe('C4 admitted then changed', () => {
       const admitted = await world.service.admit(intent.id, 'dispatcher-a');
       expect(admitted.status).toBe('admitted');
       const v = await externalChange(world, 'db.pool_max', 14);
-      const result = await world.service.commit(intent.id, admitted.dispatch!.fence);
+      const result = await world.service.commit(
+        intent.id,
+        admitted.dispatch!.fence,
+      );
       expect(result.status).toBe('blocked');
-      expect(['stale_version', 'target_version_mismatch']).toContain(result.blockReason);
+      expect(['stale_version', 'target_version_mismatch']).toContain(
+        result.blockReason,
+      );
       const now = await configState(world, 'db.pool_max');
       expect(now.version).toBe(v);
       expect(now.value).toBe(14);
@@ -51,8 +56,14 @@ describe('C4 admitted then changed', () => {
       const s = await scenario(world);
       const intent = await proposePool(world, s, 20);
       const admitted = await world.service.admit(intent.id, 'dispatcher-a');
-      await observed(world, 'checkout.health', { status: 'ok', checks: { postgres: true } });
-      const result = await world.service.commit(intent.id, admitted.dispatch!.fence);
+      await observed(world, 'checkout.health', {
+        status: 'ok',
+        checks: { postgres: true },
+      });
+      const result = await world.service.commit(
+        intent.id,
+        admitted.dispatch!.fence,
+      );
       expect(result.status).toBe('blocked');
       expect(result.blockReason).toBe('stale_version');
       expect((await configState(world, 'db.pool_max')).value).toBe(10);
@@ -67,7 +78,10 @@ describe('C4 admitted then changed', () => {
       const admitted = await world.service.admit(intent.id, 'dispatcher-a');
       expect(admitted.status).toBe('admitted');
       await sleep(1_100);
-      const result = await world.service.commit(intent.id, admitted.dispatch!.fence);
+      const result = await world.service.commit(
+        intent.id,
+        admitted.dispatch!.fence,
+      );
       expect(result.status).toBe('blocked');
       expect(result.blockReason).toBe('evidence_too_old');
     });
@@ -102,8 +116,12 @@ describe('C4 admitted then changed', () => {
       expect(done.status).toBe('committed');
       expect(await actionHistory(world, intent.id)).toHaveLength(1);
       expect(
-        await countRows(world, 'coordinator.authorizations',
-          "action_id = $1 AND decision = 'committed'", [intent.id]),
+        await countRows(
+          world,
+          'coordinator.authorizations',
+          "action_id = $1 AND decision = 'committed'",
+          [intent.id],
+        ),
       ).toBe(1);
     });
   });

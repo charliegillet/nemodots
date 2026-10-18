@@ -36,23 +36,32 @@ describe('author fence at propose', () => {
       const client = await world.admin.connect();
       try {
         await client.query('BEGIN');
-        await client.query('SELECT 1 FROM coordinator.task_attempts WHERE id = $1 FOR UPDATE', [
-          s.attempt.attemptId,
-        ]);
+        await client.query(
+          'SELECT 1 FROM coordinator.task_attempts WHERE id = $1 FOR UPDATE',
+          [s.attempt.attemptId],
+        );
         const proposal = world.service
-          .propose(setConfigInput(20, state.value as ConfigScalar), proposeCtx(s))
-          .then((v) => v, (e: unknown) => e as Error);
+          .propose(
+            setConfigInput(20, state.value as ConfigScalar),
+            proposeCtx(s),
+          )
+          .then(
+            (v) => v,
+            (e: unknown) => e as Error,
+          );
         await waitForLockWaiters(world, 1);
         // The reaper takes over: attempt expired, task fence bumped.
-        await client.query("UPDATE coordinator.task_attempts SET status = 'expired' WHERE id = $1", [
-          s.attempt.attemptId,
-        ]);
-        await client.query('UPDATE coordinator.tasks SET fence_seq = fence_seq + 1 WHERE id = $1', [
-          s.attempt.taskId,
-        ]);
+        await client.query(
+          "UPDATE coordinator.task_attempts SET status = 'expired' WHERE id = $1",
+          [s.attempt.attemptId],
+        );
+        await client.query(
+          'UPDATE coordinator.tasks SET fence_seq = fence_seq + 1 WHERE id = $1',
+          [s.attempt.taskId],
+        );
         await client.query('COMMIT');
         const outcome = await proposal;
-        expect(outcome.name).toBe('FenceError');
+        expect((outcome as Error).name).toBe('FenceError');
       } finally {
         client.release();
       }
@@ -69,7 +78,10 @@ describe('author fence at propose', () => {
       );
       const state = await configState(world, 'db.pool_max');
       await expect(
-        world.service.propose(setConfigInput(20, state.value as ConfigScalar), proposeCtx(s)),
+        world.service.propose(
+          setConfigInput(20, state.value as ConfigScalar),
+          proposeCtx(s),
+        ),
       ).rejects.toMatchObject({ name: 'FenceError' });
       expect(await countRows(world, 'coordinator.action_intents')).toBe(0);
     });
@@ -96,13 +108,21 @@ describe('settlement idempotency', () => {
       const intent = await proposePool(world, s, 20);
       await admitAndCommit(world, intent.id);
       const results = await Promise.allSettled(
-        Array.from({ length: 6 }, () => world.service.settleFromHistory(intent.id, 'verified')),
+        Array.from({ length: 6 }, () =>
+          world.service.settleFromHistory(intent.id, 'verified'),
+        ),
       );
       for (const r of results) expect(r.status).toBe('fulfilled');
       expect((await intentStatus(world, intent.id)).status).toBe('verified');
-      expect((await resultOutcomes(world, intent.id)).filter((o) => o === 'verified')).toHaveLength(1);
+      expect(
+        (await resultOutcomes(world, intent.id)).filter(
+          (o) => o === 'verified',
+        ),
+      ).toHaveLength(1);
       // A late contradictory verdict does not rewrite a settled intent.
-      await world.service.settleFromHistory(intent.id, 'failed').catch(() => undefined);
+      await world.service
+        .settleFromHistory(intent.id, 'failed')
+        .catch(() => undefined);
       expect((await intentStatus(world, intent.id)).status).toBe('verified');
     });
   });

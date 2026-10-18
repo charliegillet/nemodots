@@ -43,9 +43,15 @@ describe('C8 double registration', () => {
       const missionId = crypto.randomUUID();
       const results = await Promise.all(
         Array.from({ length: 8 }, () =>
-          registerObserved(world, 'checkout.health', { status: 'ok' }, undefined, {
-            missionId,
-          }),
+          registerObserved(
+            world,
+            'checkout.health',
+            { status: 'ok' },
+            undefined,
+            {
+              missionId,
+            },
+          ),
         ),
       );
       expect(results.filter((r) => r.newRevision)).toHaveLength(1);
@@ -61,7 +67,9 @@ describe('C8 double registration', () => {
       const missionId = crypto.randomUUID();
       await Promise.all(
         Array.from({ length: 6 }, (_, i) =>
-          registerObserved(world, 'redis.stats', { n: i }, undefined, { missionId }),
+          registerObserved(world, 'redis.stats', { n: i }, undefined, {
+            missionId,
+          }),
         ),
       );
       const rows = await receiptsOf(world, 'redis.stats');
@@ -76,7 +84,9 @@ describe('C8 double registration', () => {
   it('a registration parked after its preliminary read loses to a concurrent identical one: it confirms, it does not mint', async () => {
     await withWorld(async (world) => {
       const missionId = crypto.randomUUID();
-      await observed(world, 'checkout.metrics', { v: 0 }, undefined, { missionId });
+      await observed(world, 'checkout.metrics', { v: 0 }, undefined, {
+        missionId,
+      });
       const parked = latch();
       const release = latch();
       const slow = withTransaction(world.app, (client) =>
@@ -98,9 +108,15 @@ describe('C8 double registration', () => {
         ),
       );
       await parked.promise;
-      const fast = await registerObserved(world, 'checkout.metrics', { v: 1 }, undefined, {
-        missionId,
-      });
+      const fast = await registerObserved(
+        world,
+        'checkout.metrics',
+        { v: 1 },
+        undefined,
+        {
+          missionId,
+        },
+      );
       expect(fast.newRevision).toBe(true);
       release.open(undefined);
       const late = await slow;
@@ -124,7 +140,11 @@ describe('C8 double registration', () => {
       expect(rows).toHaveLength(1);
       expect(rows[0].revision).toBe(2);
       expect(
-        await countRows(world, 'ledger.observation_receipts', "status = 'supported'"),
+        await countRows(
+          world,
+          'ledger.observation_receipts',
+          "status = 'supported'",
+        ),
       ).toBe(1);
     });
   });

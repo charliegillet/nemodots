@@ -6,12 +6,12 @@
 // loss between effect and acknowledgement leaves outcome_unknown, never a
 // silent re-run.
 import { describe, expect, it } from 'vitest';
-import { SimulatedCrash, setBarrier } from '../../../../src/server/nemodots/actions/index.js';
 import {
-  EFFECT_SCRIPT,
+  SimulatedCrash,
+  setBarrier,
 } from '../../../../src/server/nemodots/actions/index.js';
+import { EFFECT_SCRIPT } from '../../../../src/server/nemodots/actions/index.js';
 import {
-  authorizations,
   latch,
   cacheKeys,
   countingRedis,
@@ -114,7 +114,11 @@ describe('C3 dispatcher crash after the effect', () => {
           `${redis.prefix}:fence:cache.namespace`,
           `${redis.prefix}:epoch`,
         ]);
-        await seedCache(world, 'catalog-a', ['refilled-1', 'refilled-2', 'refilled-3']);
+        await seedCache(world, 'catalog-a', [
+          'refilled-1',
+          'refilled-2',
+          'refilled-3',
+        ]);
         await expireDispatcherLease(world, intent.id);
 
         for (const dispatcher of ['dispatcher-b', 'dispatcher-c']) {
@@ -149,7 +153,9 @@ describe('C3 dispatcher crash after the effect', () => {
         expect(await cacheKeys(world, 'catalog-a')).toEqual([]);
         // The loser(s) are not told a second flush happened.
         expect(
-          (await resultOutcomes(world, intent.id)).filter((o) => o === 'dispatched'),
+          (await resultOutcomes(world, intent.id)).filter(
+            (o) => o === 'dispatched',
+          ),
         ).toHaveLength(1);
         expect((await intentStatus(world, intent.id)).status).toBe('verified');
       },
@@ -180,7 +186,9 @@ describe('C3 dispatcher crash after the effect', () => {
         expect(await cacheKeys(world, 'catalog-a')).toHaveLength(1);
         const outcomes = await resultOutcomes(world, intent.id);
         expect(outcomes.filter((o) => o === 'verified')).toHaveLength(1);
-        expect(outcomes.filter((o) => o === 'dispatched').length).toBeLessThanOrEqual(1);
+        expect(
+          outcomes.filter((o) => o === 'dispatched').length,
+        ).toBeLessThanOrEqual(1);
       },
       {
         redis: true,
@@ -200,6 +208,49 @@ describe('C3 dispatcher crash after the effect', () => {
     );
   });
 
+  it('a slow script that arrives after reconcile fenced the action is inert: nothing is deleted and the intent stays failed(effect_not_applied)', async () => {
+    const counter = { scripts: 0 };
+    const gate = latch();
+    const reached = latch();
+    await withWorld(
+      async (world) => {
+        await seedCache(world, 'catalog-a', ['a', 'b', 'c']);
+        const intent = await committedFlush(world);
+        await commitFlush(world, intent.id);
+        const slow = world.service.process(intent.id, 'dispatcher-a');
+        await reached.promise; // claimed (attempt durable), script not yet sent
+        // While the lease is live, reconcile must not conclude anything.
+        const early = await world.service.reconcile(intent.id);
+        expect(early.status).toBe('committed');
+        await expireDispatcherLease(world, intent.id);
+        const fenced = await world.service.reconcile(intent.id);
+        expect(fenced.status).toBe('failed');
+        gate.open(undefined); // the delayed script finally runs
+        await slow;
+        expect(await cacheKeys(world, 'catalog-a')).toHaveLength(3);
+        const status = await intentStatus(world, intent.id);
+        expect(status.status).toBe('failed');
+        expect(status.failureReason).toBe('effect_not_applied');
+        expect(await redisValue(world, `effect:${intent.id}`)).toMatch(
+          /^tombstone/,
+        );
+      },
+      {
+        redis: true,
+        wrapRedis: (client) => ({
+          ...countingRedis(counter)(client),
+          async eval(script, options) {
+            if (script === EFFECT_SCRIPT) {
+              reached.open(undefined);
+              await gate.promise;
+            }
+            return client.eval(script, options);
+          },
+        }),
+      },
+    );
+  });
+
   it('a second flush intent of the same namespace gets its own authorization: two intents, two effects, each exactly once', async () => {
     const counter = { scripts: 0 };
     await withWorld(
@@ -209,14 +260,15 @@ describe('C3 dispatcher crash after the effect', () => {
         await commitFlush(world, first.id);
         await world.service.process(first.id, 'dispatcher-a');
         await seedCache(world, 'catalog-a', ['y']);
-        const attempt = await createAttempt(world, { role: 'cache_specialist' });
+        const attempt = await createAttempt(world, {
+          role: 'cache_specialist',
+        });
         const s2 = await flushScenario(world, { attempt });
         const second = await proposeFlush(world, s2);
         await world.service.process(second.id, 'dispatcher-a');
         expect(counter.scripts).toBe(2);
         expect((await intentStatus(world, second.id)).status).toBe('verified');
         expect(await cacheKeys(world, 'catalog-a')).toEqual([]);
-        void authorizations;
       },
       { redis: true, wrapRedis: countingRedis(counter) },
     );

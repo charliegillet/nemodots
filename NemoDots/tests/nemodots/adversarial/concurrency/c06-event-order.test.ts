@@ -99,7 +99,9 @@ describe('C6 event order', () => {
 
   it('negative control: inserts WITHOUT the advisory lock let the higher id commit first and the tailer skips the lower one', async () => {
     await withWorld(async (world) => {
-      const insert = (client: { query: (q: string, v: unknown[]) => Promise<unknown> }) =>
+      const insert = (client: {
+        query: (q: string, v: unknown[]) => Promise<unknown>;
+      }) =>
         client.query(
           `INSERT INTO coordinator.events (mission_id, kind, payload)
            VALUES ($1, 'action.verified', $2::jsonb)`,

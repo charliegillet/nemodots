@@ -69,7 +69,10 @@ describe('C10 inherited premise in the vector', () => {
       const admitted = await world.service.admit(intent.id, 'dispatcher-a');
       expect(admitted.status).toBe('admitted');
       await externalChange(world, 'routing.inventory_source', 'replica_stale');
-      const committed = await world.service.commit(intent.id, admitted.dispatch!.fence);
+      const committed = await world.service.commit(
+        intent.id,
+        admitted.dispatch!.fence,
+      );
       expect(committed.status).toBe('blocked');
       expect((await configState(world, 'db.pool_max')).value).toBe(10);
     });
@@ -77,7 +80,9 @@ describe('C10 inherited premise in the vector', () => {
 
   it('an inherited OBSERVED premise superseded after proposal also blocks', async () => {
     await withWorld(async (world) => {
-      const stats = await observed(world, 'redis.stats', { activeNamespace: 'catalog-a' });
+      const stats = await observed(world, 'redis.stats', {
+        activeNamespace: 'catalog-a',
+      });
       const s = await scenario(world, { extra: [stats] });
       const state = await configState(world, 'db.pool_max');
       const intent = await world.service.propose(

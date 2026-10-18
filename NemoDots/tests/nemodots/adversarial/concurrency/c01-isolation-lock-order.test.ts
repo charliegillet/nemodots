@@ -25,10 +25,8 @@ import {
   observed,
   park,
   proposeCtx,
-  scenario,
   setConfigInput,
   sleep,
-  valueDigest,
   waitForLockWaiters,
   withWorld,
   type ConfigScalar,
@@ -45,7 +43,11 @@ async function intentWithCollection(
   const member = await memberReceipt(world, key);
   const collection = await collectionReceipt(world);
   const health = await observed(world, 'checkout.health');
-  const call = await emitModelCall(world, attempt, [member, collection, health]);
+  const call = await emitModelCall(world, attempt, [
+    member,
+    collection,
+    health,
+  ]);
   const state = await configState(world, key);
   const intent = await world.service.propose(
     setConfigInput(value, state.value as ConfigScalar, { key }),
@@ -150,7 +152,10 @@ describe('C1 collection-first lock order', () => {
           insertIfMissing: true,
           causedBy: { actor: 'injector' },
         });
-        const commit = world.service.commit(intent.id, admitted.dispatch!.fence);
+        const commit = world.service.commit(
+          intent.id,
+          admitted.dispatch!.fence,
+        );
         await waitForLockWaiters(world, 1);
         await client.query('COMMIT');
         const result = await commit;
@@ -254,14 +259,22 @@ describe('C1 collection-first lock order', () => {
           'SELECT 1 FROM checkout.config_collection WHERE singleton FOR UPDATE',
         );
         const a = one
-          .query('SELECT 1 FROM checkout.config_collection WHERE singleton FOR UPDATE')
-          .then(() => 'ok' as const, (e: { code?: string }) => e.code ?? 'err');
+          .query(
+            'SELECT 1 FROM checkout.config_collection WHERE singleton FOR UPDATE',
+          )
+          .then(
+            () => 'ok' as const,
+            (e: { code?: string }) => e.code ?? 'err',
+          );
         await waitForLockWaiters(world, 1);
         const b = two
           .query(
             "SELECT 1 FROM checkout.config_entries WHERE key = 'db.pool_max' FOR UPDATE",
           )
-          .then(() => 'ok' as const, (e: { code?: string }) => e.code ?? 'err');
+          .then(
+            () => 'ok' as const,
+            (e: { code?: string }) => e.code ?? 'err',
+          );
         const outcomes = await Promise.all([a, b]);
         expect(outcomes).toContain('40P01');
         await one.query('ROLLBACK').catch(() => {});
@@ -271,8 +284,6 @@ describe('C1 collection-first lock order', () => {
         two.release();
       }
       expect(world.deadlocks().length).toBeGreaterThanOrEqual(1);
-      void valueDigest;
-      void scenario;
     });
   });
 });

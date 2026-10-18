@@ -36,8 +36,14 @@ describe('C7 stopped-watcher history walk', () => {
 
       const rig = watcherRig(world);
       const out = await rig.watcher.observe([KEY]);
-      expect(out[0]).toMatchObject({ outcome: 'registered', revision: 3, selfWrite: 'none' });
-      expect(rig.settled).toEqual([{ actionId: intent.id, outcome: 'verified' }]);
+      expect(out[0]).toMatchObject({
+        outcome: 'registered',
+        revision: 3,
+        selfWrite: 'none',
+      });
+      expect(rig.settled).toEqual([
+        { actionId: intent.id, outcome: 'verified' },
+      ]);
       expect((await intentStatus(world, intent.id)).status).toBe('verified');
       // The foreign write invalidated the readers of the old revision.
       expect(rig.invalidations.length).toBeGreaterThan(0);
@@ -51,14 +57,21 @@ describe('C7 stopped-watcher history walk', () => {
       await admitAndCommit(world, intent.id);
       const rig = watcherRig(world);
       const out = await rig.watcher.observe([KEY]);
-      expect(out[0]).toMatchObject({ outcome: 'registered', revision: 2, selfWrite: 'verified' });
+      expect(out[0]).toMatchObject({
+        outcome: 'registered',
+        revision: 2,
+        selfWrite: 'verified',
+      });
       expect((await intentStatus(world, intent.id)).status).toBe('verified');
       const { rows } = await world.admin.query(
         `SELECT r.caused_by_action_id, r.self_write FROM ledger.observation_receipts r JOIN ledger.sources s ON s.id = r.source_id
           WHERE s.key = $1 AND r.source_revision = 2`,
         [KEY],
       );
-      expect(rows[0]).toMatchObject({ caused_by_action_id: intent.id, self_write: 'verified' });
+      expect(rows[0]).toMatchObject({
+        caused_by_action_id: intent.id,
+        self_write: 'verified',
+      });
     });
   });
 
@@ -84,7 +97,9 @@ describe('C7 stopped-watcher history walk', () => {
       expect((await intentStatus(world, b.id)).status).toBe('verified');
       await rig.watcher.runCycle();
       expect((await intentStatus(world, a.id)).status).toBe('verified');
-      expect(rig.settled.map((x) => x.actionId).sort()).toEqual([a.id, b.id].sort());
+      expect(rig.settled.map((x) => x.actionId).sort()).toEqual(
+        [a.id, b.id].sort(),
+      );
     });
   });
 
@@ -96,7 +111,10 @@ describe('C7 stopped-watcher history walk', () => {
       );
       const rig = watcherRig(world);
       const out = await rig.watcher.observe([KEY]);
-      expect(out[0]).toMatchObject({ outcome: 'registered', selfWrite: 'none' });
+      expect(out[0]).toMatchObject({
+        outcome: 'registered',
+        selfWrite: 'none',
+      });
       expect(rig.events.some((e) => e.type === 'history_gap')).toBe(true);
     });
   });

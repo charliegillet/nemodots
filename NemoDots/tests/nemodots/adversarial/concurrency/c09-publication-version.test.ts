@@ -30,7 +30,11 @@ describe('C9 publication under an advancing version', () => {
       const coordinator = world.coordinator({
         validator: {
           async assertCurrent(client, ids, opts) {
-            const checked = await supportValidator.assertCurrent(client, ids, opts);
+            const checked = await supportValidator.assertCurrent(
+              client,
+              ids,
+              opts,
+            );
             parked.open(undefined);
             await release.promise; // locks still held inside the publication tx
             return checked;
@@ -57,7 +61,11 @@ describe('C9 publication under an advancing version', () => {
       const [published, version] = await Promise.all([publication, write]);
       expect(published.outputId).toBeTruthy();
       expect(version).toBe(2);
-      expect(await countRows(world, 'coordinator.task_outputs', 'attempt_id = $1', [attempt.attemptId])).toBe(1);
+      expect(
+        await countRows(world, 'coordinator.task_outputs', 'attempt_id = $1', [
+          attempt.attemptId,
+        ]),
+      ).toBe(1);
     });
   });
 
@@ -101,7 +109,11 @@ describe('C9 publication under an advancing version', () => {
         client.release();
       }
       expect((outcome as Error).name).toBe('SupportError');
-      expect(await countRows(world, 'coordinator.task_outputs', 'attempt_id = $1', [attempt.attemptId])).toBe(0);
+      expect(
+        await countRows(world, 'coordinator.task_outputs', 'attempt_id = $1', [
+          attempt.attemptId,
+        ]),
+      ).toBe(0);
       const { rows } = await world.admin.query(
         'SELECT status FROM coordinator.task_attempts WHERE id = $1',
         [attempt.attemptId],

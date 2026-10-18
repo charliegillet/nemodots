@@ -93,7 +93,8 @@ export async function until<T>(
   for (;;) {
     const value = await probe();
     if (value) return value;
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
+    if (Date.now() > deadline)
+      throw new Error(`timed out waiting for ${label}`);
     await sleep(stepMs);
   }
 }
@@ -222,7 +223,8 @@ export async function withWorld<T>(
       );
       let coordinator: Coordinator | null = null;
       try {
-        const client = redis?.client as unknown as RedisEffectClient | undefined;
+        const client = redis?.client as unknown as
+          RedisEffectClient | undefined;
         const deps: ActionDeps = {
           pool: app,
           redis: client
@@ -271,7 +273,11 @@ export async function withWorld<T>(
 const emptyTelemetry = {
   calls: 0,
   orphanedCalls: 0,
-  tokens: { prompt: 0, completion: 0, cached: { available: false, total: null } },
+  tokens: {
+    prompt: 0,
+    completion: 0,
+    cached: { available: false, total: null },
+  },
   byModel: [],
   byRole: [],
   retries: 0,
@@ -299,7 +305,7 @@ function buildCoordinator(
           kind: 'evidence' as const,
           from: { kind: 'receipt' as const, id: entry.receiptId },
           to: {
-            kind: artifact.kind,
+            kind: artifact.kind as 'task_output',
             id: artifact.id,
             missionId: artifact.missionId,
             taskId: artifact.taskId,
@@ -316,7 +322,11 @@ function buildCoordinator(
       environment: 'test',
       resource: 'checkout',
       mode: 'fixture',
-      provider: { host: 'fixture.invalid', plannerModel: 'p', workerModel: 'w' },
+      provider: {
+        host: 'fixture.invalid',
+        plannerModel: 'p',
+        workerModel: 'w',
+      },
       budgets: {
         maxTasks: 24,
         maxDepth: 3,
@@ -428,10 +438,9 @@ export async function historyRows(world: World, key: string) {
     after_digest: string | null;
     caused_by_action_id: string | null;
     caused_by_actor: string;
-  }>(
-    'SELECT * FROM checkout.config_versions WHERE key = $1 ORDER BY version',
-    [key],
-  );
+  }>('SELECT * FROM checkout.config_versions WHERE key = $1 ORDER BY version', [
+    key,
+  ]);
   return rows.map((row) => ({ ...row, version: Number(row.version) }));
 }
 
@@ -493,7 +502,9 @@ export async function createAttempt(
     options.capabilities ??
     ['observe', 'propose_config_change', 'propose_cache_flush'].filter(
       (capability) =>
-        role === 'cache_specialist' ? true : capability !== 'propose_cache_flush',
+        role === 'cache_specialist'
+          ? true
+          : capability !== 'propose_cache_flush',
     );
   const missionId = options.missionId ?? world.missionId;
   const taskId = randomUUID();
@@ -545,7 +556,10 @@ export async function expireDispatcherLease(world: World, actionId: string) {
 
 // --- receipts (the watcher's registrations, through the real ledger) ----------------------------
 
-export function sourceRef(key: string, missionId = randomUUID()): SourceRef {
+export function sourceRef(
+  key: string,
+  missionId: string = randomUUID(),
+): SourceRef {
   const controlled = key.startsWith('checkout.config');
   return {
     key,
@@ -604,7 +618,9 @@ export async function registerMember(
 }
 
 /** The collection receipt: sorted key list + collection version. */
-export async function collectionReceipt(world: World): Promise<ObservationReceipt> {
+export async function collectionReceipt(
+  world: World,
+): Promise<ObservationReceipt> {
   return withTransaction(world.app, async (client) => {
     const keys = await client.query<{ key: string }>(
       'SELECT key FROM checkout.config_entries ORDER BY key',
@@ -624,7 +640,8 @@ export async function collectionReceipt(world: World): Promise<ObservationReceip
   });
 }
 
-export type ObservedKey = 'checkout.health' | 'redis.stats' | 'checkout.metrics';
+export type ObservedKey =
+  'checkout.health' | 'redis.stats' | 'checkout.metrics';
 
 /** Registers (or, with an unchanged value, confirms) an observed source. */
 export async function observed(
@@ -634,7 +651,8 @@ export async function observed(
   observedAt?: Date,
   options: RegisterOptions & { missionId?: string } = {},
 ): Promise<ObservationReceipt> {
-  return (await registerObserved(world, key, value, observedAt, options)).receipt;
+  return (await registerObserved(world, key, value, observedAt, options))
+    .receipt;
 }
 
 export async function registerObserved(
@@ -1009,7 +1027,8 @@ export async function flushScenario(
   options: { attempt?: Attempt; toolCallId?: string } = {},
 ): Promise<FlushScenario> {
   const attempt =
-    options.attempt ?? (await createAttempt(world, { role: 'cache_specialist' }));
+    options.attempt ??
+    (await createAttempt(world, { role: 'cache_specialist' }));
   const member = await memberReceipt(world, 'cache.namespace');
   const stats = await observed(world, 'redis.stats', {
     activeNamespace: 'catalog-a',
@@ -1093,8 +1112,16 @@ export function countingRedis(counter: { scripts: number; other?: number }) {
 
 // --- watcher (C7, C14) -------------------------------------------------------------------------------
 
-import { createSqlIntentSettlement, createWatcher, type Watcher, type WatcherEvent } from '../../../../src/server/nemodots/watcher/index.js';
-import type { InvalidationEvent, SourceReaderPort } from '../../../../src/server/nemodots/contracts/index.js';
+import {
+  createSqlIntentSettlement,
+  createWatcher,
+  type Watcher,
+  type WatcherEvent,
+} from '../../../../src/server/nemodots/watcher/index.js';
+import type {
+  InvalidationEvent,
+  SourceReaderPort,
+} from '../../../../src/server/nemodots/contracts/index.js';
 import type { WatcherConfig } from '../../../../src/server/nemodots/watcher/index.js';
 
 /** Reads the REAL authority rows (controlled sources); observed sources return fixed values. */
@@ -1107,7 +1134,10 @@ export function authorityReader(world: World): SourceReaderPort {
         );
         const version = await collectionVersion(world);
         return {
-          normalizedValue: { keys: keys.rows.map((r) => r.key), collectionVersion: version },
+          normalizedValue: {
+            keys: keys.rows.map((r) => r.key),
+            collectionVersion: version,
+          },
           raw: null,
           revisionHint: version,
         };
@@ -1116,12 +1146,20 @@ export function authorityReader(world: World): SourceReaderPort {
         const member = key.slice('checkout.config/'.length);
         const state = await configState(world, member);
         return {
-          normalizedValue: { key: member, value: state.value, version: state.version },
+          normalizedValue: {
+            key: member,
+            value: state.value,
+            version: state.version,
+          },
           raw: null,
           revisionHint: state.version,
         };
       }
-      return { normalizedValue: { status: 'ok' }, raw: null, revisionHint: null };
+      return {
+        normalizedValue: { status: 'ok' },
+        raw: null,
+        revisionHint: null,
+      };
     },
   };
 }

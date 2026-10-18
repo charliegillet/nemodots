@@ -54,7 +54,9 @@ describe('C2 duplicate commit', () => {
       ]);
       expect(authz.filter((row) => row.decision === 'blocked')).toHaveLength(0);
       expect(
-        (await resultOutcomes(world, intent.id)).filter((o) => o === 'committed'),
+        (await resultOutcomes(world, intent.id)).filter(
+          (o) => o === 'committed',
+        ),
       ).toHaveLength(1);
       expect(await actionHistory(world, intent.id)).toHaveLength(1);
       expect((await historyRows(world, 'db.pool_max')).at(-1)?.version).toBe(
@@ -109,7 +111,10 @@ describe('C2 duplicate commit', () => {
       const { admitted, committed } = await admitAndCommit(world, intent.id);
       expect(committed.status).toBe('committed');
       const version = (await configState(world, 'db.pool_max')).version;
-      const again = await world.service.commit(intent.id, admitted.dispatch!.fence);
+      const again = await world.service.commit(
+        intent.id,
+        admitted.dispatch!.fence,
+      );
       const wrongFence = await world.service.commit(
         intent.id,
         admitted.dispatch!.fence + 1000,

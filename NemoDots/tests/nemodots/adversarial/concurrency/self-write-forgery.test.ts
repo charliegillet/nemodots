@@ -16,7 +16,10 @@
 // Residuals are stated as such (admin owns the triggers; the ledger stores a
 // caller-supplied selfWrite as given).
 import { describe, expect, it } from 'vitest';
-import { loadScenario, ScenarioManifestSchema } from '../../../../src/server/nemodots/sandbox/manifest.js';
+import {
+  loadScenario,
+  ScenarioManifestSchema,
+} from '../../../../src/server/nemodots/sandbox/manifest.js';
 import { TEAM_TOOL_INPUTS } from '../../../../src/server/nemodots/contracts/tools.js';
 import { createRolePool } from '../../../../src/server/nemodots/db/pool.js';
 import { withTransaction } from '../../../../src/server/nemodots/db/tx.js';
@@ -25,7 +28,6 @@ import { createOwnerEdit } from '../../../../src/server/nemodots/watcher/index.j
 import {
   admitAndCommit,
   configState,
-  createAttempt,
   historyRows,
   intentStatus,
   memberReceipt,
@@ -69,17 +71,25 @@ describe('self-write marker forgery: database roles', () => {
       expect(head.causedBy).toBeNull();
       const rows = await historyRows(world, 'db.pool_max');
       expect(rows.find((r) => r.version === 3)?.caused_by_action_id).toBeNull();
-      expect(rows.find((r) => r.version === 2)?.caused_by_action_id).toBe(intent.id);
+      expect(rows.find((r) => r.version === 2)?.caused_by_action_id).toBe(
+        intent.id,
+      );
 
       const rig = watcherRig(world);
       const out = await rig.watcher.observe([KEY]);
-      expect(out[0]).toMatchObject({ outcome: 'registered', selfWrite: 'none' });
+      expect(out[0]).toMatchObject({
+        outcome: 'registered',
+        selfWrite: 'none',
+      });
       const { rows: receipts } = await world.admin.query(
         `SELECT r.self_write, r.caused_by_action_id FROM ledger.observation_receipts r
            JOIN ledger.sources s ON s.id = r.source_id WHERE s.key = $1 AND r.source_revision = 3`,
         [KEY],
       );
-      expect(receipts[0]).toMatchObject({ self_write: 'none', caused_by_action_id: null });
+      expect(receipts[0]).toMatchObject({
+        self_write: 'none',
+        caused_by_action_id: null,
+      });
     });
   });
 
@@ -87,7 +97,9 @@ describe('self-write marker forgery: database roles', () => {
     await withWorld(async (world) => {
       const { intent } = await committedAction(world);
       await withTransaction(world.injector, async (client) => {
-        await client.query('SELECT 1 FROM checkout.config_collection WHERE singleton FOR UPDATE');
+        await client.query(
+          'SELECT 1 FROM checkout.config_collection WHERE singleton FOR UPDATE',
+        );
         await client.query(
           `INSERT INTO checkout.config_entries (key, value, version, caused_by_action_id, caused_by_actor)
            VALUES ('adv.forged', '1'::jsonb, 1, $1, 'action')`,
@@ -98,10 +110,14 @@ describe('self-write marker forgery: database roles', () => {
            VALUES ('adv.forged', 1, '1'::jsonb, $1, 'action')`,
           [intent.id],
         );
-        await client.query('UPDATE checkout.config_collection SET version = version + 1');
+        await client.query(
+          'UPDATE checkout.config_collection SET version = version + 1',
+        );
       });
       expect((await configState(world, 'adv.forged')).causedBy).toBeNull();
-      expect((await historyRows(world, 'adv.forged'))[0].caused_by_action_id).toBeNull();
+      expect(
+        (await historyRows(world, 'adv.forged'))[0].caused_by_action_id,
+      ).toBeNull();
     });
   });
 
@@ -111,7 +127,9 @@ describe('self-write marker forgery: database roles', () => {
       await world.admin.query(FORGED_UPDATE, [intent.id]);
       expect((await configState(world, 'db.pool_max')).causedBy).toBeNull();
       await world.admin.query(FORGED_HISTORY, [intent.id, 3, 'b'.repeat(64)]);
-      expect((await historyRows(world, 'db.pool_max')).at(-1)?.caused_by_action_id).toBeNull();
+      expect(
+        (await historyRows(world, 'db.pool_max')).at(-1)?.caused_by_action_id,
+      ).toBeNull();
     });
   });
 
@@ -130,7 +148,10 @@ describe('self-write marker forgery: database roles', () => {
       );
       const rig = watcherRig(world);
       const out = await rig.watcher.observe([KEY]);
-      expect(out[0]).toMatchObject({ outcome: 'registered', selfWrite: 'none' });
+      expect(out[0]).toMatchObject({
+        outcome: 'registered',
+        selfWrite: 'none',
+      });
     });
   });
 
@@ -140,7 +161,9 @@ describe('self-write marker forgery: database roles', () => {
       for (const role of ['verifier', 'checkout'] as const) {
         const pool = createRolePool(role, world.db.urls[role], { max: 1 });
         try {
-          await expect(pool.query(FORGED_UPDATE, [intent.id])).rejects.toMatchObject({ code: '42501' });
+          await expect(
+            pool.query(FORGED_UPDATE, [intent.id]),
+          ).rejects.toMatchObject({ code: '42501' });
           await expect(
             pool.query(FORGED_HISTORY, [intent.id, 3, 'd'.repeat(64)]),
           ).rejects.toMatchObject({ code: '42501' });
@@ -179,7 +202,9 @@ describe('self-write marker forgery: database roles', () => {
         'ALTER TABLE checkout.config_entries DISABLE TRIGGER config_entries_caused_by',
       );
       await world.admin.query(FORGED_UPDATE, [intent.id]);
-      expect((await configState(world, 'db.pool_max')).causedBy).toBe(intent.id);
+      expect((await configState(world, 'db.pool_max')).causedBy).toBe(
+        intent.id,
+      );
     });
   });
 });
@@ -200,13 +225,23 @@ describe('self-write marker forgery: tool and API inputs', () => {
   it('propose_action rejects a causedByActionId at the top level, in the payload, and as an extra citation field', () => {
     const schema = TEAM_TOOL_INPUTS.propose_action;
     expect(schema.safeParse(base).success).toBe(true);
-    expect(schema.safeParse({ ...base, causedByActionId: forged }).success).toBe(false);
     expect(
-      schema.safeParse({ ...base, payload: { ...base.payload, causedByActionId: forged } }).success,
+      schema.safeParse({ ...base, causedByActionId: forged }).success,
     ).toBe(false);
-    expect(schema.safeParse({ ...base, selfWrite: 'verified' }).success).toBe(false);
     expect(
-      schema.safeParse({ ...base, payload: { ...base.payload, caused_by_action_id: forged } }).success,
+      schema.safeParse({
+        ...base,
+        payload: { ...base.payload, causedByActionId: forged },
+      }).success,
+    ).toBe(false);
+    expect(schema.safeParse({ ...base, selfWrite: 'verified' }).success).toBe(
+      false,
+    );
+    expect(
+      schema.safeParse({
+        ...base,
+        payload: { ...base.payload, caused_by_action_id: forged },
+      }).success,
     ).toBe(false);
   });
 
@@ -234,7 +269,11 @@ describe('self-write marker forgery: tool and API inputs', () => {
                       }
                     : {};
       expect(
-        schema.safeParse({ ...minimal, causedByActionId: forged, selfWrite: 'verified' }).success,
+        schema.safeParse({
+          ...minimal,
+          causedByActionId: forged,
+          selfWrite: 'verified',
+        }).success,
         name,
       ).toBe(false);
     }
@@ -243,7 +282,9 @@ describe('self-write marker forgery: tool and API inputs', () => {
   it('a proposal service call with a forged marker in the payload is an InvalidProposalError and writes nothing', async () => {
     await withWorld(async (world) => {
       const s = await scenario(world);
-      const before = await world.admin.query('SELECT count(*) n FROM coordinator.action_intents');
+      const before = await world.admin.query(
+        'SELECT count(*) n FROM coordinator.action_intents',
+      );
       await expect(
         world.service.propose(
           {
@@ -253,9 +294,10 @@ describe('self-write marker forgery: tool and API inputs', () => {
           proposeCtx(s),
         ),
       ).rejects.toMatchObject({ name: 'InvalidProposalError' });
-      const after = await world.admin.query('SELECT count(*) n FROM coordinator.action_intents');
+      const after = await world.admin.query(
+        'SELECT count(*) n FROM coordinator.action_intents',
+      );
       expect(after.rows[0].n).toBe(before.rows[0].n);
-      void createAttempt;
     });
   });
 
@@ -284,7 +326,10 @@ describe('self-write marker forgery: tool and API inputs', () => {
       const state = await configState(world, 'ui.banner_text');
       expect(state.causedBy).toBeNull();
       expect(state.actor).toBe('owner');
-      expect((await historyRows(world, 'ui.banner_text')).at(-1)?.caused_by_action_id).toBeNull();
+      expect(
+        (await historyRows(world, 'ui.banner_text')).at(-1)
+          ?.caused_by_action_id,
+      ).toBeNull();
     });
   });
 
@@ -309,7 +354,10 @@ describe('self-write marker forgery: tool and API inputs', () => {
       ['f'.repeat(64), actionId],
     );
     const rig = watcherRig(world);
-    return { rig, out: await rig.watcher.observe(['checkout.config/ui.banner_text']) };
+    return {
+      rig,
+      out: await rig.watcher.observe(['checkout.config/ui.banner_text']),
+    };
   };
 
   it('a marker row on another key never VERIFIES the intent for the first key', async () => {
@@ -321,13 +369,18 @@ describe('self-write marker forgery: tool and API inputs', () => {
     });
   });
 
-  it.fails('FINDING CW-1: a marker row on another key must not fail an intent whose own history row is correct', async () => {
-    await withWorld(async (world) => {
-      const { intent } = await committedAction(world);
-      await wrongKeyMarker(world, intent.id);
-      expect((await intentStatus(world, intent.id)).status).not.toBe('failed');
-    });
-  });
+  it.fails(
+    'FINDING CW-1: a marker row on another key must not fail an intent whose own history row is correct',
+    async () => {
+      await withWorld(async (world) => {
+        const { intent } = await committedAction(world);
+        await wrongKeyMarker(world, intent.id);
+        expect((await intentStatus(world, intent.id)).status).not.toBe(
+          'failed',
+        );
+      });
+    },
+  );
 });
 
 describe('self-write marker forgery: the ledger', () => {

@@ -8,12 +8,16 @@
 // RUNNING attempt keeps an evidence edge from a superseded receipt.
 import { describe, expect, it } from 'vitest';
 import { withTransaction } from '../../../../src/server/nemodots/db/tx.js';
-import { recordReadSet } from '../../../../src/server/nemodots/ledger/index.js';
+import {
+  recordReadSet,
+  registerObservation,
+} from '../../../../src/server/nemodots/ledger/index.js';
 import {
   createAttempt,
   latch,
   observed,
   registerObserved,
+  sourceRef,
   sleep,
   waitForLockWaiters,
   withWorld,
@@ -41,7 +45,10 @@ async function unmarkedReaders(world: World) {
   return rows.map((r) => r.attempt_id);
 }
 
-const readSet = (attempt: Awaited<ReturnType<typeof createAttempt>>, receiptId: string) => ({
+const readSet = (
+  attempt: Awaited<ReturnType<typeof createAttempt>>,
+  receiptId: string,
+) => ({
   missionId: attempt.missionId,
   taskId: attempt.taskId,
   attemptId: attempt.attemptId,
@@ -52,19 +59,23 @@ describe('C13 closure versus observe_source', () => {
   it('a read-set write in flight (edge uncommitted, locks held) makes the superseding registration wait, then mark the attempt', async () => {
     await withWorld(async (world) => {
       const attempt = await createAttempt(world);
-      const r1 = await observed(world, 'checkout.health', { status: 'degraded' });
+      const r1 = await observed(world, 'checkout.health', {
+        status: 'degraded',
+      });
       const client = await world.app.connect();
       try {
         await client.query('BEGIN');
         await recordReadSet(client, readSet(attempt, r1.id));
-        const registration = registerObserved(world, 'checkout.health', { status: 'ok' });
+        const registration = registerObserved(world, 'checkout.health', {
+          status: 'ok',
+        });
         await waitForLockWaiters(world, 1);
         await client.query('COMMIT');
         const result = await registration;
         expect(result.newRevision).toBe(true);
-        expect(result.invalidation?.perMission.flatMap((m) => m.affected.attemptIds)).toContain(
-          attempt.attemptId,
-        );
+        expect(
+          result.invalidation?.perMission.flatMap((m) => m.affected.attemptIds),
+        ).toContain(attempt.attemptId);
       } finally {
         client.release();
       }
@@ -77,10 +88,14 @@ describe('C13 closure versus observe_source', () => {
   it('supersession first: the late read-set write is refused (SupportError) and writes no edge', async () => {
     await withWorld(async (world) => {
       const attempt = await createAttempt(world);
-      const r1 = await observed(world, 'checkout.health', { status: 'degraded' });
+      const r1 = await observed(world, 'checkout.health', {
+        status: 'degraded',
+      });
       await observed(world, 'checkout.health', { status: 'ok' });
       await expect(
-        withTransaction(world.app, (client) => recordReadSet(client, readSet(attempt, r1.id))),
+        withTransaction(world.app, (client) =>
+          recordReadSet(client, readSet(attempt, r1.id)),
+        ),
       ).rejects.toMatchObject({ name: 'SupportError' });
       const { rows } = await world.admin.query(
         "SELECT 1 FROM ledger.dependency_edges WHERE to_kind = 'attempt' AND to_id = $1",
@@ -94,13 +109,11 @@ describe('C13 closure versus observe_source', () => {
   it('a registration parked after its preliminary read while a reader commits its edge: the closure still marks that reader', async () => {
     await withWorld(async (world) => {
       const attempt = await createAttempt(world);
-      const r1 = await observed(world, 'checkout.health', { status: 'degraded' });
+      const r1 = await observed(world, 'checkout.health', {
+        status: 'degraded',
+      });
       const parked = latch();
       const release = latch();
-      const { registerObservation } = await import(
-        '../../../../src/server/nemodots/ledger/index.js'
-      );
-      const { sourceRef } = await import('./harness.js');
       const registration = withTransaction(world.app, (client) =>
         registerObservation(
           client,
@@ -120,7 +133,9 @@ describe('C13 closure versus observe_source', () => {
         ),
       );
       await parked.promise;
-      await withTransaction(world.app, (client) => recordReadSet(client, readSet(attempt, r1.id)));
+      await withTransaction(world.app, (client) =>
+        recordReadSet(client, readSet(attempt, r1.id)),
+      );
       release.open(undefined);
       await registration;
       expect(await attemptStatus(world, attempt.attemptId)).toBe('invalidated');
@@ -132,7 +147,9 @@ describe('C13 closure versus observe_source', () => {
     await withWorld(async (world) => {
       let value = 0;
       for (let round = 0; round < 8; round += 1) {
-        const current = await observed(world, 'checkout.health', { status: `s${(value += 1)}` });
+        const current = await observed(world, 'checkout.health', {
+          status: `s${(value += 1)}`,
+        });
         const attempts = await Promise.all(
           Array.from({ length: 3 }, () => createAttempt(world)),
         );
@@ -145,7 +162,9 @@ describe('C13 closure versus observe_source', () => {
           }),
           (async () => {
             await sleep(round % 3);
-            await observed(world, 'checkout.health', { status: `s${(value += 1)}` });
+            await observed(world, 'checkout.health', {
+              status: `s${(value += 1)}`,
+            });
           })(),
         ]);
         expect(await unmarkedReaders(world)).toEqual([]);

@@ -29,9 +29,12 @@ describe('C5 replayed tool call and re-proposal', () => {
       );
       expect(new Set(results.map((r) => r.id)).size).toBe(1);
       expect(
-        await countRows(world, 'coordinator.action_intents', 'attempt_id = $1', [
-          s.attempt.attemptId,
-        ]),
+        await countRows(
+          world,
+          'coordinator.action_intents',
+          'attempt_id = $1',
+          [s.attempt.attemptId],
+        ),
       ).toBe(1);
     });
   });
@@ -67,9 +70,12 @@ describe('C5 replayed tool call and re-proposal', () => {
       expect(blocked).toHaveLength(1);
       expect(blocked[0].blockReason).toBe('idempotency_conflict');
       expect(
-        await countRows(world, 'coordinator.action_intents',
+        await countRows(
+          world,
+          'coordinator.action_intents',
           "attempt_id = $1 AND status IN ('proposed','admitted','committed','dispatched','outcome_unknown')",
-          [s.attempt.attemptId]),
+          [s.attempt.attemptId],
+        ),
       ).toBe(1);
     });
   });
@@ -86,10 +92,12 @@ describe('C5 replayed tool call and re-proposal', () => {
       // the repair is a NEW attempt with fresh evidence and its own tool call.
       const repair = await scenario(world);
       expect(
-        (await world.admin.query(
-          'SELECT status FROM coordinator.task_attempts WHERE id = $1',
-          [s.attempt.attemptId],
-        )).rows[0].status,
+        (
+          await world.admin.query(
+            'SELECT status FROM coordinator.task_attempts WHERE id = $1',
+            [s.attempt.attemptId],
+          )
+        ).rows[0].status,
       ).toBe('invalidated');
       const state = await configState(world, 'db.pool_max');
       const second = await world.service.propose(
@@ -125,7 +133,10 @@ describe('C5 replayed tool call and re-proposal', () => {
     await withWorld(async (world) => {
       const s1 = await scenario(world);
       const s2 = await scenario(world);
-      const [a, b] = [await proposePool(world, s1, 20), await proposePool(world, s2, 15)];
+      const [a, b] = [
+        await proposePool(world, s1, 20),
+        await proposePool(world, s2, 15),
+      ];
       expect(a.status).toBe('proposed');
       expect(b.status).toBe('proposed');
       const results = await Promise.all([

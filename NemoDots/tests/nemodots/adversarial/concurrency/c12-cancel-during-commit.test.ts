@@ -7,7 +7,6 @@
 import { describe, expect, it } from 'vitest';
 import {
   actionHistory,
-  admitAndCommit,
   cacheKeys,
   configState,
   countingRedis,
@@ -58,11 +57,16 @@ describe('C12 cancel during commit', () => {
       const intent = await proposePool(world, s, 20);
       const admitted = await world.service.admit(intent.id, 'dispatcher-a');
       await world.coordinator().control.cancel(world.missionId as never);
-      const result = await world.service.commit(intent.id, admitted.dispatch!.fence);
+      const result = await world.service.commit(
+        intent.id,
+        admitted.dispatch!.fence,
+      );
       expect(['cancelled', 'blocked']).toContain(result.status);
       expect((await configState(world, 'db.pool_max')).version).toBe(1);
       expect(await actionHistory(world, intent.id)).toHaveLength(0);
-      expect((await intentStatus(world, intent.id)).status).not.toBe('committed');
+      expect((await intentStatus(world, intent.id)).status).not.toBe(
+        'committed',
+      );
     });
   });
 
@@ -75,9 +79,14 @@ describe('C12 cancel during commit', () => {
         "UPDATE coordinator.missions SET status = 'cancelled', generation = generation + 1 WHERE id = $1",
         [world.missionId],
       );
-      const result = await world.service.commit(intent.id, admitted.dispatch!.fence);
+      const result = await world.service.commit(
+        intent.id,
+        admitted.dispatch!.fence,
+      );
       expect(result.status).toBe('blocked');
-      expect(['mission_not_running', 'generation_mismatch']).toContain(result.blockReason);
+      expect(['mission_not_running', 'generation_mismatch']).toContain(
+        result.blockReason,
+      );
       expect((await configState(world, 'db.pool_max')).version).toBe(1);
     });
   });
@@ -98,7 +107,6 @@ describe('C12 cancel during commit', () => {
         expect(status.failureReason).toBe('dispatch_fence_invalid');
         expect(counter.scripts).toBe(0);
         expect(await cacheKeys(world, 'catalog-a')).toHaveLength(2);
-        void admitAndCommit;
       },
       { redis: true, wrapRedis: countingRedis(counter) },
     );
