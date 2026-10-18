@@ -1167,9 +1167,7 @@ function bannerAttributed(record: TrialRecord, event: Invalidation): boolean {
     const rows = trialRows(record);
     const banner = rows.some(
       (r) =>
-        r.key === 'ui.banner_text' &&
-        ms(r.at) <= at &&
-        at - ms(r.at) <= 15_000,
+        r.key === 'ui.banner_text' && ms(r.at) <= at && at - ms(r.at) <= 15_000,
     );
     const other = rows.some(
       (r) =>
@@ -1478,7 +1476,7 @@ export function expectedAffectedTasks(
     if (task.createdByModelCallId && citing.has(task.createdByModelCallId))
       affected.add(task.id);
   // consumers of an affected task's output, transitively
-  for (let changed = true; changed; ) {
+  for (let changed = true; changed;) {
     changed = false;
     for (const task of snap.tasks)
       if (
@@ -1966,7 +1964,9 @@ export function scoreMutatingToolRetries(record: TrialRecord): string[] {
   for (const event of record.events) {
     if (event.kind !== 'tool_call.recorded') continue;
     if (
-      !(MUTATING_TOOLS as readonly string[]).includes(String(event.payload.name))
+      !(MUTATING_TOOLS as readonly string[]).includes(
+        String(event.payload.name),
+      )
     )
       continue;
     const id = String(event.payload.toolCallId);

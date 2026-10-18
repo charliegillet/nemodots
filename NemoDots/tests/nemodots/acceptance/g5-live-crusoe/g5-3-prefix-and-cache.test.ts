@@ -23,7 +23,6 @@ import {
   chat,
   completeThroughSaturation,
   createAdapter,
-  ctx,
   loadModule,
   requireLive,
   startProxy,
@@ -400,7 +399,8 @@ describe('G5.6c cached-token honesty: null = unavailable, 0 only if the provider
     [
       'prompt_tokens_details absent',
       (u) => {
-        const { prompt_tokens_details: _d, ...rest } = u;
+        const rest = { ...u };
+        delete rest.prompt_tokens_details;
         return rest;
       },
       null,

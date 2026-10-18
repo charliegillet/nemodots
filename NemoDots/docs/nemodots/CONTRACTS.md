@@ -39,6 +39,10 @@ SourceRef = {
 
 Collision rule: `(scope.ownerId, scope.environment, scope.resource, key)` is the uniqueness key of a source.
 
+**Revision 3 (2026-10-18, lead ruling on verifier finding F4b):** the uniqueness key of a source is `(scope.ownerId, scope.environment, scope.spaceId, scope.resource, key)`, with a null `spaceId` treated as one value (`UNIQUE NULLS NOT DISTINCT`). Reason: TEST_PROMPT gate 1 #2 and the build prompt's owner/Space isolation require that the same key in different Spaces never collides or supersedes across Spaces; revision 2 omitted `spaceId`. Implemented by migration `0007_source_space` (0002 is already applied and is not edited). Controlled sources in different Spaces still read the same `checkout.config_entries` authority version; each Space's source gets its own receipts. A receipt supports work only in a mission whose owner, environment, Space and resource all match (finding F4). `SupportValidator.assertCurrent` therefore takes a **required** `missionId` (`contracts/ports.ts`): an optional id would let a caller skip the scope check, which fails open. `recordModelCall` refuses inherited outputs from another mission.
+
+**Revision 3 (2026-10-18, D5 delegation, approved by the user):** `allowedCapabilities(role, parentCapabilities)` is `ROLE_CAPABILITIES[role] ∩ parentCapabilities`, plus one server-owned grant: a specialist delegated by a parent holding `delegate` keeps its role's `propose_*` capabilities. Revision 2's pure intersection made the documented investigator → specialist repair path impossible (an investigator cannot propose, so its specialist child could not either). The grant is limited: only investigators may delegate specialists (`delegableRoles`), specialists delegate verifiers only, and admission still checks every proposal's evidence and policy.
+
 The collection's `normalizedValue` is `{ keys: string[] /* sorted */, collectionVersion: number }`; its version advances only on key insert/delete. Member values never affect the collection version (rev2 C1/D1).
 
 ---

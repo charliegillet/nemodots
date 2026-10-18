@@ -3,7 +3,7 @@
 // SQL. Receipts are created through the production registerObservation, every
 // other node by direct inserts into the coordinator/ledger tables resolved by
 // introspection (SCHEMA BINDING errors name any column that is missing).
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import type {
   ClosureCase,
@@ -316,6 +316,21 @@ export async function seedGraph(
               [['task_id'], taskOf(n)],
               [['attempt_id'], attemptOfTask(taskOf(n))],
               [['status'], n.intentStatus ?? 'proposed'],
+              // Columns the 0005 CHECKs constrain; values are fixture-only and
+              // never read by the closure (it keys on id/status).
+              [['idempotency_key'], randomBytes(32).toString('hex')],
+              [['payload_hash'], randomBytes(32).toString('hex')],
+              [['payload'], {}],
+              [['target'], {}],
+              [['dependency_vector'], []],
+              [['required_sources'], '{}'], // text[] literal; toParam JSON-encodes arrays
+              [['policy_version'], 'policy-v1'],
+              [['rationale'], 'acc1 closure fixture'],
+              [['expires_at'], new Date(Date.now() + 3_600_000).toISOString()],
+              [
+                ['block_reason'],
+                n.intentStatus === 'blocked' ? 'stale_version' : null,
+              ],
             ]),
             { parents: { [T.missions]: mission } },
           );

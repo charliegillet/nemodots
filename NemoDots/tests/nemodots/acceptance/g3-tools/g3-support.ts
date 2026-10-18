@@ -368,7 +368,8 @@ export async function seedControlledState(world: {
   db: Acc3Database | null;
   redisPrefix: string;
 }): Promise<void> {
-  if (!world.db) throw new Error('seedControlledState needs the NemoDots database');
+  if (!world.db)
+    throw new Error('seedControlledState needs the NemoDots database');
   const entries: [string, string][] = [
     ['cache.namespace', '"acc3-ns-a"'],
     ['db.pool_max', '2'],
@@ -414,10 +415,14 @@ async function redisDigest(prefix: string): Promise<string> {
       const type = await client.type(key);
       let body = '';
       if (type === 'string') body = String(await client.get(key));
-      else if (type === 'hash') body = JSON.stringify(await client.hGetAll(key));
-      else if (type === 'list') body = JSON.stringify(await client.lRange(key, 0, -1));
-      else if (type === 'set') body = JSON.stringify((await client.sMembers(key)).sort());
-      else if (type === 'zset') body = JSON.stringify(await client.zRangeWithScores(key, 0, -1));
+      else if (type === 'hash')
+        body = JSON.stringify(await client.hGetAll(key));
+      else if (type === 'list')
+        body = JSON.stringify(await client.lRange(key, 0, -1));
+      else if (type === 'set')
+        body = JSON.stringify((await client.sMembers(key)).sort());
+      else if (type === 'zset')
+        body = JSON.stringify(await client.zRangeWithScores(key, 0, -1));
       parts.push(`${key}=${type}:${body}`);
     }
     return `redis ${keys.length} keys ${parts.join('|')}`;

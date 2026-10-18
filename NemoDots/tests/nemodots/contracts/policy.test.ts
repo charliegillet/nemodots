@@ -97,13 +97,38 @@ describe('ROLE_CAPABILITIES (D5)', () => {
   });
 
   it('child capabilities are the role defaults intersected with the parent', () => {
+    // rev3 D5: a specialist delegated by a parent holding `delegate` keeps its
+    // role's propose_* capabilities; everything else stays within the parent.
     expect(
       C.allowedCapabilities('cache_specialist', [
         'observe',
         'delegate',
         'publish_finding',
       ]),
-    ).toEqual(['observe', 'delegate', 'publish_finding']);
+    ).toEqual([
+      'observe',
+      'delegate',
+      'publish_finding',
+      'propose_config_change',
+      'propose_cache_flush',
+    ]);
+    expect(
+      C.allowedCapabilities('database_specialist', ['observe', 'delegate']),
+    ).toEqual(['observe', 'delegate', 'propose_config_change']);
+    // No `delegate` on the parent: no grant.
+    expect(
+      C.allowedCapabilities('routing_specialist', [
+        'observe',
+        'publish_finding',
+      ]),
+    ).toEqual(['observe', 'publish_finding']);
+    // The grant applies to specialists only.
+    expect(
+      C.allowedCapabilities('investigator', ['observe', 'delegate']),
+    ).toEqual(['observe', 'delegate']);
+    expect(C.allowedCapabilities('verifier', ['observe', 'delegate'])).toEqual([
+      'observe',
+    ]);
     expect(C.allowedCapabilities('verifier', null)).toEqual([
       'observe',
       'publish_finding',

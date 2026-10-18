@@ -42,9 +42,18 @@ Review findings C1-C16, I1-I14, D1-D10 (ARCHITECTURE.md section 14) are folded i
 
 ---
 
+## Wave 2 resume (2026-10-18, lead session 2)
+
+- Team mode: **persistent subagents (fallback)**, not native agent teams. In this session the `.claude/agents/*` types do not register for subagents, and a named teammate ran on the lead's model instead of its declared one. Each agent runs as a general-purpose subagent told to follow its `.claude/agents/<role>.md`, with the model pinned directly: `sonnet` resolves to `claude-sonnet-5-5` (verified by agent self-report 2026-10-18) and `opus` to the lead model `claude-opus-5-5`. Every agent reports its effective model ID in its handoff.
+- **No commits** (user instruction 2026-10-18): the integrator does not commit after waves; work stays in the working tree.
+- Node: use **v24.13.1** (`~/.nvm/versions/node/v24.13.1/bin`). Node v24.11.1 and v25.2.1 crash inside `node:internal/console` in `tests/telemetry.test.ts` (7 failures); v24.13.1 passes 8/8.
+- Stack on this machine: instance `dev`, Postgres **55442**, Redis **56389**, checkout **4520**. Colima's forwarder already holds 55432/56379; never touch it. Export `NEMODOTS_INSTANCE=dev NEMODOTS_PG_PORT=55442 NEMODOTS_REDIS_PORT=56389 NEMODOTS_CHECKOUT_PORT=4520` before stack/DB commands. The stack is managed by the lead; agents do not start or stop it.
+- Baseline on Node 24.13.1 after the lead removed the duplicate `unionAffected` from `ledger/supersession.ts` and generalised `tests/nemodots/integration/stack/migrate.test.ts` to every discovered migration: `test` exit 0 (1564 passed), `build` exit 0; `typecheck` fails on `tests/nemodots/integration/ledger/fix-round1.test.ts` only; `lint`/`check-format` fail on `ledger/supersession.ts` and verifier-owned `tests/nemodots/acceptance/{g3-tools,g5-live-crusoe,g6-blackbox}`. `test:nemodots:db`: 29/32 files pass; failing are `integration/ledger/fix-round1` (12) and `integration/ledger/model-calls` (3 inherited-output checks).
+- Wave 2 code already exists for every package, so each W2 package is now **IN_PROGRESS (reconcile)**: the owner checks the existing code against that package's acceptance list below, closes gaps, and reports with the handoff JSON.
+
 ## Wave 2 — engines
 
-### W2.1 `ledger` — status: PLANNED
+### W2.1 `ledger` — status: PASS
 
 - Owner: ledger-engineer. actionBoundary: true.
 - Allowed files: `src/server/nemodots/ledger/**`, `src/server/nemodots/db/migrations/0002_ledger.ts`, `tests/nemodots/ledger/**`, `tests/nemodots/integration/ledger/**`.
@@ -53,7 +62,9 @@ Review findings C1-C16, I1-I14, D1-D10 (ARCHITECTURE.md section 14) are folded i
 - Acceptance checks: `npx vitest run tests/nemodots/ledger` PASS (pure closure logic: diamond, multiple parents, hand-enumerated preserved branches, unrelated scopes untouched, perMission partition correct). `npm run test:nemodots:db -- tests/nemodots/integration/ledger` PASS covering: immutable receipt; revision/digest mismatch rejected; >16 KiB rejected; cross-environment no collision; supersession transitions; contested/retracted/expired fail `assertCurrent`; lower revision rejected; A→B→A three revisions; **membership-only collection**: a member value change leaves the collection receipt current and only a key insert/delete supersedes it (C1/D1); negative membership predicate invalidated by collection bump; hand-enumerated closure == `affected`; unrelated branch preserved; two simultaneous invalidations (barrier) no deadlock; `assertCurrent` with `lockMode:'update'` blocks then fails `stale_version` after a concurrent bump; `lockMode:'share'` makes a concurrent `advanceConfig` wait until the publication commits (C9); version advanced without receipt → `stale_pending_observation`; **same-digest re-observation mints no revision, appends a confirmation, `lastConfirmedAt` advances, aged receipt then passes a 120 s freshness check** (I2/D3); **two concurrent `registerObservation` on one observed source with a barrier after the preliminary read → exactly one new revision** (C8); closure cap: 10 001-node fixture → `ClosureCapExceeded` with no receipt row, then `registerWithoutClosure` succeeds (C14); orphaned attempt row stored without edges. `npm run typecheck && npm run lint && npm test` exit 0.
 - Brief: implement ARCHITECTURE sections 2-5 for the ledger. Receipts are immutable; status changes are transition rows + CAS. The closure runs inside the supersession transaction on the same connection; repair scheduling is the coordinator's (via `RecoveryPort`). Controlled live versions come from `checkout.config_entries`/`config_collection` only; if `0004` is absent in a test DB, create minimal copies in the fixture. `registerObservation` accepts `provenance.causedByActionId`/`selfWrite` from the watcher but never computes them. Never import coordinator, actions, sandbox, inference, team. Do not log receipt contents. Use the `app` URL from `test-db.ts` for every write test.
 
-### W2.2 `coordinator` — status: PLANNED
+- Result (2026-10-18, ledger-engineer on claude-sonnet-5-5): PASS. Added the missing round-1 fixes (member-observation shape and authority checks, observedAt skew bound, `runWithClosureLocks` wired into `registerObservation`/`transitionReceipt` (fixed two 40P01 lock-order deadlocks), `CoarseInvalidationRequiredError` on the cap path, `recordReadSet` currency check with an optional `LedgerOptions` argument). No assertion weakened. Lock order for every caller: coordinator rows (attempts, tasks, outputs, intents) before ledger locks.
+
+### W2.2 `coordinator` — status: PASS
 
 - Owner: runtime-engineer. actionBoundary: true.
 - Allowed files: `src/server/nemodots/coordinator/**`, `src/server/nemodots/db/migrations/0003_coordinator.ts`, `tests/nemodots/coordinator/**`, `tests/nemodots/integration/coordinator/**`.
@@ -62,7 +73,9 @@ Review findings C1-C16, I1-I14, D1-D10 (ARCHITECTURE.md section 14) are folded i
 - Acceptance checks: `npx vitest run tests/nemodots/coordinator` PASS (state tables via `contracts/transitions.ts`; plan validation rejects cycles/depth/breadth/capability escalation; investigator plan task with `propose_config_change` rejected (D5); `openInvalidation` predicate table). `npm run test:nemodots:db -- tests/nemodots/integration/coordinator` PASS covering: claim race one winner; stale heartbeat fails; reaper takeover then old worker's four publications throw `FenceError` writing nothing while the orphaned attempt row is recorded (C16); cancel after a publication acquired `FOR SHARE` waits and then rejects the next publication; cancel lists `committedEffects` (C12); stub `SupportValidator` throwing `stale_version` → attempt `invalidated`, synthetic invalidation + `repair_scheduled`, no partial rows (C13); outbox exactly-once; admission handler respects `minAgeMs` (D6); recovery aborts only affected readsets and records `branch_preserved`; `invalidation_resolved` emitted when the last affected attempt publishes a repair and `succeeded` is refused while an invalidation is open (D9); pause/resume; **`events.id` order equals commit order under two concurrent inserting transactions where the higher id commits first (barrier), and replay `id > n` returns the exact gap** (C6). `npm run typecheck && npm run lint && npm test` exit 0.
 - Brief: implement ARCHITECTURE sections 6-8. Every state change is a CAS; typed error on row count 0. Depend only on contracts ports (`SupportValidator`, `EventSinkPort`, `recordOrphanedAttempt` callback) with injected implementations; do not import ledger/actions/team/inference/sandbox (read-only SQL on ledger tables for snapshots allowed). Never hold a transaction across an await of the handler or network. The worker host is generic; W4 supplies the handler.
 
-### W2.3 `sandbox-checkout` — status: PLANNED
+- Result (2026-10-18, runtime-sandbox-engineer on claude-sonnet-5-5): PASS, no code changes; every bullet mapped to a test. Mutation checks: reverting C6, I14, D6 or C12 makes the named test fail. Gap: the C12 "cancel waits" test also passes without the mission lock (attempt locks also make cancel wait); the NOWAIT probe test isolates it.
+
+### W2.3 `sandbox-checkout` — status: PASS
 
 - Owner: sandbox-engineer. actionBoundary: true.
 - Allowed files: `src/server/nemodots/sandbox/**`, `src/server/nemodots/db/migrations/0004_checkout.ts`, `tests/nemodots/sandbox/**`, `tests/nemodots/integration/sandbox/**`, `evals/nemodots/scenarios/**`.
@@ -71,7 +84,9 @@ Review findings C1-C16, I1-I14, D1-D10 (ARCHITECTURE.md section 14) are folded i
 - Acceptance checks: `npm run test:nemodots:db -- tests/nemodots/integration/sandbox` PASS covering: migrations from empty; idempotent seed; healthy order flow decrements inventory exactly; Redis cache hit under namespace/schema key; each fault class via injector produces its documented symptom through HTTP and `/metrics` carries `expectedSchema/foundSchema` on F2 (D7); bounded repair via `advanceConfig` restores `/health ok`; wrong `expectedVersion` fails and leaves version unchanged; two concurrent `advanceConfig` on one key serialize (one `stale_version`); **a value update does not bump `config_collection.version`; insert/delete does** (C1); **concurrent writes on two different keys do not block each other** (C1); trigger nulls `caused_by_action_id` for injector and admin roles and keeps it for the app role (I14); `nemodots_checkout` cannot read `control.*`; probe PASS on healthy, FAIL on F4 naming the invariant; probe-tagged order excluded from `orders.recent`/`inventory` normalized values (D2); **readers: 5 polls of stable traffic produce an identical health/metrics/orders digest** (D2); `redis.stats` normalized value shows key counts per schema suffix (D7); injector `dependent_change_after_proposal` step fires within 500 ms of `cli notify-proposed` (C15); `/health` is `down` when Redis unreachable. Live: `NEMODOTS_INSTANCE=ci-w2 npm run nemodots:stack -- start && npm run nemodots:seed && curl -s http://127.0.0.1:4510/health` → `"status":"ok"`; inject `cache_schema_mismatch` → `/products` 500; `stop` exit 0. `npm run typecheck && npm run lint && npm test` exit 0.
 - Brief: the checkout must be a real workload whose behaviour depends on Redis and the versioned config. `version-authority.ts` is the only writer of `config_entries`; the collection version is **membership-only**. The injector never leaks diagnoses or scenario ids (control.* readable by verifier only); receipts redact injector actor. Runbooks are not yours, but the seed's healthy literals must not appear anywhere agents can read. Never read `evals/nemodots/frozen/**`. Do not import ledger/coordinator/inference/team. Stop processes you start; never touch 5432/6379.
 
-### W2.4 `inference-adapter` — status: PLANNED
+- Result (2026-10-18): PASS, no code changes. Live on instance `dev` (4520): seed → `/health` ok; inject `cache_schema_mismatch` → `/products` 500, `/metrics` `expectedSchema:3, foundSchema:1`; `seed --reset-config` → ok for 25 s. `stack start` does not seed: run `nemodots:seed` after a fresh init. The `ci-w2` start/stop check was not run (shared stack).
+
+### W2.4 `inference-adapter` — status: PASS
 
 - Owner: integration-engineer. actionBoundary: false.
 - Allowed files: `src/server/nemodots/inference/**`, `tests/nemodots/inference/**`, `tests/nemodots/live/inference/**`, `tests/nemodots/fixtures/inference/**`.
@@ -80,7 +95,9 @@ Review findings C1-C16, I1-I14, D1-D10 (ARCHITECTURE.md section 14) are folded i
 - Acceptance checks: `npx vitest run tests/nemodots/inference` PASS against a local Node `http` stub: exact request body keys; SSE across split chunks; tool-call accumulation with ids; strict schema failure → `invalid_output`; cancel → `cancelled` and all usage null; 429 then 200 → one retry ≥ 1 s; 503×5 → `provider_unavailable`; Crusoe 404 envelope → `model_not_found`; OpenAI envelope; semaphore ≤ 4; `cachedTokens` null vs 0; fixture replay/refusal; **mode: key+model without base URL → `blocked` with `missingEnv: ['OPENAI_BASE_URL']`; request URL host equals the configured base URL host and never `api.openai.com` unless configured** (I1). `npm run test:nemodots:live -- tests/nemodots/live/inference` PASS against Crusoe (≤ 2 in flight): text completion `model.returned === requested`; tool call + continuation; strict json_schema; streaming `firstContentAt`; cancel after 5 deltas with usage null; `verifyModel` true/false via 404; every recorded `provider.host === new URL(OPENAI_BASE_URL).host`; results file has no secret substring; without a key prints `BLOCKED: OPENAI_API_KEY missing` and exits non-zero; the burst test is NOT_RUN unless `NEMODOTS_LIVE_BURST=1` and reports whether a 429 was observed. `npm run typecheck && npm run lint && npm test` exit 0.
 - Brief: this adapter is the only way NemoDots reasoning reaches a model. Exactly one base URL and one key from env; no fallback, no default host, no prerecorded answers in live mode. Encode every CRUSOE_SMOKE_PRE.md fact as a stub test and label the Lightning/Omni `cached_tokens` and 429 behaviours as stub-verified in your handoff unless the live suite observed them. No `openai` dependency, no `@tanstack/ai-openai` import. Never log bodies or headers. The tool loop is not here; no tool execution exists in this package.
 
-### W2.5 `context-compiler` — status: PLANNED
+- Result (2026-10-18, integration-engineer on claude-sonnet-5-5): PASS, no code changes. Live Crusoe suite 10 passed, burst NOT_RUN (opt-in). Live observations: one real 429 retried; Super `cached_tokens` 0 then 6912 on an identical request; results file free of secrets.
+
+### W2.5 `context-compiler` — status: PASS
 
 - Owner: context-engineer (runtime). actionBoundary: false.
 - Allowed files: `src/server/nemodots/context/**`, `tests/nemodots/context/**`.
@@ -91,9 +108,11 @@ Review findings C1-C16, I1-I14, D1-D10 (ARCHITECTURE.md section 14) are folded i
 
 ---
 
+- Result (2026-10-18): PASS, no code changes; unit suite 9 files / 137 tests with inference.
+
 ## Wave 3 — action boundary, watcher, interception, telemetry, UI foundation
 
-### W3.1 `actions-admission-commit` — status: PLANNED
+### W3.1 `actions-admission-commit` — status: PASS (own checks; pending F4 scope check and Wave 5 adversarial review)
 
 - Owner: ledger-engineer. actionBoundary: **true**.
 - Allowed files: `src/server/nemodots/actions/**`, `src/server/nemodots/db/migrations/0005_actions.ts`, `tests/nemodots/actions/**`, `tests/nemodots/integration/actions/**`.
@@ -102,7 +121,10 @@ Review findings C1-C16, I1-I14, D1-D10 (ARCHITECTURE.md section 14) are folded i
 - Acceptance checks: `npx vitest run tests/nemodots/actions` PASS (missing required source; irrelevant receipt; value domain → `payload_invalid`; unknown ActionKind; key derivation with `toolCallId`; citation scope helper). `npm run test:nemodots:db -- tests/nemodots/integration/actions` PASS (app role) covering TEST_PROMPT gate 2 items 1-7, 9-13, 15-16 plus: stale before admission → `blocked(stale_version)`, config unchanged; stale between admission and commit (advance the target after `admitted`) → commit `blocked(stale_version)` (C4, gate-2 item 4); non-target required source superseded between admission and commit → commit blocked (C4); **expired dispatcher lease → old dispatcher's commit throws `DispatchFenceError` writing nothing, re-claim by a new dispatcher commits** (C4, item 15); racing injector vs commit with recorded serialization and no mutation under the old version; **two simultaneous identical commits with a `before_lock` barrier → one mutation, one `Authorization(stage:'commit')`, identical `ResultReceipt` ids for both callers** (C2); **replayed tool call id with tampered payload → `idempotency_conflict`; a new tool call re-proposing an identical payload after a block succeeds** (C5); cross-resource vector check; per-resource independence (key B commits while key A changed, no blocking between them); author fence invalid writes nothing; foreign-mission citation → `citation_out_of_scope` (I8); inherited receipt in the emitting snapshot but not in the readset is part of the vector and its supersession blocks (C10); aged health receipt without confirmation → `evidence_too_old`; after a confirmation it admits (I2/D3); crash at each barrier → reconcile distinguishes states, no duplicate effect; **dispatcher crash at `after_effect_before_record` then a second dispatcher → script returns `already_applied`, zero additional UNLINKs (counted via a Redis `MONITOR` or a counting wrapper), intent settles `verified`** (C3); Lua fence strictly newer → `fence_newer`, `failed(dispatch_fence_invalid)`; `cache.namespace` advanced after commit and before dispatch → `claimDispatch` refuses (C11); compensation refuses when version moved; forged `causedByActionId` in payload rejected by strict schema; injector role cannot set the marker. Every test asserts version, actual config value and receipt rows together. `npm run typecheck && npm run lint && npm test` exit 0.
 - Brief: implement G1 exactly as ARCHITECTURE sections 4-5 state: two durable transactions (admission, commit) that both run every predicate, the commit under `FOR UPDATE` with the intent row locked first. No LLM/Redis/HTTP inside a transaction. Never bypass `advanceConfig`. Record an Authorization for every decision except the duplicate-delivery short-circuit. Expose barriers for the W5 adversary. Do not add ActionKinds; do not import team/routes/inference. Two adversarial reviewers inspect this boundary before any live acceptance.
 
-### W3.2 `source-watcher` — status: PLANNED
+- Result (2026-10-18, ledger-engineer on claude-sonnet-5-5): own checks PASS (actions unit 26; actions+ledger DB 189; lead re-run of full `test:nemodots:db`: 39 files, 381 passed, 1 expected fail). A target advanced before its replacement receipt exists blocks with `stale_pending_observation` (fail-closed G3); once the replacement is registered it blocks with `stale_version`. Both are blocks; accepted. `propose()` links the intent into the dependency graph, so a superseded read blocks it before admission. It also requires the emitting model call to be recorded first. The approval race (gate 2 item 4) moves to W3.3. Not final until F4 (cross-scope receipts) lands and both technical adversaries review the boundary (W5.2, W5.3).
+- Dependencies recorded for W5.1: register the outbox handler for `action.dispatch` → `actions.dispatch(actionId, fence)`. Wire it as `createActions({ pool: app, validator: createSupportValidator(), events: createEventSink(), redis, redisPrefix, dispatchLeaseMs })`, and pass `actions.intents` as the coordinator's IntentReader. Watcher: `settleFromHistory` / `settleSuperseded`.
+
+### W3.2 `source-watcher` — status: FAIL
 
 - Owner: runtime-engineer. actionBoundary: true.
 - Allowed files: `src/server/nemodots/watcher/**`, `tests/nemodots/watcher/**`, `tests/nemodots/integration/watcher/**`.
@@ -111,7 +133,9 @@ Review findings C1-C16, I1-I14, D1-D10 (ARCHITECTURE.md section 14) are folded i
 - Acceptance checks: `npm run test:nemodots:db -- tests/nemodots/integration/watcher` PASS (app role) covering: injector change → receipt within one poll, old receipt superseded, hand-enumerated `perMission` affected sets; NOTIFY path < 500 ms; **observed source unchanged over 5 polls → zero new revisions, 5 confirmations, `lastConfirmedAt` advances** (I2/D2); changed health status registers once; **self-write verified via history** → intent `verified`, head receipt `selfWrite:'verified'`, acting lineage routed to postcondition, other branches invalidated and coalesced; mismatch → full invalidation + `failed(postcondition_mismatch)`; **stopped watcher, action commits K v1→v2, injector writes K v2→v3, watcher restarted → rev 3 registered with `selfWrite:'none'`, intent X `verified` (its row matched) and the full invalidation applies to everyone including X's lineage** (C7); B1 `ui.banner_text` change → member receipt superseded, collection receipt current, zero affected attempts in a mission that never read that key (C1/D1); probe run leaves `orders.recent`/`inventory` receipts current (D2); closure cap → missions paused, coarse event, receipt registered (C14); two watcher instances → exactly one registers; restart does not re-register; lower-revision replay logged `stale_observation_rejected`. `npm run typecheck && npm run lint && npm test` exit 0.
 - Brief: the watcher is the normal path from "world changed" to receipts and invalidations; G1/G2 are the correctness gates, so prefer exactness: never register a revision you did not read from the authority; classify from `config_versions` history, never from the head alone. Redact injector/owner actors. Do not import team/** or actions/** beyond the `RecoveryPort`/settle callbacks injected by bootstrap.
 
-### W3.3 `opendots-interception` — status: PLANNED
+- Result (2026-10-18, runtime-sandbox-engineer on claude-sonnet-5-5): FAIL on one bullet. Every other bullet passes (unit 17, DB 19). After a verified self-write the acting lineage is invalidated instead of moving to postcondition verification (ARCHITECTURE 5.4); the closure runs in the ledger, so the fix is queued with the ledger engineer. Proof test: `it.fails` "acting lineage keeps its output" in `tests/nemodots/integration/watcher/self-write.test.ts`; flip it to `it()` when the ledger fix lands.
+
+### W3.3 `opendots-interception` — status: PASS
 
 - Owner: integration-engineer. actionBoundary: false.
 - Allowed files: `src/server/nemodots/interception/**`, `src/server/dot-agent.ts`, `src/server/pages.ts`, `src/server/connections.ts`, `src/server/connection-tools.ts`, `src/server/connection-routes.ts`, `src/server/connection-store.ts`, `src/server/computer-service.ts`, `tests/nemodots/interception/**`, `tests/nemodots/live/interception/**`.
@@ -120,7 +144,9 @@ Review findings C1-C16, I1-I14, D1-D10 (ARCHITECTURE.md section 14) are folded i
 - Acceptance checks: `npm test` PASS with all 54 upstream files unchanged in count plus the new tests; `npx vitest run tests/nemodots/interception` PASS: registry completeness and `deny_unknown`; with the id list empty every hook passes through unchanged; `DotAgent.run` with the fixture stream records a snapshot; incident Dot `edit_space_page` → tool error, no page change; **client tools keep no executor and the approval interrupt round-trip ends with a pending client tool call** (I7); **the per-turn `ConnectionService`/`ComputerService` instances refuse incident Dots** (I5); `pages.onRevision` fires for tool, owner route and reviewed-page paths; **approval created through the tool executor path carries a bound vector; superseded receipt → 409; unchanged → executes once; NULL vector behaviour per Dot kind** (I6); `audited()` refuses incident agent, allows owner. `npm run test:nemodots:live -- tests/nemodots/live/interception` PASS with the Intelligence key: create a Dot via `POST /api/dots`, set `NEMODOTS_INCIDENT_DOT_IDS` to it, run one `/api/copilotkit` turn with the Crusoe model asking it to edit a page → `ModelCallRecord(provider.mode='live')` recorded and the edit refused; prints BLOCKED and fails (never skips) without the key. `npm run typecheck && npm run lint && npm run build` exit 0.
 - Brief: defence in depth; make it real, fixture-tested, live-tested with one incident Dot, and zero-impact when NemoDots is absent (optional parameters, no-op defaults, every upstream test unmodified). Do not change approval semantics (1 h TTL, single claim, payload binding); add revalidation in front. The guarantee does not depend on this package. Do not touch `app.ts`, `index.ts`, `workspace.ts`, `src/shared/**` or client files. Stop the server you start for the live test; never print the Intelligence or Crusoe key.
 
-### W3.4 `telemetry` — status: PLANNED
+- Result (2026-10-18, integration-engineer on claude-sonnet-5-5): PASS. `npm test` 107 files / 1673, then 1677 after the approval-race work; upstream tests unmodified; live Dot turn PASS. The live test created one real CopilotKit Intelligence thread. Approval binds a `payload_hash` (additive SQLite `ALTER TABLE`, same pattern as upstream), and evidence is revalidated before the claim and again immediately before `connections.call` (409 `stale_evidence`/`payload_mismatch`). MCP approvals are **freshness-at-dispatch only**; label them so in the UI and report. Open for W5: R4 replayed-history lineage is not inherited; bootstrap must install the ledger-backed VectorChecker, the ProvenanceSink and the pageRevision registration of `opendots.page/<id>` receipts; `toolSchemaHash` covers names and descriptions only; plain `create()` does not roll back on a hook throw; scheduled/headless, Composio, computer and connected-service paths are fixture-only.
+
+### W3.4 `telemetry` — status: PASS
 
 - Owner: telemetry-engineer (integration). actionBoundary: false.
 - Allowed files: `src/server/nemodots/telemetry/**`, `src/server/nemodots/db/migrations/0006_telemetry.ts`, `tests/nemodots/telemetry/**`, `tests/nemodots/integration/telemetry/**`.
@@ -129,7 +155,9 @@ Review findings C1-C16, I1-I14, D1-D10 (ARCHITECTURE.md section 14) are folded i
 - Acceptance checks: `npx vitest run tests/nemodots/telemetry` PASS (cached unavailable stays null/`available:false`; mixed availability; orphaned calls separate; percentiles; no division by zero). `npm run test:nemodots:db -- tests/nemodots/integration/telemetry` PASS (insert attempts incl. orphaned, export JSONL, grep for `sk-`/`Bearer`/key prefix empty; summary equals hand-computed totals). `npm run typecheck && npm run lint && npm test` exit 0.
 - Brief: every number traces to a stored row; cancelled attempts have null usage; unavailable is null, never 0; invent no savings. Do not log prompts. Do not import team/** or routes/**.
 
-### W3.5 `ui-foundation` — status: PLANNED
+- Result (2026-10-18, integration-engineer): PASS (unit 29, DB 6, all gates 0). Cached tokens stay null when unreported; orphaned calls are counted separately; the export refuses secrets; pricing is labelled "USD per 1M tokens (assumed; Crusoe /v1/models states no unit)"; the metrics bridge refuses a token equal to the inference key. Dependencies: the coordinator/team must call `recordToolSpan`/`markMissionPhase`; add `NEMODOTS_METRICS_URL`/`NEMODOTS_METRICS_TOKEN` to `.env.example` and `config/env.ts` (W5.1).
+
+### W3.5 `ui-foundation` — status: PASS
 
 - Owner: frontend-engineer. actionBoundary: false.
 - Allowed files: `src/client/nemodots/mission-events.ts`, `src/client/nemodots/mission-stream.ts`, `src/client/nemodots/mission-api.ts`, `src/client/nemodots/status.ts`, `src/client/nemodots/format.ts`, `src/client/nemodots/components/**`, `src/client/nemodots.css`, `tests/nemodots/ui/**`.
@@ -140,9 +168,11 @@ Review findings C1-C16, I1-I14, D1-D10 (ARCHITECTURE.md section 14) are folded i
 
 ---
 
+- Result (2026-10-18, frontend-engineer on claude-sonnet-5-5): PASS, no code changes; every bullet mapped to a test. Lead re-run of `tests/nemodots/ui` + `ui-page`: exit 0. No rendered-browser check yet (W6.2).
+
 ## Wave 4 — the team, the routes, the page
 
-### W4.1 `nemotron-team` — status: PLANNED
+### W4.1 `nemotron-team` — status: IN_PROGRESS
 
 - Owner: runtime-engineer. actionBoundary: false.
 - Allowed files: `src/server/nemodots/team/**`, `tests/nemodots/team/**`, `tests/nemodots/live/team/**`.
@@ -151,7 +181,7 @@ Review findings C1-C16, I1-I14, D1-D10 (ARCHITECTURE.md section 14) are folded i
 - Acceptance checks: `npx vitest run tests/nemodots/team` PASS with the fixture adapter and labelled port stubs: plan validation and correction; delegation bounds; **an investigator attempting `propose_action` is refused with `capability_denied` and the fixture transcript shows the delegation path** (D5); model-supplied `missionId`/receipt ids outside scope rejected; `propose_action` passes `modelCallId`/`toolCallId` and the snapshot vector (C10); readset invalidation mid-loop aborts before the next call; malformed JSON path; refusal/timeout/rate-limit/budget → explicit failures; injection text leaves the system digest unchanged; `read_runbook('../x')` rejected (I13); **grep test: no seed baseline literal (`v7`, `"2"` for schema, `8` for pool, `5000`, `primary`, `true` in config context) appears in `team/runbooks/**` or `team/prompts.ts`** (D7). `npm run test:nemodots:live -- tests/nemodots/live/team` PASS against Crusoe with a stub coordinator in a test DB: valid plan with ≥ 2 root tasks; on a seeded fault an investigator attempt performs ≥ 1 `observe_source` and ≥ 1 `delegate_task` to a specialist whose attempt observes (depth 2); every record has `model.returned === requested` and `provider.host === new URL(OPENAI_BASE_URL).host`; ≤ 4 in flight; BLOCKED and non-zero exit without a key. `npm run typecheck && npm run lint && npm test` exit 0.
 - Brief: no hardcoded plans, arguments, diagnoses or answers; runbooks describe semantics only. Tools derive identity from `context.context`. All inference via `InferencePort`. Compile every call with `context/compile.ts`; repair attempts get fresh scoped reads and the invalidation summary, never the old transcript. Never import routes/** or sandbox/** (observe through `SourceReaderPort`), never read `control.*`. Avoid `tool_choice: required`.
 
-### W4.2 `routes-sse` — status: PLANNED
+### W4.2 `routes-sse` — status: PASS
 
 - Owner: integration-engineer. actionBoundary: false.
 - Allowed files: `src/server/nemodots/routes/**`, `tests/nemodots/routes/**`, `tests/nemodots/integration/routes/**`.
@@ -160,7 +190,9 @@ Review findings C1-C16, I1-I14, D1-D10 (ARCHITECTURE.md section 14) are folded i
 - Acceptance checks: `npm run test:nemodots:db -- tests/nemodots/integration/routes` PASS with an in-process Hono app reusing the upstream `/api/*` middleware (via `createApp` with a stub platform or copied middleware; `app.ts` not edited): blocked mode `POST /missions` → 503 with names only; `mode` disagreement → 400 (I11); lifecycle 409s; **SSE replay from `Last-Event-ID` returns exactly the missing ids then live events; a payload failing `EventPayloadSchema` is never written** (C6/D4); heartbeat present; other missions' events never appear and an invalidation touching two missions appears in each stream with only that mission's subset (I10); manual edit advances version and a receipt appears; injector run returns only `runId`; snapshot JSON has no control keys and no role URLs; cross-origin and non-JSON rejected; `OWNER_TOKEN` enforced. `npm run typecheck && npm run lint && npm test` exit 0.
 - Brief: routes are thin. Authority never comes from body ids. SSE through fetch streaming; `id:` lines equal `coordinator.events.id`. Do not mount yourself in `app.ts`/`index.ts` (W5). Never expose prompts, control data, role URLs or the probe secret.
 
-### W4.3 `mission-page` — status: PLANNED
+- Result (2026-10-18, integration-engineer on claude-sonnet-5-5): PASS (unit 18, DB 7, lint/build/test 0). Matches the frozen `mission-api.ts` exactly. Mode and owner come from the server; another owner gets 404; responses are schema-validated before sending; SSE ids are `coordinator.events.id`. Not mounted yet: mounting and dependency injection are W5.1 work (list in the handoff). For W5 review: a stored event that fails validation is skipped and invisible to a reconnect; `/telemetry/summary` without a missionId is not owner-filtered (single-owner today); the routes harness must inject the ledger event sink.
+
+### W4.3 `mission-page` — status: PASS
 
 - Owner: frontend-engineer. actionBoundary: false.
 - Allowed files: `src/client/nemodots/MissionPage.tsx`, `src/client/nemodots/MissionCreateForm.tsx`, `src/client/nemodots/views/**`, `src/client/nemodots/use-mission.ts`, `src/client/App.tsx`, `src/client/main.tsx`, `src/client/nemodots.css`, `tests/nemodots/ui-page/**`.
@@ -170,6 +202,8 @@ Review findings C1-C16, I1-I14, D1-D10 (ARCHITECTURE.md section 14) are folded i
 - Brief: FRONTEND.md section 12 placement; no CopilotKit hooks in the mission page; chat remains the upstream experience (Intelligence available). Never present fixture as live. Render nothing from control, prompts or env values. Add to `App.tsx`, do not restructure. Do not edit `components/**` (W3.5 owns their tests).
 
 ---
+
+- Result (2026-10-18, frontend-engineer): PASS **against typed mock API fixtures only**, no code changes. W4.2 routes do not exist yet; there has been no live-server or browser verification. Re-verify at W4.2 integration and W6.2 E2E.
 
 ## Wave 5 — composition, live proof, adversaries, operator docs
 
@@ -182,7 +216,7 @@ Review findings C1-C16, I1-I14, D1-D10 (ARCHITECTURE.md section 14) are folded i
 - Acceptance checks: `npm run typecheck && npm run lint && npm test && npm run build` exit 0 (upstream 344 pass; `tests/app.test.ts` unchanged). `npm run test:nemodots:db -- tests/nemodots/integration/bootstrap` PASS: blocked boot reports `missingEnv` for whichever of the three names is absent (test each) and mission create 503; boot refuses on pending migrations; SIGTERM stops workers and watcher; boot without stack → `postgres: down` while `/api/state` serves; `NEMODOTS_WORKERS=0` + one `worker-main` child processes attempts. Live (`npm run test:nemodots:live -- tests/nemodots/live/mission`, dedicated `live-<rand>` instance, `NEMODOTS_TEST_HOOKS` unset): `healthy` PASS — mission from goal only; plan persisted; ≥ 2 workers; ≥ 1 delegated child (capability-forced); probe pass; `succeeded`; every `model_call_records.provider.host === new URL(OPENAI_BASE_URL).host` and `model.returned === requested`. `changed-evidence` PASS — seeded fault, `admission.minAgeMs = 3000`, injector `dependent_change_after_proposal` fires on `nemodots_action_proposed`; the test records and asserts the **honest disjunction**: (a) the intent is `blocked(stale_version)` at admission or commit and a repair attempt's readset contains the new receipt, or (b) the commit lands first and a second invalidation with repair follows; in both cases the final `set_config` commits and the probe passes (D6); **preserved set computed structurally** from recorded edges (tasks with no evidence/inheritance path from the superseded receipt): zero new model calls for exactly that set, or the test reports `NOT_MET` and fails rather than forcing it (D5). `worker-crash` PASS — SIGKILL the `worker-main` child mid-attempt; reaper takes over; a late publish with the held fence (replayed by the test using the killed worker's token) is rejected; mission completes (I9). `redis-loss` PASS — stop the instance's own Redis mid-mission; authoritative state survives; resumes after restart; `result_receipts` unique; effect markers consulted. Each test writes redacted summaries under `.local/<instance>/live/` with no secret substring; all processes stopped and instance ports clean; missing key → BLOCKED printed and non-zero exit.
 - Brief: composition root and live proof. Wire ports here and nowhere else. Upstream boot is behaviourally identical when `NEMODOTS_*` is unset except `/api/nemodots/health`. Mount inside `createApp` (the 404 catch-all is at `index.ts:112`). Live tests never touch 5432/6379, keep ≤ 4 inference calls in flight, and never set `NEMODOTS_TEST_HOOKS`. Do not edit team/routes/actions/ledger; report defects as findings.
 
-### W5.2 `concurrency-adversary` — status: PLANNED
+### W5.2 `concurrency-adversary` — status: IN_PROGRESS
 
 - Owner: concurrency-devils-advocate. actionBoundary: **true**.
 - Allowed files: `tests/nemodots/adversarial/concurrency/**`, `docs/nemodots/review/CONCURRENCY_REVIEW.md`.
@@ -200,7 +234,7 @@ Review findings C1-C16, I1-I14, D1-D10 (ARCHITECTURE.md section 14) are folded i
 - Acceptance checks: `npm run test:nemodots:db -- tests/nemodots/adversarial/tool-paths` every test PASS or documented FAIL; `npx vitest run tests/nemodots/adversarial/tool-paths/registry.test.ts` PASS; `check-format` exit 0.
 - Brief: assume the implementation is wrong until a test proves otherwise. Attack live Dot turns too (Intelligence available). Do not edit production code. Model-supplied ids grant nothing; a name containing `read` is not proof.
 
-### W5.4 `docs-operator` — status: PLANNED
+### W5.4 `docs-operator` — status: IN_PROGRESS
 
 - Owner: docs-engineer. actionBoundary: false.
 - Allowed files: `docs/nemodots/SETUP.md`, `docs/nemodots/DEMO.md`, `THIRD_PARTY_NOTICES.md`, `README.md` (append NemoDots section only), `scripts/nemodots/notices.mjs`.
@@ -256,6 +290,8 @@ Review findings C1-C16, I1-I14, D1-D10 (ARCHITECTURE.md section 14) are folded i
 `tests/nemodots/acceptance/**` (including its own `vitest.config.ts`), `evals/nemodots/frozen/**`, `docs/nemodots/VERIFICATION_REPORT.md`. The verifier freezes the acceptance contract, oracle and fixture hashes after W1 and before W4; changes afterwards need a separate reviewed revision.
 
 ## 8. Gate log (filled by the integrator after each wave)
+
+- **Wave 2 (2026-10-18, lead, Node v24.13.1, instance dev):** `typecheck` 0, `test` 0 (1564), `build` 0, `test:nemodots:db` 0 (32 files / 301 tests). `lint`/`check-format`: pending verifier-owned acceptance files. Not committed (user instruction).
 
 | Wave | typecheck | lint    | test    | build   | check-format | test:nemodots:db | notes                   |
 | ---- | --------- | ------- | ------- | ------- | ------------ | ---------------- | ----------------------- |

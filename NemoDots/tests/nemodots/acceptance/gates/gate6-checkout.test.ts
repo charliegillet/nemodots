@@ -2,7 +2,9 @@
 // frozen held-out trial list. INV-1 is implemented end to end with the
 // verifier role and plain HTTP; the others fail until their entry points
 // exist and the driver is bound. Trials need the full composed system.
+import { spawn, type ChildProcess } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { resolve } from 'node:path';
 import pg from 'pg';
 import { describe, expect, it } from 'vitest';
@@ -25,24 +27,96 @@ function verifierUrl() {
   return url;
 }
 
-function checkoutUrl() {
-  const url = process.env.NEMODOTS_CHECKOUT_URL;
-  if (!url) throw new Error('BLOCKED: NEMODOTS_CHECKOUT_URL is not set.');
-  return url.replace(/\/$/, '');
+/** A free ephemeral port on 127.0.0.1 (never the running stack's checkout port). */
+function freePort(): Promise<number> {
+  return new Promise((done, fail) => {
+    const server = createServer();
+    server.once('error', fail);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      server.close(() =>
+        typeof address === 'object' && address
+          ? done(address.port)
+          : fail(new Error('no ephemeral port')),
+      );
+    });
+  });
+}
+
+/**
+ * Starts this suite's own checkout process on a free port with the minimal
+ * checkout environment (finding I3) and returns its base URL. The stack's
+ * running checkout is never contacted, reused or signalled.
+ */
+async function startOwnCheckout(
+  entry: string,
+): Promise<{ base: string; stop: () => Promise<void> }> {
+  const port = await freePort();
+  const pass = [
+    'PATH',
+    'HOME',
+    'NEMODOTS_INSTANCE',
+    'NEMODOTS_PG_PORT',
+    'NEMODOTS_REDIS_PORT',
+    'NEMODOTS_REDIS_URL',
+    'NEMODOTS_REDIS_PREFIX',
+    'NEMODOTS_PG_URL_CHECKOUT',
+    'NEMODOTS_PROBE_SECRET',
+  ];
+  const env: Record<string, string> = { NEMODOTS_CHECKOUT_PORT: String(port) };
+  for (const name of pass)
+    if (process.env[name] !== undefined) env[name] = process.env[name]!;
+  const child: ChildProcess = spawn(
+    process.execPath,
+    ['--import', 'tsx', entry],
+    { cwd: APP_ROOT, env, stdio: 'ignore' },
+  );
+  const exited = new Promise<void>((done) => child.once('exit', () => done()));
+  const stop = async () => {
+    if (child.exitCode === null && child.signalCode === null)
+      child.kill('SIGTERM');
+    await exited;
+  };
+  const base = `http://127.0.0.1:${port}`;
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    if (child.exitCode !== null) {
+      await stop();
+      throw new Error(
+        `own checkout exited with code ${child.exitCode} before /health answered`,
+      );
+    }
+    try {
+      const response = await fetch(`${base}/health`);
+      await response.arrayBuffer();
+      return { base, stop };
+    } catch {
+      if (Date.now() > deadline) {
+        await stop();
+        throw new Error(`own checkout on ${port} did not answer within 30 s`);
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
 }
 
 describe('gate 6: checkout data invariants (verifier access)', () => {
   it('INV-1 read-only phase leaves business data untouched', async () => {
-    await requireEntries(['checkoutMigration', 'checkoutMain', 'seed']);
+    const entries = await requireEntries([
+      'checkoutMigration',
+      'checkoutMain',
+      'seed',
+    ]);
+    const checkout = await startOwnCheckout(entries.checkoutMain as string);
     const client = new pg.Client({
       connectionString: verifierUrl(),
       application_name: 'nemodots-acceptance-verifier',
     });
-    await client.connect();
     try {
+      await client.connect();
       const before = await businessSnapshot(client);
       expect(before.perTable['checkout.products'].rows).toBeGreaterThan(0);
-      const base = checkoutUrl();
+      const base = checkout.base;
       for (const path of [
         '/health',
         '/ready',
@@ -59,7 +133,8 @@ describe('gate 6: checkout data invariants (verifier access)', () => {
       const after = await businessSnapshot(client);
       expect(after).toEqual(before);
     } finally {
-      await client.end();
+      await client.end().catch(() => undefined);
+      await checkout.stop();
     }
   });
 

@@ -18,6 +18,7 @@ export interface SourceRow {
   id: string;
   ownerId: string;
   environment: Environment;
+  spaceId: string | null;
   resource: string;
   key: SourceKey;
   sourceType: SourceType;
@@ -28,6 +29,7 @@ interface SourceDbRow {
   id: string;
   owner_id: string;
   environment: Environment;
+  space_id: string | null;
   resource: string;
   key: SourceKey;
   source_type: SourceType;
@@ -35,12 +37,13 @@ interface SourceDbRow {
 }
 
 const SOURCE_COLUMNS =
-  'id, owner_id, environment, resource, key, source_type, authority';
+  'id, owner_id, environment, space_id, resource, key, source_type, authority';
 
 const toSourceRow = (row: SourceDbRow): SourceRow => ({
   id: row.id,
   ownerId: row.owner_id,
   environment: row.environment,
+  spaceId: row.space_id,
   resource: row.resource,
   key: row.key,
   sourceType: row.source_type,
@@ -54,17 +57,21 @@ const toSourceRow = (row: SourceDbRow): SourceRow => ({
 export async function ensureSource(
   client: PgClient,
   ref: Pick<SourceRef, 'key' | 'sourceType' | 'authority'> & {
-    scope: Pick<SourceRef['scope'], 'ownerId' | 'environment' | 'resource'>;
+    scope: Pick<
+      SourceRef['scope'],
+      'ownerId' | 'environment' | 'spaceId' | 'resource'
+    >;
   },
 ): Promise<SourceRow> {
   await client.query(
-    `INSERT INTO ledger.sources (id, owner_id, environment, resource, key, source_type, authority)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
-     ON CONFLICT (owner_id, environment, resource, key) DO NOTHING`,
+    `INSERT INTO ledger.sources (id, owner_id, environment, space_id, resource, key, source_type, authority)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     ON CONFLICT (owner_id, environment, space_id, resource, key) DO NOTHING`,
     [
       randomUUID(),
       ref.scope.ownerId,
       ref.scope.environment,
+      ref.scope.spaceId ?? null,
       ref.scope.resource,
       ref.key,
       ref.sourceType,
@@ -73,8 +80,15 @@ export async function ensureSource(
   );
   const { rows } = await client.query<SourceDbRow>(
     `SELECT ${SOURCE_COLUMNS} FROM ledger.sources
-      WHERE owner_id = $1 AND environment = $2 AND resource = $3 AND key = $4`,
-    [ref.scope.ownerId, ref.scope.environment, ref.scope.resource, ref.key],
+      WHERE owner_id = $1 AND environment = $2 AND space_id IS NOT DISTINCT FROM $3
+        AND resource = $4 AND key = $5`,
+    [
+      ref.scope.ownerId,
+      ref.scope.environment,
+      ref.scope.spaceId ?? null,
+      ref.scope.resource,
+      ref.key,
+    ],
   );
   const source = toSourceRow(rows[0]);
   if (
@@ -123,14 +137,22 @@ export async function findSourceByKey(
   identity: {
     ownerId: string;
     environment: Environment;
+    spaceId?: string | null;
     resource: string;
     key: string;
   },
 ): Promise<SourceRow | null> {
   const { rows } = await client.query<SourceDbRow>(
     `SELECT ${SOURCE_COLUMNS} FROM ledger.sources
-      WHERE owner_id = $1 AND environment = $2 AND resource = $3 AND key = $4`,
-    [identity.ownerId, identity.environment, identity.resource, identity.key],
+      WHERE owner_id = $1 AND environment = $2 AND space_id IS NOT DISTINCT FROM $3
+        AND resource = $4 AND key = $5`,
+    [
+      identity.ownerId,
+      identity.environment,
+      identity.spaceId ?? null,
+      identity.resource,
+      identity.key,
+    ],
   );
   return rows[0] ? toSourceRow(rows[0]) : null;
 }

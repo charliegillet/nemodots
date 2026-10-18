@@ -75,6 +75,16 @@ export const ENTRY = {
 
 export type EntryName = keyof typeof ENTRY;
 
+/**
+ * Process entries start servers and install signal handlers at import time,
+ * so they are checked for existence only and never imported in the test
+ * process; requireEntry returns their absolute path for a harness to spawn.
+ */
+const PROCESS_ENTRIES: ReadonlySet<EntryName> = new Set([
+  'checkoutMain',
+  'workerMain',
+]);
+
 function split(entryPoint: string): { file: string; name: string | null } {
   const hash = entryPoint.indexOf('#');
   return hash < 0
@@ -89,6 +99,7 @@ export async function requireEntry(name: EntryName): Promise<unknown> {
   const absolute = resolve(APP_ROOT, file);
   if (!existsSync(absolute))
     throw new EntryPointMissingError(entryPoint, 'module file does not exist');
+  if (PROCESS_ENTRIES.has(name)) return absolute;
   const specifier = pathToFileURL(absolute).href;
   let mod: Record<string, unknown>;
   try {

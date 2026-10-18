@@ -546,7 +546,9 @@ export async function runTrial(
       // mission started and no separate worker yet, nothing may hold a lease.
       await sleep(4000);
       record.crash!.leaseOwnersBeforeWorker = [
-        ...new Set((await db.runningAttempts(missionId)).map((a) => a.leaseOwner)),
+        ...new Set(
+          (await db.runningAttempts(missionId)).map((a) => a.leaseOwner),
+        ),
       ];
       sut.startWorker();
       record.crash!.workerStartedAtMs = Date.now();
@@ -835,6 +837,9 @@ export async function verifierProbe(
     orderId,
     reads,
     businessAfter: await db.snapshot().catch(() => null),
-    normalized: { before: normalizedBefore, after: await db.normalizedValues() },
+    normalized: {
+      before: normalizedBefore,
+      after: await db.normalizedValues(),
+    },
   };
 }

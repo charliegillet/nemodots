@@ -119,14 +119,16 @@ describe('CHECK constraints equal the contract enums', () => {
 });
 
 describe('uniqueness keys', () => {
-  it('sources are unique on (owner, environment, resource, key) and revisions on (source, revision)', async () => {
+  it('sources are unique on (owner, environment, space, resource, key) and revisions on (source, revision)', async () => {
     const { admin } = getDb();
     const { rows } = await admin.query<{ def: string }>(
       `SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint
         WHERE contype = 'u' AND connamespace = 'ledger'::regnamespace`,
     );
     const defs = rows.map((row) => row.def);
-    expect(defs).toContain('UNIQUE (owner_id, environment, resource, key)');
+    expect(defs).toContain(
+      'UNIQUE NULLS NOT DISTINCT (owner_id, environment, space_id, resource, key)',
+    );
     expect(defs).toContain('UNIQUE (source_id, source_revision)');
     const primary = await admin.query(
       `SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint

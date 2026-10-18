@@ -1,24 +1,33 @@
 import pg from 'pg';
 import { expect, it } from 'vitest';
-import { migrate } from '../../../../src/server/nemodots/db/migrate.js';
+import {
+  discoverMigrations,
+  migrate,
+} from '../../../../src/server/nemodots/db/migrate.js';
 import { withTestDatabase } from '../../helpers/test-db.js';
 
-it('applies 0001 from empty storage, then nothing; --check reports up to date', async () => {
+// Every migration on disk, in id order; later waves add files after 0001.
+const allIds = async () =>
+  (await discoverMigrations()).map((entry) => entry.id);
+
+it('applies every migration from empty storage in order, then nothing; --check reports up to date', async () => {
   await withTestDatabase(
     async ({ urls }) => {
+      const ids = await allIds();
+      expect(ids[0]).toBe('0001_bootstrap');
       const before = await migrate({
         connectionString: urls.admin,
         check: true,
       });
-      expect(before.pending).toEqual(['0001_bootstrap']);
+      expect(before.pending).toEqual(ids);
       const first = await migrate({ connectionString: urls.admin });
-      expect(first.applied).toEqual(['0001_bootstrap']);
+      expect(first.applied).toEqual(ids);
       const second = await migrate({ connectionString: urls.admin });
       expect(second).toEqual({
         applied: [],
         pending: [],
         unknown: [],
-        alreadyApplied: 1,
+        alreadyApplied: ids.length,
       });
       const check = await migrate({
         connectionString: urls.admin,
@@ -34,19 +43,18 @@ it('applies 0001 from empty storage, then nothing; --check reports up to date', 
 it('serializes concurrent runners with the advisory lock: exactly one applies', async () => {
   await withTestDatabase(
     async ({ urls }) => {
+      const ids = await allIds();
       const results = await Promise.all(
         [1, 2, 3].map(() => migrate({ connectionString: urls.admin })),
       );
-      expect(results.flatMap((result) => result.applied)).toEqual([
-        '0001_bootstrap',
-      ]);
+      expect(results.flatMap((result) => result.applied)).toEqual(ids);
       const client = new pg.Client({ connectionString: urls.admin });
       await client.connect();
       const rows = await client.query(
-        'SELECT id FROM public.schema_migrations',
+        'SELECT id FROM public.schema_migrations ORDER BY id',
       );
       await client.end();
-      expect(rows.rows).toEqual([{ id: '0001_bootstrap' }]);
+      expect(rows.rows).toEqual(ids.map((id) => ({ id })));
     },
     { migrate: false },
   );

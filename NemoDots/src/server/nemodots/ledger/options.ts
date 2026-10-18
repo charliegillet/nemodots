@@ -2,6 +2,7 @@
 // that must not depend on another package's migration point them at fixture
 // schemas. Names are validated as plain identifiers before they are
 // interpolated into SQL.
+import type { EventSinkPort } from '../contracts/index.js';
 import { LedgerError } from './errors.js';
 
 export interface LedgerOptions {
@@ -25,4 +26,29 @@ export function checkoutSchema(options?: LedgerOptions): string {
 
 export function coordinatorSchema(options?: LedgerOptions): string {
   return identifier(options?.coordinatorSchema ?? 'coordinator');
+}
+
+/**
+ * Options of every function that can supersede or retire a receipt
+ * (registerObservation, registerWithoutClosure, transitionReceipt, the
+ * closure engine). `events` is the EventSinkPort used to emit one coordinator
+ * `invalidation.recorded` event per affected mission INSIDE the registration
+ * transaction (ARCHITECTURE 5.2 step 5, finding I10). It is required so that a
+ * forgotten wire is a compile error, not a silently dropped event; the
+ * coordinator's sink takes the C6 advisory lock right before each INSERT.
+ */
+export interface RegistrationLedgerOptions extends LedgerOptions {
+  events: EventSinkPort;
+}
+
+export function requireEventSink(
+  options: LedgerOptions | undefined,
+): RegistrationLedgerOptions {
+  const events = (options as { events?: EventSinkPort } | undefined)?.events;
+  if (!events || typeof events.append !== 'function')
+    throw new LedgerError(
+      'event_sink_missing',
+      'registration needs ledger.events (an EventSinkPort); invalidation events would be dropped',
+    );
+  return options as RegistrationLedgerOptions;
 }

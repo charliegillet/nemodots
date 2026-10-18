@@ -90,7 +90,7 @@ export interface ReceiptDbRow {
 export const RECEIPT_SELECT = `
   SELECT r.id, r.source_id, s.owner_id, s.environment, s.resource, s.key AS source_key,
          s.source_type, s.authority, r.source_revision, r.collection_revision,
-         r.mission_id, r.space_id, r.observed_at,
+         r.mission_id, s.space_id AS space_id, r.observed_at,
          GREATEST(r.observed_at,
                   COALESCE((SELECT max(c.confirmed_at) FROM ledger.receipt_confirmations c
                              WHERE c.receipt_id = r.id), r.observed_at)) AS last_confirmed_at,

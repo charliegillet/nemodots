@@ -9,6 +9,7 @@ import { createApp } from './app.js';
 import { resolveAppOrigins } from './app-origin.js';
 import { WorkspaceStore } from './workspace.js';
 import { Platform } from './platform.js';
+import { createNemoDots } from './nemodots/bootstrap.js';
 import {
   agentRunTimeoutMsFromEnv,
   intelligenceApiKeyFromEnv,
@@ -92,10 +93,18 @@ const runner = new Runner(
 const wsOrigin = new URL(
   config.intelligenceWsUrl ?? 'wss://realtime.intelligence.copilotkit.ai',
 ).origin;
+// NemoDots: a router that is unconfigured (health reports the missing names,
+// everything else is 503) unless the sandbox stack's role URLs are available.
+const nemodots = createNemoDots(process.env, {
+  workspace,
+  log: (event, detail) =>
+    console.log(`nemodots: ${event}`, detail ? JSON.stringify(detail) : ''),
+});
 const app = createApp({
   store,
   runner,
   config: researchConfig,
+  nemodots,
   ownerToken,
   origin: resolveAppOrigins(process.env.APP_ORIGIN, process.env.NODE_ENV),
   platform,
@@ -115,6 +124,11 @@ app.get('*', serveStatic({ path: './dist/client/index.html' }));
 const server = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
   console.log(`NemoDots listening on http://${host}:${info.port}`);
   runner.start();
+  void nemodots
+    .start()
+    .catch((error) =>
+      reportChannelFailure('NemoDots did not start', [safeFailure(error)]),
+    );
   void platform
     .start()
     .catch((error) =>
@@ -127,6 +141,7 @@ const server = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
 const shutdown = createShutdown({
   stopRunner: () => runner.stop(),
   stopPlatform: () => platform.stop(),
+  stopNemoDots: () => nemodots.stop(),
   closeServer: () =>
     new Promise<void>((resolve, reject) =>
       server.close((error) => (error ? reject(error) : resolve())),

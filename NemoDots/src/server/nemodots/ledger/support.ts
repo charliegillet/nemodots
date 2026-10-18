@@ -26,12 +26,26 @@ import {
   lockReceiptsShared,
   type ReceiptRow,
 } from './receipt-store.js';
+import {
+  assertInScope,
+  resolveMissionScope,
+  type MissionScope,
+} from './scope.js';
 import { liveVersion, lockSourcesShared } from './sources.js';
 
 export interface AssertCurrentOptions {
   lockMode: 'share' | 'update';
   /** maxAgeMs per source key, checked against lastConfirmedAt. */
   freshness?: { [sourceKey: string]: number };
+  /**
+   * The mission the receipts are used for. Every receipt must belong
+   * to that mission's scope (owner, environment, Space, resource), else
+   * SupportError('citation_out_of_scope') and nothing is locked or written.
+   * Required: there is no code path that skips the scope check.
+   */
+  missionId: string;
+  /** Optional extra check: must equal the scope stored on the mission row. Never trusted instead of it. */
+  scope?: MissionScope;
 }
 
 type Verdict = { reason: BlockReason; detail: string } | null;
@@ -105,6 +119,11 @@ export async function assertCurrent(
       [],
       missing,
     );
+  // Fail closed: every call is scope-checked against its mission (F4).
+  assertInScope(
+    first.values(),
+    await resolveMissionScope(client, opts.missionId, options, opts.scope),
+  );
   const controlledKeys = new Set<string>();
   const observedSourceIds = new Set<string>();
   for (const row of first.values()) {

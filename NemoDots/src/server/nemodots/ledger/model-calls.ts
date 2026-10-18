@@ -26,12 +26,103 @@ import {
   type Scope,
 } from '../contracts/index.js';
 import { addEdges, type EdgeInput, type NodeRef } from './edges.js';
-import { ModelCallRecordError } from './errors.js';
-import type { LedgerOptions } from './options.js';
+import { ModelCallRecordError, SupportError } from './errors.js';
+import { coordinatorSchema, type LedgerOptions } from './options.js';
 import { getReceiptRows } from './receipt-store.js';
 import { assertCurrent } from './support.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The mission of the recording attempt, from the coordinator's own attempt row
+ * (never from the caller). The record's own scope must agree with it.
+ */
+async function recordingMission(
+  client: PgClient,
+  record: ModelCallRecord,
+  options?: LedgerOptions,
+): Promise<string> {
+  const schema = coordinatorSchema(options);
+  const present = await client.query<{ present: boolean }>(
+    'SELECT to_regclass($1) IS NOT NULL AS present',
+    [`${schema}.task_attempts`],
+  );
+  if (!present.rows[0]?.present)
+    throw new SupportError(
+      'citation_out_of_scope',
+      'the coordinator attempt table is unavailable, so the recording mission cannot be established',
+    );
+  const { rows } = await client.query<{ mission_id: string }>(
+    `SELECT mission_id FROM ${schema}.task_attempts WHERE id = $1`,
+    [record.attemptId],
+  );
+  if (!rows[0] || rows[0].mission_id !== record.scope.missionId)
+    throw new SupportError(
+      'citation_out_of_scope',
+      `attempt ${record.attemptId} does not belong to mission ${record.scope.missionId}`,
+    );
+  return rows[0].mission_id;
+}
+
+async function checkInheritedOutputs(
+  client: PgClient,
+  snapshot: ContextSnapshot,
+  cited: ReadonlySet<string>,
+  missionId: string,
+  options?: LedgerOptions,
+): Promise<void> {
+  const ids = [
+    ...new Set(
+      snapshot.injected.inheritedArtifacts
+        .filter(
+          (artifact) =>
+            (artifact.kind === 'task_output' || artifact.kind === 'handoff') &&
+            UUID.test(artifact.id),
+        )
+        .map((artifact) => artifact.id),
+    ),
+  ].sort();
+  if (ids.length === 0) return;
+  const schema = coordinatorSchema(options);
+  const { rows } = await client.query<{
+    id: string;
+    usable: boolean;
+    unusable_reason: string | null;
+    dependency_vector: { receiptId?: string }[];
+    mission_id: string;
+  }>(
+    // The mission of an output is derived server-side through its task.
+    `SELECT o.id, o.usable, o.unusable_reason, o.dependency_vector, t.mission_id
+       FROM ${schema}.task_outputs o JOIN ${schema}.tasks t ON t.id = o.task_id
+      WHERE o.id = ANY($1::uuid[]) ORDER BY o.id FOR SHARE OF o`,
+    [ids],
+  );
+  const found = new Map(rows.map((row) => [row.id, row]));
+  for (const id of ids) {
+    const row = found.get(id);
+    if (!row)
+      throw new ModelCallRecordError(
+        'model_call_invalid',
+        `inherited output ${id} does not exist`,
+      );
+    if (row.mission_id !== missionId)
+      throw new SupportError(
+        'citation_out_of_scope',
+        `inherited output ${id} belongs to another mission`,
+      );
+    if (!row.usable)
+      throw new SupportError(
+        'stale_version',
+        `inherited output ${id} is no longer usable (${row.unusable_reason ?? 'invalidated'})`,
+      );
+    for (const entry of row.dependency_vector)
+      if (!entry.receiptId || !cited.has(entry.receiptId))
+        throw new ModelCallRecordError(
+          'model_call_invalid',
+          `inherited output ${id} rests on a receipt the call does not cite`,
+        );
+  }
+}
 
 export interface RecordModelCallInput {
   record: ModelCallRecord;
@@ -195,12 +286,37 @@ export async function recordModelCall(
         'outputDependencyVector must contain the snapshot dependencyVector (citations add, never remove)',
       );
 
-  // Currency first: locks the controlled rows and observed registry rows FOR
+  // Inherited outputs next (coordinator rows are locked before ledger rows,
+  // prelock.ts): each must exist, be usable, and rest only on receipts this
+  // call cites, whatever the caller's snapshot claims about them.
+  await checkInheritedOutputs(
+    client,
+    snapshot,
+    outputReceipts,
+    await recordingMission(client, record, options),
+    options,
+  );
+
+  // Currency: locks the controlled rows and observed registry rows FOR
   // SHARE, so the edges inserted below cannot be missed by a closure.
   const receiptIds = record.outputDependencyVector.map(
     (entry) => entry.receiptId,
   );
-  await assertCurrent(client, receiptIds, { lockMode: 'share' }, options);
+  await assertCurrent(
+    client,
+    receiptIds,
+    {
+      lockMode: 'share',
+      missionId: record.scope.missionId,
+      scope: {
+        ownerId: record.scope.ownerId,
+        environment: record.scope.environment,
+        spaceId: record.scope.spaceId,
+        resource: record.scope.resource,
+      },
+    },
+    options,
+  );
   const stored = await getReceiptRows(client, receiptIds);
   for (const entry of record.outputDependencyVector) {
     const row = stored.get(entry.receiptId);

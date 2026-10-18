@@ -2,6 +2,10 @@ import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 import {
+  getInterceptionHooks,
+  type PageRevisionEvent,
+} from './nemodots/interception/active-policy.js';
+import {
   pageReviewSchema,
   type PageReviewDraft,
 } from '../shared/page-review.js';
@@ -43,6 +47,16 @@ export class PageError extends Error {
   }
 }
 export class Pages {
+  /**
+   * Optional NemoDots hook: called after a page write. Inside the update,
+   * delete and reviewed-create transactions it runs before COMMIT, so a throw
+   * rolls the write back; hooks should not throw. Falls back to the
+   * module-level hook; a no-op by default.
+   */
+  onRevision?: (event: PageRevisionEvent) => void;
+  private emit(event: PageRevisionEvent) {
+    (this.onRevision ?? getInterceptionHooks().pageRevision)?.(event);
+  }
   constructor(
     private db: DatabaseSync,
     private spaceExists: (id: string) => boolean,
@@ -132,6 +146,7 @@ export class Pages {
         now,
         sourceThreadId,
       );
+    this.emit({ kind: 'create', spaceId, pageId: id, revision: 1 });
     return this.get(spaceId, id);
   }
   reviewReceipt(
@@ -229,6 +244,12 @@ export class Pages {
           id,
           data.expectedRevision,
         );
+      this.emit({
+        kind: 'update',
+        spaceId,
+        pageId: id,
+        revision: data.expectedRevision + 1,
+      });
       this.db.exec('COMMIT');
       return this.get(spaceId, id);
     } catch (error) {
@@ -294,16 +315,33 @@ export class Pages {
         return false;
       }
       const now = Date.now();
+      const children = this.db
+        .prepare('SELECT id FROM pages WHERE spaceId=? AND parentId=?')
+        .all(spaceId, id) as unknown as { id: string }[];
       this.db
         .prepare(
           'UPDATE pages SET parentId=?, revision=revision+1, updatedAt=? WHERE spaceId=? AND parentId=?',
         )
         .run(page.parentId, now, spaceId, id);
+      for (const child of children)
+        this.emit({
+          kind: 'reparent',
+          spaceId,
+          pageId: child.id,
+          revision: Number(
+            (
+              this.db
+                .prepare('SELECT revision FROM pages WHERE id=?')
+                .get(child.id) as { revision: number }
+            ).revision,
+          ),
+        });
       // page_reviews rows stay: a retried approval must not recreate this page.
       this.db.prepare('DELETE FROM page_threads WHERE pageId=?').run(id);
       this.db
         .prepare('DELETE FROM pages WHERE id=? AND spaceId=?')
         .run(id, spaceId);
+      this.emit({ kind: 'delete', spaceId, pageId: id, revision: null });
       this.db.exec('COMMIT');
       return true;
     } catch (error) {

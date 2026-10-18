@@ -125,10 +125,20 @@ export async function runPublication<T>(
       const vector = spec.vector ? spec.vector(fenced) : [];
       attemptedVector = vector;
       const ids = [...new Set(vector.map((entry) => entry.receiptId))];
-      if (ids.length > 0)
-        await deps.supportValidator.assertCurrent(client, ids as ReceiptId[], {
-          lockMode: 'share',
-        });
+      if (ids.length > 0) {
+        // F4: the ledger also checks that every receipt belongs to this
+        // mission's owner / environment / Space / resource. missionId is a
+        // ledger extension of the port options, hence the variable.
+        const options = {
+          lockMode: 'share' as const,
+          missionId: spec.context.missionId,
+        };
+        await deps.supportValidator.assertCurrent(
+          client,
+          ids as ReceiptId[],
+          options,
+        );
+      }
       const result = await spec.write(fenced, tx);
       await tx.events.flush(client);
       return result;

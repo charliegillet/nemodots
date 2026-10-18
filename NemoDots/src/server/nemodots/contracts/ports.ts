@@ -39,6 +39,8 @@ export interface SupportValidator {
     receiptIds: ReceiptId[],
     opts: {
       lockMode: 'share' | 'update';
+      /** rev3 F4: support is checked against this mission's server-side scope; required so no caller skips it. */
+      missionId: MissionId;
       freshness?: { [sourceKey: string]: number /* maxAgeMs */ };
     },
   ): Promise<CheckedVector>;

@@ -6,8 +6,10 @@
 // checkout server or Redis traffic, so only the database name is exercised;
 // the constants are still the single source for this suite.
 //
-// Nothing here imports production logic except the migration runner and the
-// documented test helpers (infrastructure, not behaviour under test).
+// Nothing here imports production logic except the migration runner, the
+// coordinator event sink every registration must be given (ledger/options.ts
+// requireEventSink, W2-R5) and the documented test helpers (infrastructure,
+// not behaviour under test).
 import { randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -19,6 +21,17 @@ import {
   type TestDatabaseUrls,
 } from '../../helpers/test-db.js';
 import { migrate } from '../../../../src/server/nemodots/db/migrate.js';
+import { createEventSink } from '../../../../src/server/nemodots/coordinator/events.js';
+
+const EVENT_SINK = createEventSink();
+
+/** RegisterOptions plus `ledger.events`, which every production registration requires. */
+export function withLedgerEvents(
+  options: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const ledger = (options.ledger ?? {}) as Record<string, unknown>;
+  return { ...options, ledger: { ...ledger, events: EVENT_SINK } };
+}
 
 export const PORT_BLOCK = { checkout: 4620, app: 4621 } as const;
 export const DB_PREFIX = 'acc1_';

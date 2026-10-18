@@ -29,6 +29,8 @@ import {
   seedConfig,
   sourceRef,
   updateConfig,
+  ensureMission,
+  inMission,
   useLedgerDb,
   waitsOnLock,
 } from './fixtures.js';
@@ -105,8 +107,13 @@ const check = (
   lockMode: 'share' | 'update',
   freshness?: Record<string, number>,
 ) =>
-  inTx(getDb().app, (client) =>
-    assertCurrent(client, ids as ReceiptId[], { lockMode, freshness }, FX),
+  inTx(getDb().app, async (client) =>
+    assertCurrent(
+      client,
+      ids as ReceiptId[],
+      await inMission(ids, { lockMode, freshness }),
+      FX,
+    ),
   );
 
 async function rejection(promise: Promise<unknown>): Promise<SupportError> {
@@ -433,9 +440,20 @@ describe('the validator port', () => {
     const vector = await inTx(getDb().app, (client) =>
       validator.assertCurrent(client, [receipt.receipt.id], {
         lockMode: 'share',
+        missionId: scope.missionId as never,
       }),
     );
     expect(vector).toHaveLength(1);
+    // the port's scope check is mandatory: a mission of another owner is refused
+    const other = newScope();
+    await ensureMission(other.missionId, other);
+    const refused = await inTx(getDb().app, (client) =>
+      validator.assertCurrent(client, [receipt.receipt.id], {
+        lockMode: 'share',
+        missionId: other.missionId as never,
+      }),
+    ).catch((e: unknown) => e);
+    expect(refused).toMatchObject({ reason: 'citation_out_of_scope' });
   });
 });
 
@@ -482,7 +500,7 @@ describe('locks (C9)', () => {
         return await assertCurrent(
           checker,
           [r1.receipt.id],
-          { lockMode: 'update' },
+          await inMission(r1.receipt.id, { lockMode: 'update' }),
           FX,
         );
       } finally {
@@ -532,7 +550,7 @@ describe('locks (C9)', () => {
     await assertCurrent(
       publication.client,
       [r1.receipt.id],
-      { lockMode: 'share' },
+      await inMission(r1.receipt.id, { lockMode: 'share' }),
       FX,
     );
 
@@ -571,7 +589,7 @@ describe('locks (C9)', () => {
     await assertCurrent(
       publication.client,
       [first.receipt.id],
-      { lockMode: 'share' },
+      await inMission(first.receipt.id, { lockMode: 'share' }),
       FX,
     );
 
@@ -608,7 +626,7 @@ describe('locks (C9)', () => {
       assertCurrent(
         retry.client,
         [first.receipt.id],
-        { lockMode: 'share' },
+        await inMission(first.receipt.id, { lockMode: 'share' }),
         FX,
       ),
     ).rejects.toBeInstanceOf(SupportError);
@@ -626,7 +644,7 @@ describe('locks (C9)', () => {
         const vector = await assertCurrent(
           client,
           [r1.receipt.id],
-          { lockMode: 'share' },
+          await inMission(r1.receipt.id, { lockMode: 'share' }),
           FX,
         );
         await withTimeout(

@@ -9,6 +9,7 @@ import {
 } from '../shared/computer-types.js';
 import type { WorkspaceStore } from './workspace.js';
 import type { PlatformConfig } from './platform-config.js';
+import { getActivePolicy } from './nemodots/interception/active-policy.js';
 const stateSchema = z.object({
   botId: z.string(),
   container: z.string(),
@@ -234,6 +235,13 @@ export class ComputerService {
     fn: () => Promise<T>,
   ): Promise<T> {
     this.requireDot(id);
+    // The module-level policy covers per-turn instances too (finding I5).
+    const refusal = getActivePolicy().computerAction({
+      dotId: id,
+      action,
+      actor,
+    });
+    if (refusal) throw new Error(refusal);
     const receipt = this.workspace.computers.begin(id, action, actor);
     try {
       const result = await fn();

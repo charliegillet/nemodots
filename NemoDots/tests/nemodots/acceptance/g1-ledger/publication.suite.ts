@@ -29,7 +29,7 @@ import {
 } from '../../../../src/server/nemodots/coordinator/publish.js';
 import { REJECTION_CASES } from '../oracle/closures.js';
 import { World, errorCode } from './driver.js';
-import { entry, withAccDatabase } from './harness.js';
+import { entry, withAccDatabase, withLedgerEvents } from './harness.js';
 import {
   COUNTED_TABLES,
   attemptRow,
@@ -459,7 +459,11 @@ describe('[G1.2] a receipt of another environment, resource, owner or Space gran
     v: { env?: 'eval'; scope: Record<string, unknown> },
   ): Promise<ReceiptRef> {
     const register = await entry<
-      (c: pg.PoolClient, i: Record<string, unknown>) => Promise<unknown>
+      (
+        c: pg.PoolClient,
+        i: Record<string, unknown>,
+        o: Record<string, unknown>,
+      ) => Promise<unknown>
     >('ledger/receipts.ts', ['registerObservation']);
     const env = v.env ?? 'test';
     const source = {
@@ -467,11 +471,15 @@ describe('[G1.2] a receipt of another environment, resource, owner or Space gran
       scope: { ...w.scope(env), ...v.scope },
     };
     await w.inTx((c) =>
-      register(c, {
-        source,
-        normalizedValue: HEALTH_BAD,
-        provenance: { kind: 'watcher' },
-      }),
+      register(
+        c,
+        {
+          source,
+          normalizedValue: HEALTH_BAD,
+          provenance: { kind: 'watcher' },
+        },
+        withLedgerEvents(),
+      ),
     );
     const s = source.scope as {
       ownerId: string;

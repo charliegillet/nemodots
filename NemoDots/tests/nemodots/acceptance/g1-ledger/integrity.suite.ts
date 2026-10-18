@@ -11,7 +11,7 @@ import {
 import type { ContextSnapshotId } from '../../../../src/server/nemodots/contracts/index.js';
 import { barrier, withTimeout } from '../../helpers/barrier.js';
 import { CONF, REC, SRC, TRANS, World, errorCode } from './driver.js';
-import { entry, withAccDatabase } from './harness.js';
+import { entry, withAccDatabase, withLedgerEvents } from './harness.js';
 import { realPageEdit } from './page-edit.js';
 
 type Fixture = (w: World) => Promise<void>;
@@ -53,7 +53,9 @@ async function rawRegister(
 ): Promise<string | null> {
   const register = await registerFn();
   try {
-    await w.inTx((client) => register(client, input, options));
+    await w.inTx((client) =>
+      register(client, input, withLedgerEvents(options)),
+    );
     return null;
   } catch (error) {
     return errorCode(error);
@@ -405,7 +407,11 @@ describe('[G1.3] supersession and support status', () => {
   it('[G1.3] contested resolves back to supported; retracted and expired never regain support', async () => {
     await inDb(async (w) => {
       const transitionReceipt = await entry<
-        (c: pg.PoolClient, i: Record<string, unknown>) => Promise<unknown>
+        (
+          c: pg.PoolClient,
+          i: Record<string, unknown>,
+          o: Record<string, unknown>,
+        ) => Promise<unknown>
       >('ledger/receipts.ts', ['transitionReceipt']);
       const mk = async (label: string, key: string, value: unknown) => {
         const r = await w.register({
@@ -435,11 +441,15 @@ describe('[G1.3] supersession and support status', () => {
         ).error,
       ).toBe('receipt_not_supported');
       await w.inTx((c) =>
-        transitionReceipt(c, {
-          receiptId: h,
-          to: 'supported',
-          reason: 'resolved',
-        }),
+        transitionReceipt(
+          c,
+          {
+            receiptId: h,
+            to: 'supported',
+            reason: 'resolved',
+          },
+          withLedgerEvents(),
+        ),
       );
       expect(
         (
@@ -454,11 +464,15 @@ describe('[G1.3] supersession and support status', () => {
       await w.transition({ op: 'transition', label: 'm', to: 'retracted' });
       const back = await w
         .inTx((c) =>
-          transitionReceipt(c, {
-            receiptId: m,
-            to: 'supported',
-            reason: 'resolved',
-          }),
+          transitionReceipt(
+            c,
+            {
+              receiptId: m,
+              to: 'supported',
+              reason: 'resolved',
+            },
+            withLedgerEvents(),
+          ),
         )
         .then(
           () => 'accepted',
@@ -595,7 +609,9 @@ describe('[G1.4] out-of-order delivery and ABA', () => {
       const input = observed(w, 'checkout.health', HEALTH_BAD);
       const run = () =>
         w
-          .inTx((c) => register(c, structuredClone(input), options))
+          .inTx((c) =>
+            register(c, structuredClone(input), withLedgerEvents(options)),
+          )
           .then(() => log.push('commit'));
       const outcomes = await Promise.allSettled([run(), run()]);
       expect(
@@ -637,7 +653,9 @@ describe('[G1.4] out-of-order delivery and ABA', () => {
       const input = observed(w, 'checkout.health', HEALTH_BAD);
       const results = await Promise.allSettled(
         Array.from({ length: 8 }, () =>
-          w.inTx((c) => register(c, structuredClone(input))),
+          w.inTx((c) =>
+            register(c, structuredClone(input), withLedgerEvents()),
+          ),
         ),
       );
       expect(
@@ -1098,8 +1116,12 @@ describe('[G1.13] authority advanced before the watcher has processed it', () =>
         const racerPid = (
           await racerClient.query('SELECT pg_backend_pid() AS pid')
         ).rows[0].pid as number;
+        await w.ensureMission();
         await holder.query('BEGIN');
-        await fn(holder, [w.labels.get('pool')!], { lockMode: 'share' });
+        await fn(holder, [w.labels.get('pool')!], {
+          lockMode: 'share',
+          missionId: w.missionId, // CONTRACTS rev3 F4
+        });
         // The publication transaction is open and holds FOR SHARE on the controlled row.
         let advanced = false;
         const racer = w

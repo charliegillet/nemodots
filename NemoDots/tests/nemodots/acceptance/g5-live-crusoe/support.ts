@@ -59,7 +59,7 @@ export class EntryPointMissing extends Error {
 
 function parseDotenv(path: string): Record<string, string> {
   const out: Record<string, string> = {};
-  let text = '';
+  let text: string;
   try {
     text = readFileSync(path, 'utf8');
   } catch {
@@ -272,7 +272,7 @@ export async function startProxy(
     const chunks: Buffer[] = [];
     for await (const c of req) chunks.push(c as Buffer);
     const bodyText = Buffer.concat(chunks).toString('utf8');
-    let body: Record<string, unknown> | null = null;
+    let body: Record<string, unknown> | null;
     try {
       body = bodyText ? JSON.parse(bodyText) : null;
     } catch {

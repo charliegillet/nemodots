@@ -10,9 +10,11 @@
 //   Authorization row.
 // - CLOSURE path (ARCH 5.2 step 4): the change WAS registered, the closure has
 //   already moved the live intent to blocked(stale_version). The oracle
-//   (ADM-01/02/04/07/07b/08) assumes a later commit-stage row; ARCH 5.1 step 2
-//   says commit then throws DispatchFenceError without writing one. These tests
-//   accept either, but only with an invalidation event that names the intent.
+//   (ADM-01/02/04/07/08) requires the Authorization row of the stage that
+//   decided. Lead ruling 2026-10-18: the tests named after those cases assert
+//   the oracle exactly; a closure-only block without that row FAILS (a blocked
+//   intent must be inspectable). G2-07d (ADM-07b) and the unnamed variants
+//   still accept either path, backed by an invalidation event naming the intent.
 import { describe, expect, it } from 'vitest';
 import {
   ADMISSION_CASES,
@@ -24,12 +26,12 @@ import {
   authSummary,
   checkOutcome,
   commitSettled,
-  errName,
   errText,
   isSettled,
   parkedRace,
   withTimeout,
   withWorld,
+  type Rec,
   type World,
 } from './harness.js';
 import {
@@ -54,8 +56,6 @@ function oracleOutcome(id: string): AdmissionOutcome {
     throw new Error(`oracle case ${id} is missing or has alternatives`);
   return c.expected;
 }
-const notABug = (e: unknown) =>
-  expect(errName(e)).not.toMatch(/^(TypeError|ReferenceError|SyntaxError)$/);
 
 async function liveRowsFor(w: World, toolCallId: string) {
   return (
@@ -68,46 +68,22 @@ async function liveRowsFor(w: World, toolCallId: string) {
 }
 
 describe('G2 admission and races: cases 1-8', () => {
-  it('G2-01 stale before admission: propose from r1, register r2, admit r1 fails with no mutation (closure or admission path)', async () => {
+  it('G2-01 ADM-01 stale before admission: propose from r1, register r2, admit r1 is blocked with the admission Authorization row and no mutation', async () => {
     await withWorld(async (w) => {
       const base = await w.snapshotConfig();
       const i = await w.propose(w.poolSpec('tc-1'));
       await w.advance(POOL, 4, { register: true });
-      const admit = await w.actions.admit(i.id, 'd1').then(
-        () => null,
-        (e) => e,
-      );
-      if (admit) notABug(admit);
-      const row = await w.intent(i.id);
-      expect(row.status).toBe('blocked');
-      expect(row.block_reason).toBe('stale_version');
-      const sum = await authSummary(w, i.id);
-      if (sum.length)
-        expect(sum).toEqual([
-          {
-            stage: 'admission',
-            decision: 'blocked',
-            blockReason: 'stale_version',
-          },
-        ]);
-      else
-        expect(
-          (await w.invalidationsFor(`checkout.config/${POOL}`)).some((e) =>
-            (e.affected.actionIds as string[]).includes(i.id),
-          ),
-          'closure path needs an invalidation event naming the intent',
-        ).toBe(true);
-      expect((await w.resultReceipts(i.id)).length).toBe(0);
-      await expectNoMutation(w, base, [POOL]);
-      expect(await w.cfg(POOL)).toMatchObject({
-        version: base[POOL].version + 1,
-        value: 4,
-        causedBy: null,
+      await w.actions.admit(i.id, 'd1');
+      await checkOutcome(w, oracleOutcome('ADM-01'), {
+        intents: { I: i.id },
+        base,
       });
+      await expectNoMutation(w, base, [POOL]);
+      expect((await w.cfg(POOL)).causedBy).toBeNull();
     });
   });
 
-  it('G2-01b stale before admission with the replacement not yet observed is blocked at admission as stale_pending_observation', async () => {
+  it('G2-01b ADM-01b stale before admission with the replacement not yet observed is blocked at admission as stale_pending_observation', async () => {
     await withWorld(async (w) => {
       const base = await w.snapshotConfig();
       const i = await w.propose(w.poolSpec('tc-1'));
@@ -121,7 +97,7 @@ describe('G2 admission and races: cases 1-8', () => {
   });
 
   describe('G2-02 stale between the local check and the commit lock', () => {
-    it('G2-02 pause after the preliminary read, register r2, resume: the r1 commit never lands after r2 (serialization-aware)', async () => {
+    it('G2-02 ADM-02 pause after the preliminary read, register r2, resume: the injector serializes first and the commit stage blocks r1', async () => {
       await withWorld(async (w) => {
         const base = await w.snapshotConfig();
         const i = await w.proposeAdmit(w.poolSpec('tc-1'));
@@ -131,31 +107,19 @@ describe('G2 admission and races: cases 1-8', () => {
           () => w.actions.commit(i.id, fence(i)),
           () => w.advance(POOL, 4, { register: true }),
         );
-        const order = await expectSerializable(w, i.id, POOL);
-        const history = (await w.history(POOL)).filter(
-          (h) => Number(h.version) > base[POOL].version,
+        expect('err' in r.duringResult, 'the injector write succeeds').toBe(
+          false,
         );
-        if (order === 'change_first') {
-          expect(history.map((h) => h.caused_by_actor)).toEqual(['injector']);
-          expect(await w.cfg(POOL)).toMatchObject({
-            version: base[POOL].version + 1,
-            value: 4,
-          });
-          expect(await w.actionRows()).toBe(0);
-          expect('err' in r.duringResult).toBe(false);
-        } else {
-          // the commit took its locks first; the injector's CAS must have lost
-          expect('err' in r.duringResult).toBe(true);
-          expect(errText((r.duringResult as { err: unknown }).err)).toContain(
-            'stale_version',
-          );
-          expect(history.map((h) => h.caused_by_action_id)).toEqual([i.id]);
-          expect(await w.cfg(POOL)).toMatchObject({
-            version: base[POOL].version + 1,
-            value: 12,
-            causedBy: i.id,
-          });
-        }
+        // oracle serialization ['injector']: the only change after r1 is the injector's
+        expect(
+          (await w.history(POOL))
+            .filter((h) => Number(h.version) > base[POOL].version)
+            .map((h) => h.caused_by_actor),
+        ).toEqual(['injector']);
+        await checkOutcome(w, oracleOutcome('ADM-02'), {
+          intents: { I: i.id },
+          base,
+        });
       });
     });
 
@@ -244,7 +208,7 @@ describe('G2 admission and races: cases 1-8', () => {
     });
   });
 
-  it('G2-03a concurrent commit ordering: the commit takes the row lock first, the racing injector write serializes after and fails', async () => {
+  it('G2-03a ADM-03a concurrent commit ordering: the commit takes the row lock first, the racing injector write serializes after and fails', async () => {
     await withWorld(async (w) => {
       const v1 = (await w.cfg(POOL)).version;
       const i = await w.proposeAdmit(w.poolSpec('tc-1'));
@@ -296,7 +260,15 @@ describe('G2 admission and races: cases 1-8', () => {
       expect(await w.anyBlocked()).toBe(true);
       await hold.commit();
       await commit;
-      await expectStaleBlocked(w, i.id, { changedKey: POOL, path: 'commit' });
+      // Lead ruling 2026-10-18: the replacement is NOT registered at this step,
+      // so the one code the setup implies is stale_pending_observation. The
+      // frozen ADM-03b row says stale_version (README proposal 3), so this
+      // test is not named ADM-03b until the oracle is revised.
+      await expectStaleBlocked(w, i.id, {
+        changedKey: POOL,
+        path: 'commit',
+        reasons: ['stale_pending_observation'],
+      });
       expect(await w.cfg(POOL)).toMatchObject({
         version: v1 + 1,
         value: 4,
@@ -327,25 +299,22 @@ describe('G2 admission and races: cases 1-8', () => {
       });
     });
 
-    it('G2-04b approve the r1 payload, register r2, invoke the callback: refused (closure or commit stage)', async () => {
+    it('G2-04b ADM-04 approve the r1 payload, register r2, invoke the callback: blocked with the commit-stage Authorization row', async () => {
       await withWorld(async (w) => {
         const base = await w.snapshotConfig();
         const i = await w.proposeAdmit(w.poolSpec('tc-1'));
         await w.advance(POOL, 4, { register: true });
-        const out = await commitSettled(w, i.id, fence(i));
-        expectRefusedCommit(out);
-        await expectStaleBlocked(w, i.id, { changedKey: POOL, path: 'either' });
-        expect(await w.cfg(POOL)).toMatchObject({
-          version: base[POOL].version + 1,
-          value: 4,
+        await commitSettled(w, i.id, fence(i));
+        await checkOutcome(w, oracleOutcome('ADM-04'), {
+          intents: { I: i.id },
+          base,
         });
-        expect(await w.actionRows()).toBe(0);
       });
     });
   });
 
   describe('G2-05 payload binding', () => {
-    it('G2-05a a reused idempotency key (same tool call) with a different payload is rejected; the same payload returns the stored intent; the original stays usable', async () => {
+    it('G2-05a ADM-05a ADM-05b a reused idempotency key (same tool call) with a different payload is rejected; the same payload returns the stored intent; the original stays usable', async () => {
       await withWorld(async (w) => {
         const base = await w.snapshotConfig();
         const a = await w.propose(w.poolSpec('tc-1', 12));
@@ -354,17 +323,16 @@ describe('G2 admission and races: cases 1-8', () => {
         expect(again.statusVersion).toBe(a.statusVersion);
         expect(again.status).toBe('proposed');
         expect(await liveRowsFor(w, 'tc-1')).toHaveLength(1);
-        const tampered = await w.propose(w.poolSpec('tc-1', 13)).then(
-          (i) => ({ i }),
-          (e) => ({ e }),
-        );
-        if ('i' in tampered) {
-          expect(tampered.i.id).not.toBe(a.id);
-          expect(tampered.i.status).toBe('blocked');
-          expect(tampered.i.blockReason).toBe('idempotency_conflict');
-        } else expect(errText(tampered.e)).toContain('idempotency_conflict');
+        // ADM-05a: the tampered proposal is a blocked(idempotency_conflict) intent, not a throw
+        const tampered = await w.propose(w.poolSpec('tc-1', 13));
+        expect(tampered.id).not.toBe(a.id);
+        expect(tampered.status).toBe('blocked');
+        expect(tampered.blockReason).toBe('idempotency_conflict');
         expect(await liveRowsFor(w, 'tc-1')).toHaveLength(1);
-        expect((await w.intent(a.id)).status).toBe('proposed');
+        await checkOutcome(w, oracleOutcome('ADM-05a'), {
+          intents: { I: a.id, I_tampered: tampered.id },
+          base,
+        });
         const admitted = await w.actions.admit(a.id, 'd1');
         expect(admitted.status).toBe('admitted');
         await checkOutcome(
@@ -380,12 +348,13 @@ describe('G2 admission and races: cases 1-8', () => {
       });
     });
 
-    it('G2-05b a new tool call may re-propose an identical payload after a block, and commits against r2', async () => {
+    it('G2-05b ADM-05c a new tool call may re-propose an identical payload after a block, and commits against r2', async () => {
       await withWorld(async (w) => {
-        const v1 = (await w.cfg(POOL)).version;
+        const base = await w.snapshotConfig();
+        const v1 = base[POOL].version;
         const i1 = await w.propose(w.poolSpec('tc-1'));
         await w.advance(POOL, 4, { register: true });
-        await w.actions.admit(i1.id, 'd1').catch(() => null);
+        await w.actions.admit(i1.id, 'd1');
         expect((await w.intent(i1.id)).status).toBe('blocked');
         // a new proposing attempt re-reads r2; its payload binds the new current value
         const i2 = await w.proposeAdmit(w.poolSpec('tc-2', 12));
@@ -400,10 +369,14 @@ describe('G2 admission and races: cases 1-8', () => {
         expect(await w.actionRows()).toBe(1);
         expect((await w.resultReceipts(i2.id)).length).toBe(1);
         expect((await w.resultReceipts(i1.id)).length).toBe(0);
+        await checkOutcome(w, oracleOutcome('ADM-05c'), {
+          intents: { I: i1.id, I2: i2.id },
+          base,
+        });
       });
     });
 
-    it('G2-05c payload, dependency vector, policy, target key, resource or environment changed after admission cannot commit without fresh authorization', async () => {
+    it('G2-05c ADM-05d payload, dependency vector, policy, target key, resource or environment changed after admission cannot commit without fresh authorization', async () => {
       await withWorld(async (w) => {
         const base = await w.snapshotConfig();
         const cols = (
@@ -516,68 +489,183 @@ describe('G2 admission and races: cases 1-8', () => {
     });
   });
 
-  describe('G2-06 missing predicates', () => {
-    for (const [name, cites] of [
-      ['required health omitted', ['member:db.pool_max']],
-      ['only an irrelevant valid receipt cited', ['redis']],
-    ] as const) {
-      it(`G2-06 ${name}: rejected, or the server adds the mandatory support and records it in the vector`, async () => {
-        await withWorld(async (w) => {
-          const base = await w.snapshotConfig();
-          const i = await w.propose(w.poolSpec('tc-1', 12, [...cites]));
-          await w.actions.admit(i.id, 'd1').catch(() => null);
-          const row = await w.intent(i.id);
-          if (row.status === 'blocked')
-            expect(row.block_reason).toBe('missing_required_source');
-          else {
-            expect(row.status).toBe('admitted');
-            const vec = row.dependency_vector as {
-              sourceKey: string;
-              receiptId: string;
-            }[];
-            expect(vec.map((e) => e.sourceKey)).toEqual(
-              expect.arrayContaining([
-                `checkout.config/${POOL}`,
-                'checkout.health',
-              ]),
-            );
-            // the added support is the CURRENT receipt, not an invented one
-            expect(
-              vec.find((e) => e.sourceKey === 'checkout.health')?.receiptId,
-            ).toBe(w.receiptId('health'));
-            expect(
-              vec.find((e) => e.sourceKey === `checkout.config/${POOL}`)
-                ?.receiptId,
-            ).toBe(w.receiptId(`member:${POOL}`));
-          }
-          await expectNoMutation(w, base);
-        });
-      });
-    }
-
-    it('G2-06c strict input: out-of-domain value, unknown action kind, extra payload field and smuggled policy fields are all rejected as payload_invalid', async () => {
+  describe('G2-05e tamper after admission', () => {
+    it('G2-05e ADM-05e dependency vector, policy version or target key changed after admission: all three sealed, or all three blocked with their own reason (one oracle branch, never a mix)', async () => {
       await withWorld(async (w) => {
         const base = await w.snapshotConfig();
-        const cases: [string, () => Promise<unknown>][] = [
-          ['domain', () => w.propose(w.poolSpec('tc-d', 50))],
+        const steps = [
+          {
+            label: 'I',
+            tc: 'tc-1',
+            set: `dependency_vector = COALESCE((SELECT jsonb_agg(e) FROM jsonb_array_elements(dependency_vector) e
+                    WHERE e->>'sourceKey' <> 'checkout.config/${POOL}'),'[]'::jsonb)`,
+            reason: 'missing_required_source',
+          },
+          {
+            label: 'J',
+            tc: 'tc-2',
+            set: `policy_version = 'policy-v0'`,
+            reason: 'policy_version_mismatch',
+          },
+          {
+            label: 'K',
+            tc: 'tc-3',
+            set: `target = jsonb_set(target,'{sourceKey}','"checkout.config/${TIMEOUT}"')`,
+            reason: 'payload_invalid',
+          },
+        ];
+        const seen: { label: string; id: string; sealed: boolean }[] = [];
+        for (const step of steps) {
+          const i = await w.proposeAdmit(w.poolSpec(step.tc));
+          const tamper = await w.app
+            .query(
+              `UPDATE coordinator.action_intents SET ${step.set} WHERE id=$1`,
+              [i.id],
+            )
+            .then(
+              () => null,
+              (e: { message?: string }) => e,
+            );
+          if (tamper) {
+            // branch 1: thrown immutable_intent; the intent is never committed
+            expect(tamper.message ?? '', `${step.label}: refusal`).toMatch(
+              /immutable/i,
+            );
+          } else await commitSettled(w, i.id, fence(i));
+          seen.push({ label: step.label, id: i.id, sealed: tamper !== null });
+        }
+        const sealed = seen.filter((x) => x.sealed).length;
+        expect(
+          [0, seen.length],
+          `one oracle branch for all three intents (sealed: ${seen
+            .filter((x) => x.sealed)
+            .map((x) => x.label)
+            .join(',')})`,
+        ).toContain(sealed);
+        for (const [n, x] of seen.entries()) {
+          const row = await w.intent(x.id);
+          if (x.sealed) expect(row.status, x.label).toBe('admitted');
+          else {
+            expect(row.status, x.label).toBe('blocked');
+            expect(row.block_reason, x.label).toBe(steps[n].reason);
+          }
+        }
+        for (const key of [POOL, TIMEOUT])
+          expect(await w.cfg(key)).toMatchObject({
+            version: base[key].version,
+            value: base[key].value,
+          });
+        expect(await w.actionRows()).toBe(0);
+      });
+    });
+  });
+
+  describe('G2-06 missing predicates', () => {
+    // One body, two explicit titles so the gate 2 case map can read the ids.
+    const missingPredicate = (cites: string[]) => async () => {
+      await withWorld(async (w) => {
+        const base = await w.snapshotConfig();
+        const i = await w.propose(w.poolSpec('tc-1', 12, [...cites]));
+        await w.actions.admit(i.id, 'd1').catch(() => null);
+        const row = await w.intent(i.id);
+        if (row.status === 'blocked')
+          expect(row.block_reason).toBe('missing_required_source');
+        else {
+          expect(row.status).toBe('admitted');
+          const vec = row.dependency_vector as {
+            sourceKey: string;
+            receiptId: string;
+          }[];
+          expect(vec.map((e) => e.sourceKey)).toEqual(
+            expect.arrayContaining([
+              `checkout.config/${POOL}`,
+              'checkout.health',
+            ]),
+          );
+          // the added support is the CURRENT receipt, not an invented one
+          expect(
+            vec.find((e) => e.sourceKey === 'checkout.health')?.receiptId,
+          ).toBe(w.receiptId('health'));
+          expect(
+            vec.find((e) => e.sourceKey === `checkout.config/${POOL}`)
+              ?.receiptId,
+          ).toBe(w.receiptId(`member:${POOL}`));
+        }
+        await expectNoMutation(w, base);
+      });
+    };
+    it(
+      'G2-06 ADM-06a required health omitted: rejected, or the server adds the mandatory support and records it in the vector',
+      missingPredicate(['member:db.pool_max']),
+    );
+    it(
+      'G2-06 ADM-06b only an irrelevant valid receipt cited: rejected, or the server adds the mandatory support and records it in the vector',
+      missingPredicate(['redis']),
+    );
+
+    it('G2-06c ADM-06c strict input: out-of-domain value, unknown action kind and an extra payload field are all blocked payload_invalid, or all thrown payload_invalid (one oracle branch, never a mix)', async () => {
+      await withWorld(async (w) => {
+        const base = await w.snapshotConfig();
+        const inputs: [string, () => Promise<unknown>][] = [
+          ['I_domain', () => w.propose(w.poolSpec('tc-1', 50))],
           [
-            'kind',
+            'I_kind',
             () =>
               w.propose({
-                action: 'drop_table' as never,
+                action: 'unknown_kind' as never,
                 payload: { table: 'checkout.orders' },
                 cites: ['member:db.pool_max', 'health'],
-                toolCallId: 'tc-k',
+                toolCallId: 'tc-2',
               }),
           ],
           [
-            'extra payload field',
+            'I_extra',
             () =>
               w.propose({
-                ...w.poolSpec('tc-e'),
+                ...w.poolSpec('tc-3'),
                 payload: { key: POOL, value: 12, causedByActionId: 'forged' },
               }),
           ],
+        ];
+        const outs: { label: string; i?: Rec; e?: unknown }[] = [];
+        for (const [label, run] of inputs)
+          outs.push(
+            await run().then(
+              (i) => ({ label, i: i as Rec }),
+              (e) => ({ label, e }),
+            ),
+          );
+        const thrown = outs.filter((o) => 'e' in o).length;
+        expect(
+          [0, outs.length],
+          `one oracle branch for all three inputs (thrown: ${outs
+            .filter((o) => 'e' in o)
+            .map((o) => o.label)
+            .join(',')})`,
+        ).toContain(thrown);
+        for (const o of outs) {
+          if (o.e !== undefined)
+            expect(errText(o.e), `${o.label}: thrown`).toContain(
+              'payload_invalid',
+            );
+          else {
+            const row = await w.intent(o.i!.id);
+            expect(row.status, o.label).toBe('blocked');
+            expect(row.block_reason, o.label).toBe('payload_invalid');
+          }
+        }
+        await expectNoMutation(w, base);
+        expect(
+          (await w.history(POOL)).some((h) => h.value === 50),
+          'the out-of-domain value never reaches the history',
+        ).toBe(false);
+      });
+    });
+
+    it('G2-06c2 strict input: smuggled policy fields (easier policy version, no required sources) are rejected as payload_invalid', async () => {
+      await withWorld(async (w) => {
+        const base = await w.snapshotConfig();
+        const cases: [string, () => Promise<unknown>][] = [
           [
             'easier policy version',
             () =>
@@ -600,23 +688,13 @@ describe('G2 admission and races: cases 1-8', () => {
         ];
         for (const [name, run] of cases) {
           const out = await run().then(
-            (i) => ({
-              i: i as {
-                status: string;
-                blockReason: string | null;
-                id: string;
-              },
-            }),
+            (i) => ({ i: i as Rec }),
             (e) => ({ e }),
           );
           if ('i' in out) {
-            expect(out.i.status, `${name}: returned intent`).toBe('blocked');
-            expect(out.i.blockReason, `${name}: returned intent`).toBe(
-              'payload_invalid',
-            );
             const row = await w.intent(out.i.id);
-            expect(row.status).toBe('blocked');
-            expect(row.block_reason).toBe('payload_invalid');
+            expect(row.status, name).toBe('blocked');
+            expect(row.block_reason, name).toBe('payload_invalid');
           } else
             expect(errText(out.e), `${name}: thrown`).toContain(
               'payload_invalid',
@@ -633,7 +711,7 @@ describe('G2 admission and races: cases 1-8', () => {
       });
     });
 
-    it('G2-06d an investigator cannot propose (capability)', async () => {
+    it('G2-06d ADM-06d an investigator cannot propose (capability)', async () => {
       await withWorld(async (w) => {
         const base = await w.snapshotConfig();
         const inv = await w.newAttempt('investigator');
@@ -669,22 +747,15 @@ describe('G2 admission and races: cases 1-8', () => {
   });
 
   describe('G2-07 cross-resource vector (target-only CAS is not enough)', () => {
-    it('G2-07a registered change to a NON-target cited controlled source: refused (closure or commit stage), target untouched', async () => {
+    it('G2-07a ADM-07 registered change to a NON-target cited controlled source: blocked with the commit-stage Authorization row, target untouched', async () => {
       await withWorld(async (w) => {
         const base = await w.snapshotConfig();
         const i = await w.proposeAdmit(w.poolSpec('tc-1', 12, TIMEOUT_CITES));
         await w.advance(TIMEOUT, 90, { register: true });
-        const out = await commitSettled(w, i.id, fence(i));
-        expectRefusedCommit(out);
-        await expectStaleBlocked(w, i.id, {
-          changedKey: TIMEOUT,
-          path: 'either',
-          reasons: ['stale_version'],
-        });
-        await expectNoMutation(w, base, [TIMEOUT]);
-        expect(await w.cfg(TIMEOUT)).toMatchObject({
-          version: base[TIMEOUT].version + 1,
-          value: 90,
+        await commitSettled(w, i.id, fence(i));
+        await checkOutcome(w, oracleOutcome('ADM-07'), {
+          intents: { I: i.id },
+          base,
         });
       });
     });
@@ -863,7 +934,7 @@ describe('G2 admission and races: cases 1-8', () => {
     });
   });
 
-  it('G2-17 freshness: an aged health observation blocks admission as evidence_too_old; a confirmation makes a new proposal admissible', async () => {
+  it('G2-17 ADM-17 freshness: an aged health observation blocks admission as evidence_too_old; a confirmation makes a new proposal admissible', async () => {
     await withWorld(async (w) => {
       const base = await w.snapshotConfig();
       const aged = { status: 'ok', note: 'aged' };
@@ -893,7 +964,7 @@ describe('G2 admission and races: cases 1-8', () => {
     });
   });
 
-  it('G2-18 a valid receipt from another mission is a citation out of scope (valid is not enough)', async () => {
+  it('G2-18 ADM-18 a valid receipt from another mission is a citation out of scope (valid is not enough)', async () => {
     await withWorld(async (w) => {
       const base = await w.snapshotConfig();
       const status = (

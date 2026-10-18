@@ -20,6 +20,7 @@
 //   5. invalidation_events row.
 import {
   invalidationEventId,
+  type EventSinkPort,
   type Affected,
   type InvalidationEvent,
   type InvalidationReason,
@@ -32,14 +33,21 @@ import {
 import {
   buildClosure,
   CLOSURE_LIMITS,
-  emptyAffected,
   type ClosureLimits,
   type ClosureResult,
   type GraphNodeKind,
   type NodeMeta,
 } from './closure.js';
-import { ClosureCapExceeded, CoarseInvalidationRequiredError } from './errors.js';
-import { coordinatorSchema, type LedgerOptions } from './options.js';
+import {
+  ClosureCapExceeded,
+  CoarseInvalidationRequiredError,
+} from './errors.js';
+import { selfWriteLineage } from './lineage.js';
+import {
+  coordinatorSchema,
+  type LedgerOptions,
+  type RegistrationLedgerOptions,
+} from './options.js';
 import { assertLocked, unionAffected } from './prelock.js';
 import {
   insertReceipt,
@@ -59,6 +67,10 @@ export interface LoadedClosure extends ClosureResult {
 }
 
 const FOLLOWED = `e.kind IN ('evidence', 'inheritance')`;
+/** $3 / $4: kinds and ids of excluded nodes (empty arrays exclude nothing). */
+const NOT_EXCLUDED = `NOT EXISTS (
+  SELECT 1 FROM unnest($3::text[], $4::uuid[]) AS skip(kind, id)
+   WHERE skip.kind = e.to_kind AND skip.id = e.to_id)`;
 
 /**
  * Walks evidence and inheritance edges from `receiptId` with a bounded
@@ -71,18 +83,23 @@ export async function loadClosure(
   root: { receiptId: string; sourceKey: string },
   limits: ClosureLimits = CLOSURE_LIMITS,
   options?: LedgerOptions,
+  /** Nodes the closure neither reaches nor passes through (a verified self-write's lineage). */
+  exclude: readonly { kind: GraphNodeKind; id: string }[] = [],
 ): Promise<LoadedClosure> {
+  const skipKinds = exclude.map((node) => node.kind);
+  const skipIds = exclude.map((node) => node.id);
   const reachedQuery = await client.query<{ kind: GraphNodeKind; id: string }>(
     `WITH RECURSIVE reach(kind, id) AS (
        SELECT e.to_kind, e.to_id FROM ledger.dependency_edges e
         WHERE e.from_kind = 'receipt' AND e.from_id = $1 AND ${FOLLOWED}
+          AND ${NOT_EXCLUDED}
        UNION
        SELECT e.to_kind, e.to_id FROM reach r
          JOIN ledger.dependency_edges e ON e.from_kind = r.kind AND e.from_id = r.id
-        WHERE ${FOLLOWED}
+        WHERE ${FOLLOWED} AND ${NOT_EXCLUDED}
      )
      SELECT kind, id FROM reach LIMIT $2`,
-    [root.receiptId, limits.maxNodes + 1],
+    [root.receiptId, limits.maxNodes + 1, skipKinds, skipIds],
   );
   const capExceeded = async (cap: 'depth' | 'nodes') =>
     new ClosureCapExceeded(
@@ -99,13 +116,14 @@ export async function loadClosure(
     `WITH RECURSIVE reach(kind, id, depth) AS (
        SELECT e.to_kind, e.to_id, 1 FROM ledger.dependency_edges e
         WHERE e.from_kind = 'receipt' AND e.from_id = $1 AND ${FOLLOWED}
+          AND ${NOT_EXCLUDED}
        UNION
        SELECT e.to_kind, e.to_id, r.depth + 1 FROM reach r
          JOIN ledger.dependency_edges e ON e.from_kind = r.kind AND e.from_id = r.id
-        WHERE ${FOLLOWED} AND r.depth <= $2
+        WHERE ${FOLLOWED} AND r.depth <= $2 AND ${NOT_EXCLUDED}
      )
      SELECT max(depth) AS depth FROM reach`,
-    [root.receiptId, limits.maxDepth],
+    [root.receiptId, limits.maxDepth, skipKinds, skipIds],
   );
   const depth = Number(depthQuery.rows[0]?.depth ?? 0);
   if (depth > limits.maxDepth) throw await capExceeded('depth');
@@ -216,10 +234,20 @@ export interface MarkSummary {
   intentsBlocked: string[];
 }
 
+/** Why the closure ran: recorded on the Authorization of every intent it blocks. */
+export interface MarkCause {
+  sourceKey: string;
+  /** The receipt that stopped being current. */
+  oldRevision: number;
+  oldStatus: 'superseded' | 'retracted' | 'expired';
+  /** The revision that replaced it (null for retraction / expiry). */
+  newRevision: number | null;
+}
+
 export interface ClosureMarker {
   mark(
     client: PgClient,
-    context: { eventId: string; affected: Affected },
+    context: { eventId: string; affected: Affected; cause?: MarkCause },
   ): Promise<MarkSummary>;
 }
 
@@ -244,11 +272,101 @@ export const emptyMarkSummary = (): MarkSummary => ({
  * transition_version), task_outputs(id, usable, unusable_reason),
  * action_intents(id, status, status_version, block_reason, block_detail).
  */
+/**
+ * A blocked intent must be inspectable with its reason: one immutable
+ * Authorization(decision blocked, stale_version) per intent the closure
+ * blocked, naming the receipt that stopped being current and the moved
+ * version. Skipped where the actions tables do not exist (ledger-only schemas).
+ */
+async function recordClosureAuthorizations(
+  client: PgClient,
+  schema: string,
+  intentIds: readonly string[],
+  cause: MarkCause | undefined,
+  invalidationEventId: string,
+  events: EventSinkPort | undefined,
+): Promise<void> {
+  const present = await client.query<{ present: boolean }>(
+    'SELECT to_regclass($1) IS NOT NULL AS present',
+    [`${schema}.authorizations`],
+  );
+  if (!present.rows[0]?.present) return;
+  const checked = cause
+    ? [
+        {
+          sourceKey: cause.sourceKey,
+          recordedRevision: cause.oldRevision,
+          liveRevision: cause.newRevision ?? cause.oldRevision,
+          receiptStatus: cause.oldStatus,
+          lastConfirmedAt: new Date().toISOString(),
+          freshnessOk: false,
+        },
+      ]
+    : [];
+  const inserted = await client.query<{
+    action_id: string;
+    mission_id: string;
+    stage: 'admission' | 'commit';
+    checked_vector: unknown;
+    target_version: { expected: number; live: number };
+    dispatch_fence: { token: number; valid: boolean } | null;
+  }>(
+    `WITH ins AS (
+     INSERT INTO ${schema}.authorizations
+       (id, action_id, stage, decision, block_reason, checked_vector, target_version,
+        author_fence, dispatch_fence, policy_version, idempotency_binding)
+     SELECT gen_random_uuid(), i.id,
+            CASE WHEN i.dispatch_fence IS NULL THEN 'admission' ELSE 'commit' END,
+            'blocked', 'stale_version', $2::jsonb,
+            jsonb_build_object('expected', i.expected_target_version,
+                               'live', CASE WHEN $3::text IS NOT NULL
+                                             AND i.target ->> 'sourceKey' = $3::text
+                                             AND $4::int IS NOT NULL
+                                            THEN $4::int ELSE i.expected_target_version END),
+            jsonb_build_object('token', i.author_fencing_token, 'valid', true),
+            CASE WHEN i.dispatch_fence IS NULL THEN NULL
+                 ELSE jsonb_build_object('token', i.dispatch_fence, 'valid', false) END,
+            'policy-v1', 'same_payload'
+       FROM ${schema}.action_intents i WHERE i.id = ANY($1::uuid[])
+     RETURNING action_id, stage, checked_vector, target_version, dispatch_fence)
+     SELECT ins.action_id, i.mission_id, ins.stage, ins.checked_vector,
+            ins.target_version, ins.dispatch_fence
+       FROM ins JOIN ${schema}.action_intents i ON i.id = ins.action_id
+      ORDER BY ins.action_id`,
+    [
+      [...intentIds],
+      JSON.stringify(checked),
+      cause?.sourceKey ?? null,
+      cause?.newRevision ?? null,
+    ],
+  );
+  // The inspector learns about the block now, not at the next snapshot: one
+  // action.decided per blocked intent, to that intent's mission, in this
+  // transaction (C6: the sink takes the events lock right before the INSERT).
+  if (!events) return;
+  for (const row of inserted.rows)
+    await events.append(client, {
+      missionId: row.mission_id,
+      kind: 'action.decided',
+      payload: {
+        kind: 'action.decided',
+        actionId: row.action_id,
+        stage: row.stage,
+        decision: 'blocked',
+        blockReason: 'stale_version',
+        blockDetail: `evidence changed (invalidation ${invalidationEventId})`,
+        checkedVector: row.checked_vector,
+        targetVersion: row.target_version,
+        dispatchFence: row.dispatch_fence,
+      },
+    } as never);
+}
+
 export function createCoordinatorMarker(
-  options?: LedgerOptions,
+  options?: LedgerOptions & { events?: EventSinkPort },
 ): ClosureMarker {
   return {
-    async mark(client, { eventId, affected }) {
+    async mark(client, { eventId, affected, cause }) {
       const schema = coordinatorSchema(options);
       const run = async (sql: string, params: unknown[]) =>
         (await client.query<{ id: string }>(sql, params)).rows
@@ -303,6 +421,15 @@ export function createCoordinatorMarker(
            RETURNING i.id`,
           [affected.actionIds, `evidence changed (invalidation ${eventId})`],
         );
+      if (summary.intentsBlocked.length > 0)
+        await recordClosureAuthorizations(
+          client,
+          schema,
+          summary.intentsBlocked,
+          cause,
+          eventId,
+          options?.events,
+        );
       return summary;
     },
   };
@@ -327,6 +454,7 @@ export interface InvalidationRecord {
 export async function insertInvalidationEvent(
   client: PgClient,
   record: InvalidationRecord,
+  options: RegistrationLedgerOptions,
 ): Promise<InvalidationEvent> {
   const id = invalidationEventId(
     record.sourceKey,
@@ -335,7 +463,7 @@ export async function insertInvalidationEvent(
     record.reason,
   );
   const missionIds = record.perMission.map((entry) => entry.missionId);
-  await client.query(
+  const written = await client.query(
     `INSERT INTO ledger.invalidation_events
        (id, source_id, source_key, old_receipt_id, new_receipt_id, reason, self_write,
         graph_version, mission_ids, affected, per_mission, closure)
@@ -363,6 +491,29 @@ export async function insertInvalidationEvent(
     'SELECT resolved_at, created_at FROM ledger.invalidation_events WHERE id = $1',
     [id],
   );
+  // One coordinator event per affected mission, only on the first write of
+  // this (content-derived) event id, carrying that mission's subset only.
+  if (written.rowCount === 1) {
+    for (const entry of record.perMission)
+      await options.events.append(client, {
+        missionId: entry.missionId,
+        kind: 'invalidation.recorded',
+        payload: {
+          kind: 'invalidation.recorded',
+          invalidationEventId: id,
+          sourceKey: record.sourceKey,
+          oldReceiptId: record.oldReceiptId,
+          newReceiptId: record.newReceiptId,
+          reason: record.reason,
+          selfWrite: record.selfWrite,
+          affected: entry.affected,
+          preserved: entry.preserved,
+          closure: record.closure,
+        },
+      } as never);
+    if (record.perMission.length > 0)
+      await client.query("SELECT pg_notify('nemodots_outbox', '')");
+  }
   return {
     id,
     missionIds: missionIds as InvalidationEvent['missionIds'],
@@ -393,7 +544,13 @@ export interface SupersedeInput {
   limits?: ClosureLimits;
   /** null skips the marks (tests of the pure graph); default marks the coordinator's rows. */
   marker?: ClosureMarker | null;
-  ledger?: LedgerOptions;
+  ledger: RegistrationLedgerOptions;
+  /**
+   * The action whose own verified self-write this registration is. Its acting
+   * lineage is excluded from the closure. Set only after
+   * verifiedSelfWriteAction() confirmed it against the version history.
+   */
+  excuseActionId?: string | null;
   /**
    * Coordinator rows the caller has locked (prelock.ts). When set, a closure
    * that reaches other marked rows throws PrelockInsufficient before any write.
@@ -426,11 +583,15 @@ export async function supersedeAndInvalidate(
   let closure: LoadedClosure | null = null;
   if (isLiveHead(prior)) {
     await lockReceiptForTransition(client, prior.id);
+    const lineage = input.excuseActionId
+      ? await selfWriteLineage(client, input.excuseActionId, input.ledger)
+      : [];
     closure = await loadClosure(
       client,
       { receiptId: prior.id, sourceKey: input.sourceKey },
       input.limits,
       input.ledger,
+      lineage,
     );
     if (input.locked) assertLocked(input.locked, closure.affected);
   }
@@ -472,21 +633,34 @@ export async function supersedeAndInvalidate(
       ? createCoordinatorMarker(input.ledger)
       : input.marker;
   const marks = marker
-    ? await marker.mark(client, { eventId, affected: closure.affected })
+    ? await marker.mark(client, {
+        eventId,
+        affected: closure.affected,
+        cause: {
+          sourceKey: input.sourceKey,
+          oldRevision: prior.sourceRevision,
+          oldStatus: prior.status === 'supported' ? 'superseded' : 'retracted',
+          newRevision: receipt.sourceRevision,
+        },
+      })
     : null;
-  const event = await insertInvalidationEvent(client, {
-    sourceId: prior.sourceId,
-    sourceKey: input.sourceKey,
-    oldReceiptId: prior.id,
-    newReceiptId: receipt.id,
-    reason: input.reason,
-    selfWrite: receipt.provenance.selfWrite,
-    graphVersion: closure.graphVersion,
-    affected: closure.affected,
-    perMission:
-      closure.perMission as unknown as InvalidationEvent['perMission'],
-    closure: { depth: closure.depth, nodes: closure.nodes, capped: false },
-  });
+  const event = await insertInvalidationEvent(
+    client,
+    {
+      sourceId: prior.sourceId,
+      sourceKey: input.sourceKey,
+      oldReceiptId: prior.id,
+      newReceiptId: receipt.id,
+      reason: input.reason,
+      selfWrite: receipt.provenance.selfWrite,
+      graphVersion: closure.graphVersion,
+      affected: closure.affected,
+      perMission:
+        closure.perMission as unknown as InvalidationEvent['perMission'],
+      closure: { depth: closure.depth, nodes: closure.nodes, capped: false },
+    },
+    input.ledger,
+  );
   return { receipt, supersededReceiptId: prior.id, event, marks };
 }
 
@@ -506,11 +680,13 @@ export interface CoarseInvalidation {
  */
 export async function supersedeWithoutClosure(
   client: PgClient,
-  input: Omit<SupersedeInput, 'limits' | 'marker'> & {
+  input: Omit<SupersedeInput, 'limits' | 'locked'> & {
     coarse?: CoarseInvalidation;
   },
 ): Promise<SupersedeResult> {
   const { prior, draft } = input;
+  if (isLiveHead(prior) && !(input.coarse?.perMission.length ?? 0))
+    throw new CoarseInvalidationRequiredError(input.sourceKey);
   const receipt = await insertReceipt(client, {
     ...draft,
     supersedes: prior ? prior.id : null,
@@ -542,23 +718,48 @@ export async function supersedeWithoutClosure(
     );
   const perMission = input.coarse?.perMission ?? [];
   const affected = unionAffected(perMission.map((entry) => entry.affected));
-  const event = await insertInvalidationEvent(client, {
-    sourceId: prior.sourceId,
-    sourceKey: input.sourceKey,
-    oldReceiptId: prior.id,
-    newReceiptId: receipt.id,
-    reason: 'closure_cap_exceeded',
-    selfWrite: receipt.provenance.selfWrite,
-    graphVersion: await currentGraphVersion(client),
-    affected,
-    perMission,
-    closure: {
-      depth: 0,
-      nodes: input.coarse?.nodes ?? 0,
-      capped: true,
+  const marker =
+    input.marker === undefined
+      ? createCoordinatorMarker(input.ledger)
+      : input.marker;
+  const nothingToMark = Object.values(affected).every(
+    (ids) => ids.length === 0,
+  );
+  const marks =
+    marker && !nothingToMark
+      ? await marker.mark(client, {
+          eventId,
+          affected,
+          cause: {
+            sourceKey: input.sourceKey,
+            oldRevision: prior.sourceRevision,
+            oldStatus:
+              prior.status === 'supported' ? 'superseded' : 'retracted',
+            newRevision: receipt.sourceRevision,
+          },
+        })
+      : null;
+  const event = await insertInvalidationEvent(
+    client,
+    {
+      sourceId: prior.sourceId,
+      sourceKey: input.sourceKey,
+      oldReceiptId: prior.id,
+      newReceiptId: receipt.id,
+      reason: 'closure_cap_exceeded',
+      selfWrite: receipt.provenance.selfWrite,
+      graphVersion: await currentGraphVersion(client),
+      affected,
+      perMission,
+      closure: {
+        depth: 0,
+        nodes: input.coarse?.nodes ?? 0,
+        capped: true,
+      },
     },
-  });
-  return { receipt, supersededReceiptId: prior.id, event, marks: null };
+    input.ledger,
+  );
+  return { receipt, supersededReceiptId: prior.id, event, marks };
 }
 
 /**
@@ -574,7 +775,9 @@ export async function invalidateRetired(
     reason: Extract<InvalidationReason, 'retraction' | 'expiry'>;
     limits?: ClosureLimits;
     marker?: ClosureMarker | null;
-    ledger?: LedgerOptions;
+    ledger: RegistrationLedgerOptions;
+    /** Coordinator rows the caller has locked (prelock.ts). */
+    locked?: Affected;
   },
 ): Promise<{ event: InvalidationEvent; marks: MarkSummary | null }> {
   const closure = await loadClosure(
@@ -583,6 +786,7 @@ export async function invalidateRetired(
     input.limits,
     input.ledger,
   );
+  if (input.locked) assertLocked(input.locked, closure.affected);
   const eventId = invalidationEventId(
     input.sourceKey,
     input.receipt.id,
@@ -594,21 +798,34 @@ export async function invalidateRetired(
       ? createCoordinatorMarker(input.ledger)
       : input.marker;
   const marks = marker
-    ? await marker.mark(client, { eventId, affected: closure.affected })
+    ? await marker.mark(client, {
+        eventId,
+        affected: closure.affected,
+        cause: {
+          sourceKey: input.sourceKey,
+          oldRevision: input.receipt.sourceRevision,
+          oldStatus: input.reason === 'retraction' ? 'retracted' : 'expired',
+          newRevision: null,
+        },
+      })
     : null;
-  const event = await insertInvalidationEvent(client, {
-    sourceId: input.receipt.sourceId,
-    sourceKey: input.sourceKey,
-    oldReceiptId: input.receipt.id,
-    newReceiptId: null,
-    reason: input.reason,
-    selfWrite: 'none',
-    graphVersion: closure.graphVersion,
-    affected: closure.affected,
-    perMission:
-      closure.perMission as unknown as InvalidationEvent['perMission'],
-    closure: { depth: closure.depth, nodes: closure.nodes, capped: false },
-  });
+  const event = await insertInvalidationEvent(
+    client,
+    {
+      sourceId: input.receipt.sourceId,
+      sourceKey: input.sourceKey,
+      oldReceiptId: input.receipt.id,
+      newReceiptId: null,
+      reason: input.reason,
+      selfWrite: 'none',
+      graphVersion: closure.graphVersion,
+      affected: closure.affected,
+      perMission:
+        closure.perMission as unknown as InvalidationEvent['perMission'],
+      closure: { depth: closure.depth, nodes: closure.nodes, capped: false },
+    },
+    input.ledger,
+  );
   return { event, marks };
 }
 
@@ -617,14 +834,4 @@ async function currentGraphVersion(client: PgClient): Promise<number> {
     'SELECT max(seq) AS version FROM ledger.dependency_edges',
   );
   return Number(rows[0]?.version ?? 0);
-}
-
-export function unionAffected(sets: readonly Affected[]): Affected {
-  const merged: Record<keyof Affected, string[]> = { ...emptyAffected() };
-  for (const key of Object.keys(merged) as (keyof Affected)[]) {
-    const ids = new Set<string>();
-    for (const set of sets) for (const id of set[key]) ids.add(id);
-    merged[key] = [...ids].sort();
-  }
-  return merged as unknown as Affected;
 }

@@ -48,7 +48,7 @@ import {
 export function registerWithoutClosure(
   client: PgClient,
   input: RegisterObservationInput,
-  options: Omit<RegisterOptions, 'closure'> = {},
+  options: Omit<RegisterOptions, 'closure'>,
 ): Promise<RegisterResult> {
   return registerObservation(client, input, { ...options, closure: 'skip' });
 }

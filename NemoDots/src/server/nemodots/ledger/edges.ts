@@ -85,6 +85,17 @@ export async function ensureNode(
   return stored;
 }
 
+async function storedMission(
+  client: PgClient,
+  node: NodeRef,
+): Promise<string | null> {
+  const { rows } = await client.query<{ mission_id: string | null }>(
+    'SELECT mission_id FROM ledger.dependency_nodes WHERE kind = $1 AND id = $2',
+    [node.kind, node.id],
+  );
+  return rows[0]?.mission_id ?? null;
+}
+
 async function reaches(
   client: PgClient,
   start: NodeRef,
@@ -133,9 +144,18 @@ export async function addEdges(
   }
   await client.query(`SAVEPOINT ${SAVEPOINT}`);
   try {
-    if (edges.some((edge) => edge.kind !== 'scheduling'))
+    // One advisory lock per mission (cycles cannot cross missions), taken in
+    // sorted order before any node is written.
+    const missions = new Set<string>();
+    for (const edge of edges) {
+      if (edge.kind === 'scheduling') continue;
+      const missionId =
+        edge.to.missionId ?? (await storedMission(client, edge.to));
+      if (missionId) missions.add(missionId);
+    }
+    for (const missionId of [...missions].sort())
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
-        EDGE_LOCK_NAME,
+        `${EDGE_LOCK_NAME}:${missionId}`,
       ]);
     let inserted = 0;
     let existing = 0;

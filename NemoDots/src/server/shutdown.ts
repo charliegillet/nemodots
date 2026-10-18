@@ -1,6 +1,8 @@
 export function createShutdown(options: {
   stopRunner: () => void;
   stopPlatform: () => Promise<void>;
+  /** Optional: stops NemoDots workers, watcher and outbox. */
+  stopNemoDots?: () => Promise<void>;
   closeServer: () => Promise<void>;
   exit: (code: number) => void;
   report: (operation: string, error: unknown) => void;
@@ -36,6 +38,9 @@ export function createShutdown(options: {
       await Promise.race([
         Promise.all([
           settle('Stopping Channels failed', options.stopPlatform),
+          ...(options.stopNemoDots
+            ? [settle('Stopping NemoDots failed', options.stopNemoDots)]
+            : []),
           settle('Closing HTTP server failed', options.closeServer),
         ]),
         deadline,

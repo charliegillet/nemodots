@@ -10,6 +10,7 @@ import { configured, type Config } from './research.js';
 import type { Platform } from './platform.js';
 import { VoiceService } from './voice.js';
 import { workspaceRoutes } from './workspace-routes.js';
+import type { Hono as HonoApp } from 'hono';
 const interval = z.number().int().min(60).max(31_536_000).nullable();
 export interface AppOptions {
   store: Store;
@@ -18,6 +19,12 @@ export interface AppOptions {
   ownerToken?: string;
   origin?: string | string[];
   platform?: Platform;
+  /**
+   * NemoDots routes (`createNemoDots(...).router`). Mounted at /api/nemodots
+   * after the /api/* middleware above, so owner token, origin and JSON checks
+   * apply to them unchanged. Absent: upstream behaviour, no extra routes.
+   */
+  nemodots?: { router: HonoApp };
 }
 export function createApp({
   store,
@@ -26,6 +33,7 @@ export function createApp({
   ownerToken,
   origin,
   platform,
+  nemodots,
 }: AppOptions) {
   const app = new Hono();
   app.use(
@@ -90,6 +98,7 @@ export function createApp({
       return c.json({ error: 'Use application/json.' }, 415);
     await next();
   });
+  if (nemodots) app.route('/api/nemodots', nemodots.router);
   if (platform) app.route('/api', computerRoutes(platform.computers));
   if (platform)
     app.route(

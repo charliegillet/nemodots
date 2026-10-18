@@ -22,7 +22,7 @@ import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import type pg from 'pg';
 import { CFG, COLL, REC, SRC, type World } from './driver.js';
-import { EntryPointMissing, entry } from './harness.js';
+import { EntryPointMissing, entry, withLedgerEvents } from './harness.js';
 
 type PagesLike = {
   create(
@@ -161,19 +161,27 @@ export async function realPageEdit(
     title: string;
   }) => {
     const registerObservation = await entry<
-      (c: pg.PoolClient, i: Record<string, unknown>) => Promise<unknown>
+      (
+        c: pg.PoolClient,
+        i: Record<string, unknown>,
+        o: Record<string, unknown>,
+      ) => Promise<unknown>
     >('ledger/receipts.ts', ['registerObservation']);
     await w.inTx((client) =>
-      registerObservation(client, {
-        source: w.sourceRef(`opendots.page/${page.id}`, 'test'),
-        normalizedValue: {
-          pageId: page.id,
-          revision: page.revision,
-          title: page.title,
-          text: page.content,
+      registerObservation(
+        client,
+        {
+          source: w.sourceRef(`opendots.page/${page.id}`, 'test'),
+          normalizedValue: {
+            pageId: page.id,
+            revision: page.revision,
+            title: page.title,
+            text: page.content,
+          },
+          provenance: { kind: 'watcher' },
         },
-        provenance: { kind: 'watcher' },
-      }),
+        withLedgerEvents(),
+      ),
     );
   };
   installHook(pages, (event) => {

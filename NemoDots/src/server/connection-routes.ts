@@ -5,8 +5,10 @@ import {
   connectionActionSchema,
   type PendingApproval,
 } from '../shared/connection-types.js';
+import { approvalPayloadHash } from './connection-store.js';
 import type { WorkspaceStore } from './workspace.js';
 import { connectionInput, type ConnectionService } from './connections.js';
+import { getActivePolicy } from './nemodots/interception/active-policy.js';
 export function connectionRoutes(
   workspace: WorkspaceStore,
   connections: ConnectionService,
@@ -141,6 +143,38 @@ export function connectionRoutes(
         { error: 'This approval request already ran its stored action.' },
         409,
       );
+    // The stored request must still be exactly what was approved, and the
+    // evidence it was created under must still be current, before anything is
+    // claimed or run. Approval never bypasses either check; refused here, the
+    // owner can ask again.
+    const policy = getActivePolicy();
+    const stale = async () => {
+      const hash = approvalPayloadHash({
+        connectionId: approval.connectionId,
+        tool: approval.tool,
+        arguments: approval.arguments,
+      });
+      if (
+        approval.payloadHash === null
+          ? policy.isIncident(approval.dotId)
+          : approval.payloadHash !== hash
+      )
+        return {
+          error: 'The stored request no longer matches what was approved.',
+          code: 'payload_mismatch',
+        };
+      const verdict = await policy.revalidateApproval({
+        threadId: thread.id,
+        dotId: approval.dotId,
+        approvalId: approval.id,
+        dependencyVector: approval.dependencyVector,
+      });
+      return verdict.ok
+        ? null
+        : { error: verdict.reason, code: 'stale_evidence' };
+    };
+    const before = await stale();
+    if (before) return c.json(before, 409);
     if (
       !connections.store.claimAction(
         thread.id,
@@ -151,6 +185,17 @@ export function connectionRoutes(
       )
     )
       return recovered()!;
+    // Evidence can change between the first check and the claim; check again
+    // immediately before the call. (The window between this check and the
+    // external effect cannot be closed here: freshness-at-dispatch.)
+    const after = await stale();
+    if (after) {
+      connections.store.finishAction(thread.id, body.toolCallId, {
+        isError: true,
+        text: after.error,
+      });
+      return c.json(after, 409);
+    }
     // Not tied to the request: once approved, finish even if the tab closes.
     const result = await connections.call(exposed, approval.arguments);
     connections.store.finishAction(thread.id, body.toolCallId, result);

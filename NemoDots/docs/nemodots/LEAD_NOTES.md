@@ -66,3 +66,11 @@ The user-facing product name is **NemoDots** (page title, wordmark, unlock scree
 - One writer per file. Stay inside your task's allowed files; if you need a change elsewhere, report it as a dependency instead of editing.
 - Shared contracts in `src/server/nemodots/contracts/` are owned by whoever the current wave assigns; others import, never edit.
 - `docs/nemodots/IMPLEMENTATION_STATUS.md` is written by the integrator/lead only.
+
+## Session handoff (2026-10-18, second machine)
+
+- Work continues on the outer repo's `nemodots` branch (tracking `origin/nemodots` at `8f4d4cf`). Commit locally only; do not push.
+- Engineering models (user decision 2026-10-18): Opus roles use `claude-opus-5-5` instead of `claude-opus-5`; builders stay on `claude-sonnet-5-5`. `.claude/agents/*.md` was updated to match.
+- Live Crusoe check 2026-10-18: `/v1/models` lists `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B` (the ID in `.env`) and one completion returned that model in 1.8 s. The prompt's `nvidia/Nemotron-3-Super-120B-A12B` is not listed. Nano is `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B`.
+- Gate baseline after `npm ci` on Node v25.2.1: check-format, lint, typecheck, test and build all FAIL. Causes: `ledger/supersession.ts` left mid-edit (`unionAffected` declared twice, unused `CoarseInvalidationRequiredError`), `tests/nemodots/integration/ledger/fix-round1.test.ts` arity, and verifier-owned lint/format errors under `tests/nemodots/acceptance/g5-live-crusoe` and `g6-blackbox/helpers`. 7 `tests/telemetry.test.ts` failures are a tsx parse failure of the server import chain, probably the same supersession error; recheck once it compiles.
+- `IMPLEMENTATION_STATUS.md` still lists W2.1-W2.5 as PLANNED, but `ledger/`, `coordinator/`, `sandbox/`, `inference/` and `context/` already hold in-progress code and tests. Reconcile each package against its acceptance checks before resuming.

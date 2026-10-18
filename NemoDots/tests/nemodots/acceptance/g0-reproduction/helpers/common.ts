@@ -73,12 +73,29 @@ export interface StackInstance {
   probeSecret: string;
 }
 
+const FORBIDDEN_PORTS = new Set([5432, 6379]);
+
+/** A port from the environment, or the default when unset; never the user's 5432/6379. */
+function stackPort(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 1 || port > 65535)
+    throw new Error(`${name} must be a port number.`);
+  if (FORBIDDEN_PORTS.has(port))
+    throw new Error(`${name}=${port} is reserved for the user's own services.`);
+  return port;
+}
+
 /**
  * Finds the NemoDots stack instance listening on the shared block
- * (PostgreSQL 55432, Redis 56379). NEMODOTS_INSTANCE wins; otherwise the
- * sorted first instance under .local whose recorded ports match.
+ * (PostgreSQL NEMODOTS_PG_PORT, default 55432; Redis NEMODOTS_REDIS_PORT,
+ * default 56379). NEMODOTS_INSTANCE wins; otherwise the sorted first
+ * instance under .local whose recorded ports match.
  */
 export function loadStack(): StackInstance {
+  const pgPort = stackPort('NEMODOTS_PG_PORT', 55432);
+  const redisPort = stackPort('NEMODOTS_REDIS_PORT', 56379);
   const local = path.join(APP_ROOT, '.local');
   const wanted = process.env.NEMODOTS_INSTANCE;
   const names = wanted
@@ -96,7 +113,7 @@ export function loadStack(): StackInstance {
       pgPort: number;
       redisPort: number;
     };
-    if (info.pgPort !== 55432 || info.redisPort !== 56379) continue;
+    if (info.pgPort !== pgPort || info.redisPort !== redisPort) continue;
     if (statSync(rolesFile).mode & 0o077)
       throw new Error(`roles.env of instance ${name} must have mode 0600.`);
     const env = parseEnvText(readFileSync(rolesFile, 'utf8'));
@@ -117,7 +134,7 @@ export function loadStack(): StackInstance {
     };
   }
   throw new Error(
-    'No NemoDots stack instance on PostgreSQL 55432 / Redis 56379 found under .local (run `npm run nemodots:stack -- init` and `start`).',
+    `No NemoDots stack instance on PostgreSQL ${pgPort} / Redis ${redisPort} found under .local (run \`npm run nemodots:stack -- init\` and \`start\`).`,
   );
 }
 

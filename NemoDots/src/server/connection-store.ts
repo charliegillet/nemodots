@@ -1,5 +1,19 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
+import { digest } from './nemodots/contracts/digest.js';
+import type { DependencyEntry } from './nemodots/contracts/index.js';
+
+// Binds an approval to its exact connection, tool and arguments.
+export const approvalPayloadHash = (value: {
+  connectionId: string;
+  tool: string;
+  arguments: Record<string, unknown>;
+}) =>
+  digest({
+    connectionId: value.connectionId,
+    tool: value.tool,
+    arguments: value.arguments,
+  });
 import type {
   Connection,
   ConnectionActionResult,
@@ -22,6 +36,22 @@ export class ConnectionStore {
         .some((column) => column.name === 'approvalId')
     )
       db.exec('ALTER TABLE mcp_actions ADD COLUMN approvalId TEXT');
+    // NemoDots: the dependency vector bound to the turn that created the
+    // approval. NULL means no producer (a Dot turn outside a provenance scope).
+    if (
+      !db
+        .prepare('PRAGMA table_info(mcp_approvals)')
+        .all()
+        .some((column) => column.name === 'dependency_vector')
+    )
+      db.exec('ALTER TABLE mcp_approvals ADD COLUMN dependency_vector TEXT');
+    if (
+      !db
+        .prepare('PRAGMA table_info(mcp_approvals)')
+        .all()
+        .some((column) => column.name === 'payload_hash')
+    )
+      db.exec('ALTER TABLE mcp_approvals ADD COLUMN payload_hash TEXT');
   }
   private rows(dotId?: string) {
     return this.db
@@ -107,10 +137,13 @@ export class ConnectionStore {
     connectionId: string;
     tool: string;
     arguments: Record<string, unknown>;
+    dependencyVector?: readonly unknown[] | null;
   }) {
     const id = randomUUID();
     this.db
-      .prepare('INSERT INTO mcp_approvals VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .prepare(
+        'INSERT INTO mcp_approvals (id, threadId, dotId, connectionId, tool, arguments, createdAt, dependency_vector, payload_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      )
       .run(
         id,
         value.threadId,
@@ -119,6 +152,8 @@ export class ConnectionStore {
         value.tool,
         JSON.stringify(value.arguments),
         Date.now(),
+        value.dependencyVector ? JSON.stringify(value.dependencyVector) : null,
+        approvalPayloadHash(value),
       );
     return id;
   }
@@ -135,6 +170,12 @@ export class ConnectionStore {
       tool: String(row.tool),
       arguments: JSON.parse(String(row.arguments)) as Record<string, unknown>,
       createdAt: Number(row.createdAt),
+      dependencyVector:
+        typeof row.dependency_vector === 'string'
+          ? (JSON.parse(row.dependency_vector) as DependencyEntry[])
+          : null,
+      payloadHash:
+        typeof row.payload_hash === 'string' ? row.payload_hash : null,
     };
   }
   action(threadId: string, toolCallId: string) {

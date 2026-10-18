@@ -62,13 +62,42 @@ const LOCKED_TABLES: { key: AffectedKey; table: string }[] = [
   { key: 'actionIds', table: 'action_intents' },
 ];
 
-/** Locks the coordinator rows named by `affected` FOR UPDATE: one statement per table, ids sorted. */
+/**
+ * Locks the coordinator rows named by `affected`. The MISSION rows they belong
+ * to are share-locked FIRST: pause / cancel take the mission FOR UPDATE and
+ * only then the attempt rows, and inserting a coordinator event takes a key
+ * share on the mission, so a registration that locked attempt rows before the
+ * mission could deadlock with a pause (adversarial finding C-02). Then one
+ * statement per table, ids sorted, FOR UPDATE.
+ */
 export async function lockCoordinatorRows(
   client: PgClient,
   affected: Affected,
   options?: LedgerOptions,
 ): Promise<void> {
   const schema = coordinatorSchema(options);
+  const missions = new Set<string>();
+  for (const { key, table } of LOCKED_TABLES) {
+    const ids = [...affected[key]];
+    if (ids.length === 0 || table === 'task_outputs') continue;
+    const { rows } = await client.query<{ mission_id: string }>(
+      `SELECT DISTINCT mission_id FROM ${schema}.${table} WHERE id = ANY($1::uuid[])`,
+      [ids],
+    );
+    for (const row of rows) missions.add(row.mission_id);
+  }
+  if (missions.size > 0) {
+    // ledger-only fixtures may not have a missions table
+    const present = await client.query<{ present: boolean }>(
+      'SELECT to_regclass($1) IS NOT NULL AS present',
+      [`${schema}.missions`],
+    );
+    if (present.rows[0]?.present)
+      await client.query(
+        `SELECT id FROM ${schema}.missions WHERE id = ANY($1::uuid[]) ORDER BY id FOR SHARE`,
+        [[...missions]],
+      );
+  }
   for (const { key, table } of LOCKED_TABLES) {
     const ids = [...affected[key]];
     if (ids.length === 0) continue;

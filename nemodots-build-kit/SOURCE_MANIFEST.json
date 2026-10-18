@@ -1,0 +1,48 @@
+{
+  "application_implemented_by_preparation": false,
+  "engineering_models": {
+    "implementation_and_dependency_audit": "claude-sonnet-5-5",
+    "lead_and_review": "claude-opus-5"
+  },
+  "installed_assets": {
+    ".claude/agents/concurrency-devils-advocate.md": "a4296e63b4919d3f637d812908f8474fe6505dca98299b43ebb9aaa06bc1baef",
+    ".claude/agents/demo-devils-advocate.md": "c5572af167daa0d4cc0f9ac38d301420d2959c23aecf5d1ead6c78ad55ed274c",
+    ".claude/agents/dependency-auditor.md": "7b572f002252425f7228dc90e43a74bd4c3f27d7f1b725a653aeb14b1d06fef8",
+    ".claude/agents/frontend-engineer.md": "7f12fb85f1e7013530960e9ef9a5db6429796b53da0a954d71c546dfd71a7f3d",
+    ".claude/agents/independent-verifier.md": "f4fc11ff7cfaec393b9e8659fce2ae35d08328f84b35e7a7b5245e013411a6f9",
+    ".claude/agents/integration-devils-advocate.md": "c2cb036dbdb568d07cb6190c0191d8daffe5988a657b227433f5716c749c3522",
+    ".claude/agents/integration-engineer.md": "9b91dac04c3c77c906e86370072bcc939b9f94cab176a47cdfcd523e37d36c59",
+    ".claude/agents/ledger-engineer.md": "1b15ab69cb9cca47d9ca568159dd835cd97580cfbfe0ca58aa1534c5628af16a",
+    ".claude/agents/runtime-engineer.md": "aeaa072c45646e7a88d0d02da74ad863038267e431a5c4ecabbf31984279dc61",
+    ".claude/agents/sandbox-engineer.md": "573ddefbb2c5de6cec8ebaa98a10976933bb7abadd26e9ad7d5a6d36bb5f6e47",
+    ".claude/agents/systems-architect.md": "322c20b95085c54cbad21dc2a00851fe1bfb9a24c409922d9f746d5a16aa01c9",
+    ".claude/settings.json": "762e965d39360ad5f910e77815acb0977932f4342c4bb10f30a0323127bef3de",
+    "CLAUDE.md": "50a09621890075995e3b80cae840a24a3857c8326ee83ee5ac2580beef786fec",
+    "docs/nemodots/BUILD_PROMPT.md": "05240a8ca9e59cc5c6f2c1ebcba3f388e3bb31c651b935bb54c59da12be990a6",
+    "docs/nemodots/SANDBOX_SPEC.md": "6498741a8427d3db0633fb765d33ed3a3a8b4a248bf8ed3b642b2e71a495b3a2",
+    "docs/nemodots/SOURCES.md": "c6d71c5b69b9ba1b56973e7fe5862255616d44bcc3f503789e7d0066c1127892",
+    "docs/nemodots/TEST_PROMPT.md": "794d14479c0cc11c84b929f47e0db10d4cf1f1e2174c507854ae1a9c9ec0ba5b"
+  },
+  "openbot_computer_service_pin": "b6932d31a8d6e7896c15139dfc27a6c6911deb27",
+  "prepared_on": "2026-10-18",
+  "product_inference": {
+    "base_url": "https://api.inference.crusoecloud.com/v1",
+    "default_model": "nvidia/Nemotron-3-Super-120B-A12B",
+    "live_verified_by_preparation": false,
+    "provider": "Crusoe Managed Inference"
+  },
+  "project": "NemoDots",
+  "scope": "Pinned source clones and Claude implementation/verification assets only",
+  "sources": {
+    "openbot_reference": {
+      "destination": ".references/OpenBot",
+      "revision": "12c3a69406b2ca32bcb117c0329c9c6d9359565d",
+      "url": "https://github.com/CopilotKit/OpenBot.git"
+    },
+    "opendots": {
+      "destination": "NemoDots",
+      "revision": "ab39f2508f3fd23a949837622456f3d61a108e9a",
+      "url": "https://github.com/CopilotKit/OpenDots.git"
+    }
+  }
+}

@@ -13,3 +13,5 @@ export * from './readset.js';
 export * from './support.js';
 export * from './model-calls.js';
 export * from './queries.js';
+export * from './scope.js';
+export * from './lineage.js';

@@ -68,7 +68,9 @@ const base = (
 
 async function refused(input: RegisterObservationInput) {
   try {
-    await registerObservation(untouched, input);
+    await registerObservation(untouched, input, {
+      ledger: { events: { append: async () => 0 } },
+    });
   } catch (error) {
     return error;
   }

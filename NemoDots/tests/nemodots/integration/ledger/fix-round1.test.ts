@@ -32,6 +32,8 @@ import {
   seedConfig,
   sourceRef,
   updateConfig,
+  missionScope,
+  inMission,
   useLedgerDb,
   waitsOnLock,
   type TestScope,
@@ -254,7 +256,7 @@ describe('retiring a controlled receipt vs a concurrent G2 publication', () => {
           await assertCurrent(
             publisher,
             [reg.receipt.id],
-            { lockMode: 'share' },
+            await inMission(reg.receipt.id, { lockMode: 'share' }),
             FX,
           );
           await recordReadSet(
@@ -264,6 +266,7 @@ describe('retiring a controlled receipt vs a concurrent G2 publication', () => {
               taskId: attempt.taskId,
               attemptId: attempt.id,
               receiptIds: [reg.receipt.id],
+              scope: missionScope(scope),
             },
             FX,
           );
@@ -302,7 +305,7 @@ describe('retiring a controlled receipt vs a concurrent G2 publication', () => {
       await assertCurrent(
         publisher,
         [reg.receipt.id],
-        { lockMode: 'share' },
+        await inMission(reg.receipt.id, { lockMode: 'share' }),
         FX,
       );
       await recordReadSet(
@@ -312,6 +315,7 @@ describe('retiring a controlled receipt vs a concurrent G2 publication', () => {
           taskId: attempt.taskId,
           attemptId: attempt.id,
           receiptIds: [reg.receipt.id],
+          scope: missionScope(scope),
         },
         FX,
       );
@@ -436,6 +440,7 @@ describe('closure versus in-flight commits and publications (lock order)', () =>
           taskId: held.taskId,
           attemptId: held.id,
           receiptIds: [head.receipt.id],
+          scope: missionScope(scope),
         },
         FX,
       ),
@@ -480,7 +485,7 @@ describe('closure versus in-flight commits and publications (lock order)', () =>
       await assertCurrent(
         publisher,
         [head.receipt.id],
-        { lockMode: 'share' },
+        await inMission(head.receipt.id, { lockMode: 'share' }),
         FX,
       );
       // The publication records another attempt's read of the same receipt.
@@ -491,6 +496,7 @@ describe('closure versus in-flight commits and publications (lock order)', () =>
           taskId: late.taskId,
           attemptId: late.id,
           receiptIds: [head.receipt.id],
+          scope: missionScope(scope),
         },
         FX,
       );
@@ -596,6 +602,7 @@ describe('recordReadSet', () => {
           taskId: attempt.taskId,
           attemptId: attempt.id,
           receiptIds: [first.receipt.id],
+          scope: missionScope(scope),
         },
         FX,
       ),
@@ -638,6 +645,7 @@ describe('recordReadSet', () => {
         taskId: attempt.taskId,
         attemptId: attempt.id,
         receiptIds: [first.receipt.id],
+        scope: missionScope(scope),
       },
       FX,
     ).catch((e: unknown) => e);

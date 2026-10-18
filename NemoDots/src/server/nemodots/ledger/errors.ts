@@ -21,7 +21,8 @@ export type LedgerErrorCode =
   | 'edge_cycle'
   | 'model_call_invalid'
   | 'model_call_conflict'
-  | 'unsafe_identifier';
+  | 'unsafe_identifier'
+  | 'event_sink_missing';
 
 export class LedgerError extends Error {
   constructor(

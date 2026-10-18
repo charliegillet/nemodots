@@ -106,6 +106,11 @@ async function world(): Promise<World> {
     ),
   );
   const inheritedOutputId = randomUUID();
+  const outputTaskId = randomUUID();
+  await getDb().admin.query(
+    `INSERT INTO fx_coordinator.tasks (id, mission_id, status) VALUES ($1, $2, 'succeeded')`,
+    [outputTaskId, base.missionId],
+  );
   // The inherited output exists in the coordinator, is usable and rests on
   // the member receipt (what the context compiler lists as its dependency).
   await getDb().admin.query(
@@ -113,7 +118,7 @@ async function world(): Promise<World> {
      VALUES ($1, $2, true, $3::jsonb)`,
     [
       inheritedOutputId,
-      randomUUID(),
+      outputTaskId,
       JSON.stringify([
         {
           sourceKey: member.receipt.source.key,
@@ -123,10 +128,16 @@ async function world(): Promise<World> {
       ]),
     ],
   );
+  const recordingTaskId = randomUUID();
+  const recordingAttemptId = randomUUID();
+  await getDb().admin.query(
+    `INSERT INTO fx_coordinator.task_attempts (id, task_id, mission_id, status) VALUES ($1, $2, $3, 'running')`,
+    [recordingAttemptId, recordingTaskId, base.missionId],
+  );
   return {
     scope: sourceRef(base, 'checkout.health').scope,
-    taskId: randomUUID(),
-    attemptId: randomUUID(),
+    taskId: recordingTaskId,
+    attemptId: recordingAttemptId,
     member: member.receipt,
     health: health.receipt,
     inheritedOutputId,
@@ -512,6 +523,44 @@ describe('recordModelCall (fenced path)', () => {
         recordModelCall(client, { record, snapshot }, FX),
       ),
     ).rejects.toMatchObject({ code: 'model_call_invalid' });
+    expect(await counts()).toEqual(before);
+  });
+
+  it('refuses an inherited output of another mission and stores nothing (F4)', async () => {
+    const w = await world();
+    const otherMission = randomUUID();
+    const otherTask = randomUUID();
+    await getDb().admin.query(
+      `INSERT INTO fx_coordinator.tasks (id, mission_id, status) VALUES ($1, $2, 'succeeded')`,
+      [otherTask, otherMission],
+    );
+    await getDb().admin.query(
+      `UPDATE fx_coordinator.task_outputs SET task_id = $2 WHERE id = $1`,
+      [w.inheritedOutputId, otherTask],
+    );
+    const { snapshot, record } = build(w);
+    const before = await counts();
+    const error = await inTx(getDb().app, (client) =>
+      recordModelCall(client, { record, snapshot }, FX),
+    ).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(SupportError);
+    expect((error as SupportError).reason).toBe('citation_out_of_scope');
+    expect(await counts()).toEqual(before);
+  });
+
+  it('derives the recording mission from the attempt row: a record claiming a mission the attempt is not in is refused (F4)', async () => {
+    const w = await world();
+    await getDb().admin.query(
+      'UPDATE fx_coordinator.task_attempts SET mission_id = $2 WHERE id = $1',
+      [w.attemptId, randomUUID()],
+    );
+    const { snapshot, record } = build(w);
+    const before = await counts();
+    const error = await inTx(getDb().app, (client) =>
+      recordModelCall(client, { record, snapshot }, FX),
+    ).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(SupportError);
+    expect((error as SupportError).reason).toBe('citation_out_of_scope');
     expect(await counts()).toEqual(before);
   });
 

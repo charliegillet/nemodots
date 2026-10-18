@@ -29,6 +29,18 @@ import {
 } from './platform-config.js';
 import { browserResponse } from './research.js';
 import { answerObserver, type SetupTelemetry } from './setup-telemetry.js';
+import {
+  getActivePolicy,
+  getInterceptionHooks,
+} from './nemodots/interception/active-policy.js';
+import { createFetchTelemetry } from './nemodots/interception/fetch-telemetry.js';
+import { provenanceMiddleware } from './nemodots/interception/provenance-middleware.js';
+import {
+  runInProvenanceScope,
+  type ProvenanceScope,
+} from './nemodots/interception/provenance-scope.js';
+import { withToolPolicy } from './nemodots/interception/with-tool-policy.js';
+import { digest } from './nemodots/contracts/digest.js';
 const channelError = () => ({
   type: EventType.RUN_ERROR,
   message:
@@ -131,6 +143,11 @@ export class DotAgent extends AbstractAgent {
           throw new Error('Intelligence and model configuration are required.');
         }
         const initialSettings = this.store.settings();
+        // NemoDots: incident Dots (NEMODOTS_INCIDENT_DOT_IDS) never get the
+        // capabilities TOOL_COVERAGE disables for the incident scope. With the
+        // list empty `incident` is false and nothing below changes.
+        const policy = getActivePolicy();
+        const incident = policy.isIncident(dot.id);
         const initialConnections = this.workspace.connections.fingerprint(
           dot.id,
         );
@@ -172,6 +189,7 @@ export class DotAgent extends AbstractAgent {
           () => this.store.settings().paused,
         );
         const tools: ToolDefinition[] =
+          !incident &&
           dot.researchAllowed &&
           initialSettings.researchAllowed &&
           this.config.webSearchProvider === 'browser' &&
@@ -230,6 +248,7 @@ export class DotAgent extends AbstractAgent {
               ]
             : [];
         if (
+          !incident &&
           dot.researchAllowed &&
           initialSettings.researchAllowed &&
           (this.config.webSearchProvider ?? 'parallel') === 'parallel'
@@ -325,18 +344,66 @@ export class DotAgent extends AbstractAgent {
           check,
         );
         const pageContext = pages.context();
-        const memories =
-          initialSettings.memoryAllowed && dot.memoryAllowed
-            ? this.store.memories().map((memory) => memory.text)
+        const memoryRows =
+          !incident && initialSettings.memoryAllowed && dot.memoryAllowed
+            ? this.store.memories()
             : [];
+        const memories = memoryRows.map((memory) => memory.text);
+        const hooks = getInterceptionHooks();
+        const baseUrl = this.config.baseUrl ?? 'https://api.openai.com/v1';
+        // Observe the provider exchange only when a sink is installed.
+        const telemetry =
+          hooks.sink || incident ? createFetchTelemetry() : undefined;
         const adapter = openaiCompatibleText(this.config.model, {
           apiKey: this.config.apiKey,
-          baseURL: this.config.baseUrl ?? 'https://api.openai.com/v1',
+          baseURL: baseUrl,
           api: 'chat-completions',
           maxRetries: 1,
+          ...(hooks.sink && telemetry ? { fetch: telemetry.fetch } : {}),
         });
+        const provenance: ProvenanceScope = {
+          dotId: dot.id,
+          threadId: input.threadId,
+          incident,
+          dependencyVector: [],
+        };
+        const toolScope = {
+          dotId: dot.id,
+          policy,
+          defaultSpaceId: dot.spaceId ?? null,
+        };
+        // Incident Dots without a sink still get policy enforcement.
+        const turn = telemetry
+          ? provenanceMiddleware({
+              scope: provenance,
+              sink: hooks.sink ?? {},
+              telemetry,
+              policy: toolScope,
+              facts: {
+                dotId: dot.id,
+                threadId: input.threadId,
+                requestedModel: this.config.model,
+                providerHost: new URL(baseUrl).host,
+                providerMode: hooks.providerMode ?? 'live',
+                pageSnapshots: pageContext
+                  ? [
+                      {
+                        pageId: pageContext.id,
+                        revision: pageContext.revision,
+                        digest: digest(pageContext),
+                      },
+                    ]
+                  : [],
+                memories: memoryRows.map((memory) => ({
+                  id: memory.id,
+                  digest: digest(memory.text),
+                })),
+              },
+            })
+          : undefined;
         const start = async () => {
           const appTools =
+            !incident &&
             this.config.composioApiKey &&
             initialSettings.appsAllowed &&
             dot.appsAllowed
@@ -357,7 +424,7 @@ export class DotAgent extends AbstractAgent {
             ...tools,
             ...appTools,
             ...pageTools(pages),
-            ...(computer.configured
+            ...(computer.configured && !incident
               ? computerTools(computer, dot.id, check, controller.signal)
               : []),
           ];
@@ -365,7 +432,9 @@ export class DotAgent extends AbstractAgent {
           this.inner = new BuiltInAgent({
             type: 'tanstack',
             learnedSkills:
-              dot.skillDeliveryEnabled && conversation.learningContainerId
+              !incident &&
+              dot.skillDeliveryEnabled &&
+              conversation.learningContainerId
                 ? {
                     containers: [{ id: conversation.learningContainerId }],
                     apiKey: this.config.intelligenceKey,
@@ -393,6 +462,7 @@ export class DotAgent extends AbstractAgent {
                     : []),
                 ],
                 abortController: ctx.abortController,
+                ...(turn ? { middleware: [turn.middleware] } : {}),
                 threadId: ctx.input.threadId,
                 runId: ctx.input.runId,
                 modelOptions: { max_completion_tokens: 2200 },
@@ -403,17 +473,24 @@ export class DotAgent extends AbstractAgent {
                     ? 10
                     : 5,
                 ),
-                tools: [
-                  ...tanstackTools(serverTools),
-                  ...connected,
-                  ...converted.tools,
-                  ...learnedSkillTools(ctx, check),
-                ],
+                // Only tools with an executor are wrapped; client tools stay
+                // executor-less so approval interrupts still round-trip.
+                tools: withToolPolicy(
+                  [
+                    ...tanstackTools(serverTools),
+                    ...connected,
+                    ...converted.tools,
+                    ...(incident ? [] : learnedSkillTools(ctx, check)),
+                  ],
+                  toolScope,
+                ),
               });
             },
           });
-          subscription = this.inner
-            .run({
+          // The turn runs inside its provenance scope so executors without a
+          // context (approval creation) can bind the turn's dependency vector.
+          subscription = runInProvenanceScope(provenance, () =>
+            this.inner!.run({
               ...input,
               tools: [
                 ...(clientTools.some(
@@ -424,8 +501,7 @@ export class DotAgent extends AbstractAgent {
                 ...(approvals ? [connectionActionTool] : []),
               ],
               forwardedProps: {},
-            })
-            .subscribe({
+            }).subscribe({
               next: (event) => {
                 if (controller.signal.aborted)
                   observe({ type: EventType.RUN_ERROR });
@@ -453,7 +529,8 @@ export class DotAgent extends AbstractAgent {
                   observe({ type: EventType.RUN_ERROR });
                 subscriber.complete();
               },
-            });
+            }),
+          );
         };
         void start().catch(fail);
       } catch (error) {

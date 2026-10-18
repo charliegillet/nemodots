@@ -1,35 +1,20 @@
-// Gate 2 item 16 (self-write classification), split out of gate1-ledger.test.ts so that file can be the single
-// Gate 1 runner. It FAILS with ENTRY POINT MISSING / DRIVER WIRING PENDING until the gate 2 verifier binds it
-// (g2-races/lifecycle.test.ts G2-16 is the gate 2 suite's own runner of the same oracle cases; the gate 2
-// owner decides which of the two stays).
-import { describe, it } from 'vitest';
+// Gate 2 item 16 (self-write classification) case map. The SELF_WRITE_CASES
+// run once, in ../g2-races (lifecycle.test.ts, G2-16); this file FAILS for
+// every SW id that no g2-races test title names (lead ruling 2026-10-18).
+import { describe, expect, it } from 'vitest';
 import { SELF_WRITE_CASES } from '../oracle/closures.js';
-import { bindOrFail, type EntryName } from '../driver/entry-points.js';
+import { g2Titles, names } from './g2-titles.js';
 
-const GRAPH: EntryName[] = [
-  'registerObservation',
-  'supersedeAndInvalidate',
-  'ledgerEdges',
-  'coordinatorMissions',
-  'coordinatorTasks',
-  'coordinatorLeases',
-  'coordinatorPublish',
-  'advanceConfig',
-  'checkoutMigration',
-];
+const titles = g2Titles();
 
-describe('gate 2.16: self-write classification (SELF_WRITE_CASES)', () => {
+describe('gate 2.16: every self-write oracle case has a g2-races test', () => {
   it.each(SELF_WRITE_CASES.map((c) => [c.id, c.title] as const))(
     '%s %s',
-    async (id) => {
-      await bindOrFail(id, [
-        ...GRAPH,
-        'watcher',
-        'coordinatorRecovery',
-        'propose',
-        'admit',
-        'commit',
-      ]);
+    (id) => {
+      expect(
+        titles.filter((t) => names(t, id)),
+        `no g2-races test title names ${id}`,
+      ).not.toHaveLength(0);
     },
   );
 });

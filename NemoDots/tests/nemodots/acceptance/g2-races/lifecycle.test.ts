@@ -5,11 +5,14 @@ import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { digest } from '../../../../src/server/nemodots/contracts/index.js';
 import { advanceConfig } from '../../../../src/server/nemodots/sandbox/version-authority.js';
+import { ADMISSION_CASES, type AdmissionOutcome } from '../oracle/admission.js';
+import { SELF_WRITE_CASES } from '../oracle/closures.js';
 import {
   ORDERS,
   POOL,
   TIMEOUT,
   authSummary,
+  checkOutcome,
   commitSettled,
   errText,
   isSettled,
@@ -57,6 +60,45 @@ const recoveryCounts = async (w: World) =>
       )
     ).rows.map((r) => [r.kind as string, r.n as number]),
   );
+function oracleOutcome(id: string): AdmissionOutcome {
+  const c = ADMISSION_CASES.find((x) => x.id === id);
+  if (!c || 'anyOf' in c.expected)
+    throw new Error(`oracle case ${id} is missing or has alternatives`);
+  return c.expected;
+}
+const swExpected = (id: string) => {
+  const c = SELF_WRITE_CASES.find((x) => x.id === id);
+  if (!c) throw new Error(`oracle case ${id} not found`);
+  return c.expected;
+};
+/**
+ * The recovery ROUTING decisions recorded for the mission. The oracle's
+ * recoveryKinds lists routing outcomes; bookkeeping kinds (attempt_aborted,
+ * intent_blocked, branch_preserved, invalidation_resolved) are not decisions.
+ */
+const ROUTING_KINDS = [
+  'repair_scheduled',
+  'replan_scheduled',
+  'postcondition_scheduled',
+  'repair_coalesced',
+];
+const routingKinds = async (w: World) =>
+  (
+    await w.admin.query(
+      `SELECT DISTINCT kind FROM coordinator.recovery_events
+        WHERE mission_id=$1 AND kind = ANY($2::text[]) ORDER BY kind`,
+      [w.mission, ROUTING_KINDS],
+    )
+  ).rows.map((r) => r.kind as string);
+const maxRepairAttemptsPerTask = async (w: World) =>
+  (
+    await w.admin.query(
+      `SELECT COALESCE(max(n), 0)::int AS n FROM (
+         SELECT count(*) AS n FROM coordinator.task_attempts
+          WHERE mission_id=$1 AND kind='repair' GROUP BY task_id) x`,
+      [w.mission],
+    )
+  ).rows[0].n as number;
 const postconditionCount = async (w: World) =>
   (
     await w.admin.query(
@@ -180,7 +222,7 @@ describe('G2 compensation, cancellation, self-writes: cases 13, 14, 16', () => {
     });
   });
 
-  it('G2-14 cancellation: queued work stops, committed effects stay in history and in the cancellation record, an in-flight dispatch reports its real status', async () => {
+  it('G2-14 ADM-14 cancellation: queued work stops, committed effects stay in history and in the cancellation record, an in-flight dispatch reports its real status', async () => {
     await withWorld(
       async (w) => {
         const base = await w.snapshotConfig();
@@ -253,9 +295,7 @@ describe('G2 compensation, cancellation, self-writes: cases 13, 14, 16', () => {
           causedBy: C.id,
         });
         expect(await w.actionRows()).toBe(1);
-        expect(['committed', 'dispatched', 'verified']).toContain(
-          (await w.intent(C.id)).status,
-        );
+        expect((await w.intent(C.id)).status).toBe('committed'); // ADM-14: C stays committed
         // the in-flight external request is never relabelled cancelled
         expect(['dispatched', 'verified', 'outcome_unknown']).toContain(
           (await w.intent(F.id)).status,
@@ -350,6 +390,13 @@ describe('G2 compensation, cancellation, self-writes: cases 13, 14, 16', () => {
             ),
             'the acting branch is not repaired',
           ).toBe(false);
+          // SW-1 fields (the T_parent lineage is not realizable, see README)
+          const sw1 = swExpected('SW-1');
+          expect(await postconditionCount(w)).toBe(sw1.postconditionAttempts);
+          expect(await routingKinds(w)).toEqual([...sw1.recoveryKinds].sort());
+          expect(await maxRepairAttemptsPerTask(w)).toBeLessThanOrEqual(
+            sw1.maxRepairAttemptsPerTask,
+          );
         },
         { need: ['actions', 'hooks', 'cacheKey', 'watcher'] },
       );
@@ -395,12 +442,19 @@ describe('G2 compensation, cancellation, self-writes: cases 13, 14, 16', () => {
           );
           // its own history row is still verified
           expect((await w.intent(i.id)).status).toBe('verified');
+          // SW-3 fields (the T_parent lineage is not realizable, see README)
+          const sw3 = swExpected('SW-3');
+          expect(await postconditionCount(w)).toBe(sw3.postconditionAttempts);
+          expect(await routingKinds(w)).toEqual([...sw3.recoveryKinds].sort());
+          expect(await maxRepairAttemptsPerTask(w)).toBeLessThanOrEqual(
+            sw3.maxRepairAttemptsPerTask,
+          );
         },
         { need: ['actions', 'hooks', 'cacheKey', 'watcher'] },
       );
     });
 
-    it('G2-16c the model/injector cannot forge the marker: version authority, raw UPDATE and raw history INSERT through the injector role all leave caused_by_action_id NULL; only the app role may set it', async () => {
+    it('G2-16c ADM-16 the model/injector cannot forge the marker: version authority, raw UPDATE and raw history INSERT through the injector role all leave caused_by_action_id NULL; only the app role may set it', async () => {
       await withWorld(async (w) => {
         const forged = randomUUID();
         const v = (await w.cfg(POOL)).version;
@@ -527,6 +581,23 @@ describe('G2 compensation, cancellation, self-writes: cases 13, 14, 16', () => {
         },
         { need: ['watcher'] },
       );
+    });
+  });
+
+  it('G2-OUT2 ADM-20 outside the guarantee: a Redis change nobody observed, made between proposal and admission inside maxAge, does not stop admission', async () => {
+    await withWorld(async (w) => {
+      const base = await w.snapshotConfig();
+      const redisBefore = w.receiptId('redis');
+      const f = await w.propose(w.flushSpec('tc-f'));
+      // mutate_redis_unobserved: a key appears in the namespace; nothing registers it
+      await w.plantCache(1, 'acc-ns-a', 'unobserved');
+      const admitted = await w.actions.admit(f.id, 'd1');
+      expect(admitted.status).toBe('admitted');
+      expect(w.receiptId('redis')).toBe(redisBefore);
+      await checkOutcome(w, oracleOutcome('ADM-20'), {
+        intents: { F: f.id },
+        base,
+      });
     });
   });
 

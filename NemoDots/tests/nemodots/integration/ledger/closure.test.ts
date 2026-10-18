@@ -50,6 +50,7 @@ import {
   resetAuthority,
   seedConfig,
   sourceRef,
+  inMission,
   useLedgerDb,
 } from './fixtures.js';
 
@@ -70,11 +71,11 @@ const sets = (partial: Partial<ReturnType<typeof symbolic>>) => ({
 
 async function stillCurrent(graph: LoadedGraph, symbols: string[]) {
   for (const symbol of symbols)
-    await inTx(getDb().app, (client) =>
+    await inTx(getDb().app, async (client) =>
       assertCurrent(
         client,
         [graph.id(symbol) as ReceiptId],
-        { lockMode: 'share' },
+        await inMission(graph.id(symbol), { lockMode: 'share' }),
         FX,
       ),
     );
@@ -82,11 +83,11 @@ async function stillCurrent(graph: LoadedGraph, symbols: string[]) {
 
 async function noLongerCurrent(graph: LoadedGraph, symbol: string) {
   await expect(
-    inTx(getDb().app, (client) =>
+    inTx(getDb().app, async (client) =>
       assertCurrent(
         client,
         [graph.id(symbol) as ReceiptId],
-        { lockMode: 'share' },
+        await inMission(graph.id(symbol), { lockMode: 'share' }),
         FX,
       ),
     ),

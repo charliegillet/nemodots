@@ -184,15 +184,27 @@ export function delegableRoles(parentRole: TaskRole): readonly TaskRole[] {
   return ['investigator', ...SPECIALIST_ROLES, 'verifier'];
 }
 
-/** A task's capabilities ⊆ ROLE_CAPABILITIES[role] ∩ parent.capabilities. */
+/**
+ * A task's capabilities ⊆ ROLE_CAPABILITIES[role] ∩ parent.capabilities, with one
+ * server-owned grant (rev3 D5, user-approved 2026-10-18): a specialist delegated
+ * by a parent holding `delegate` keeps its role's `propose_*` capabilities.
+ * Without it an investigator could never hand a repair to a specialist. Only
+ * investigators may delegate specialists (delegableRoles), and admission still
+ * checks every proposal's evidence and policy.
+ */
 export function allowedCapabilities(
   role: TaskRole,
   parentCapabilities: readonly Capability[] | null,
 ): Capability[] {
   const defaults = ROLE_CAPABILITIES[role] as readonly Capability[];
-  return parentCapabilities === null
-    ? [...defaults]
-    : defaults.filter((capability) => parentCapabilities.includes(capability));
+  if (parentCapabilities === null) return [...defaults];
+  const grantsPropose =
+    SPECIALIST_ROLES.includes(role) && parentCapabilities.includes('delegate');
+  return defaults.filter(
+    (capability) =>
+      parentCapabilities.includes(capability) ||
+      (grantsPropose && capability.startsWith('propose_')),
+  );
 }
 
 export function capabilitiesWithinRole(

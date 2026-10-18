@@ -9,9 +9,15 @@ import {
   addEdges,
   assertCurrent,
   liveVersion,
-  registerObservation,
 } from '../../../../src/server/nemodots/ledger/index.js';
-import { inTx, newScope, sourceRef, useLedgerDb } from './fixtures.js';
+import {
+  inMission,
+  inTx,
+  registerReal,
+  newScope,
+  sourceRef,
+  useLedgerDb,
+} from './fixtures.js';
 
 const getDb = useLedgerDb();
 
@@ -67,7 +73,7 @@ describe('real authority and coordinator schemas', () => {
         'share',
       );
       expect(versions.get(`checkout.config/${key}`)).toBe(1);
-      return registerObservation(client, {
+      return registerReal(client, {
         source: sourceRef(scope, `checkout.config/${key}`),
         normalizedValue: { key, value: 3, version: 1 },
         provenance: { kind: 'watcher' },
@@ -76,7 +82,7 @@ describe('real authority and coordinator schemas', () => {
     expect(member.receipt.sourceRevision).toBe(1);
     expect(typeof member.receipt.collectionRevision).toBe('number');
     const health = await inTx(app, (client) =>
-      registerObservation(client, {
+      registerReal(client, {
         source: sourceRef(scope, 'checkout.health'),
         normalizedValue: { status: 'ok' },
         provenance: { kind: 'watcher' },
@@ -89,7 +95,7 @@ describe('real authority and coordinator schemas', () => {
       const { rows: version } = await client.query<{ version: string }>(
         'SELECT version FROM checkout.config_collection',
       );
-      return registerObservation(client, {
+      return registerReal(client, {
         source: sourceRef(scope, 'checkout.config'),
         normalizedValue: {
           keys: keys.map((row) => row.key),
@@ -119,11 +125,11 @@ describe('real authority and coordinator schemas', () => {
         },
       ]),
     );
-    await inTx(app, (client) =>
+    await inTx(app, async (client) =>
       assertCurrent(
         client,
         [member.receipt.id, collection.receipt.id, health.receipt.id],
-        { lockMode: 'update' },
+        await inMission(member.receipt.id, { lockMode: 'update' }),
       ),
     );
 
@@ -133,17 +139,25 @@ describe('real authority and coordinator schemas', () => {
       [key],
     );
     await expect(
-      inTx(app, (client) =>
-        assertCurrent(client, [member.receipt.id], { lockMode: 'share' }),
+      inTx(app, async (client) =>
+        assertCurrent(
+          client,
+          [member.receipt.id],
+          await inMission(member.receipt.id, { lockMode: 'share' }),
+        ),
       ),
     ).rejects.toMatchObject({ reason: 'stale_pending_observation' });
     // the collection receipt is untouched by a value change (C1/D1)
-    await inTx(app, (client) =>
-      assertCurrent(client, [collection.receipt.id], { lockMode: 'share' }),
+    await inTx(app, async (client) =>
+      assertCurrent(
+        client,
+        [collection.receipt.id],
+        await inMission(collection.receipt.id, { lockMode: 'share' }),
+      ),
     );
 
     const change = await inTx(app, (client) =>
-      registerObservation(client, {
+      registerReal(client, {
         source: sourceRef(scope, `checkout.config/${key}`),
         normalizedValue: { key, value: 4, version: 2 },
         provenance: { kind: 'watcher' },

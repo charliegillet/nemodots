@@ -25,7 +25,14 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { LEDGER_CASES } from '../oracle/ledger.js';
 import type { LedgerCase, LedgerOp } from '../oracle/types.js';
-import { entry, insertRow, pool, Schema, type AccDb } from './harness.js';
+import {
+  entry,
+  insertRow,
+  pool,
+  Schema,
+  withLedgerEvents,
+  type AccDb,
+} from './harness.js';
 
 export const KNOWN_ERRORS = [
   'immutable',
@@ -516,7 +523,9 @@ export class World {
     };
     try {
       const input = await this.registerInput(op);
-      await this.inTx((client) => registerObservation(client, input, options));
+      await this.inTx((client) =>
+        registerObservation(client, input, withLedgerEvents(options)),
+      );
     } catch (error) {
       result.ok = false;
       result.error = errorCode(error);
@@ -543,6 +552,7 @@ export class World {
       (
         client: pg.PoolClient,
         input: Record<string, unknown>,
+        options: Record<string, unknown>,
       ) => Promise<unknown>
     >('ledger/receipts.ts', ['registerObservation']);
     const before = await this.receiptsOf('test', op.sourceKey);
@@ -553,8 +563,12 @@ export class World {
       normalizedValue: op.normalizedValue,
     });
     const settled = await Promise.allSettled([
-      this.inTx((c) => registerObservation(c, structuredClone(input))),
-      this.inTx((c) => registerObservation(c, structuredClone(input))),
+      this.inTx((c) =>
+        registerObservation(c, structuredClone(input), withLedgerEvents()),
+      ),
+      this.inTx((c) =>
+        registerObservation(c, structuredClone(input), withLedgerEvents()),
+      ),
     ]);
     const failed = settled.filter(
       (x) => x.status === 'rejected',
@@ -575,9 +589,32 @@ export class World {
     };
   }
 
+  /**
+   * The driver's own mission row, in the test scope its receipts are
+   * registered under. Support checks resolve the scope from this row
+   * (ledger/scope.ts, CONTRACTS rev3 F4); a filler scope would make every
+   * citation out of scope.
+   */
+  async ensureMission() {
+    const known = await this.admin.query(
+      'SELECT 1 FROM coordinator.missions WHERE id = $1',
+      [this.missionId],
+    );
+    if (known.rows.length) return;
+    await insertRow(this.admin, this.schema, 'coordinator.missions', {
+      id: this.missionId,
+      status: 'running',
+      owner_id: OWNER_ID,
+      space_id: null,
+      environment: 'test',
+      resource: 'checkout',
+    });
+  }
+
   async assertCurrent(
     op: Extract<LedgerOp, { op: 'assert_current' }>,
   ): Promise<OpResult> {
+    await this.ensureMission();
     const mod = await entry<Record<string, unknown>>('ledger/support.ts', [
       'assertCurrent',
       'supportValidator',
@@ -598,8 +635,17 @@ export class World {
     try {
       await client.query('BEGIN');
       try {
+        // CONTRACTS rev3 F4: support is checked against a mission's scope.
+        // The driver's receipts belong to its own test-scope mission.
         await fn(client, ids, {
           lockMode: op.lockMode,
+          missionId: this.missionId,
+          scope: {
+            ownerId: OWNER_ID,
+            environment: 'test',
+            spaceId: null,
+            resource: 'checkout',
+          },
           ...(op.freshness ? { freshness: op.freshness } : {}),
         });
         await client.query('COMMIT');
@@ -705,6 +751,7 @@ export class World {
       (
         client: pg.PoolClient,
         input: Record<string, unknown>,
+        options: Record<string, unknown>,
       ) => Promise<unknown>
     >('ledger/receipts.ts', ['transitionReceipt']);
     const reason =
@@ -715,7 +762,11 @@ export class World {
           : 'conflicting_observation';
     // BIND: transitionReceipt(client in an open transaction, { receiptId, to, reason }).
     await this.inTx((client) =>
-      transitionReceipt(client, { receiptId: id, to: op.to, reason }),
+      transitionReceipt(
+        client,
+        { receiptId: id, to: op.to, reason },
+        withLedgerEvents(),
+      ),
     );
   }
 
@@ -726,10 +777,7 @@ export class World {
    * production publishFinding.
    */
   async attemptContext() {
-    await insertRow(this.admin, this.schema, 'coordinator.missions', {
-      id: this.missionId,
-      status: 'running',
-    });
+    await this.ensureMission();
     const taskId = randomUUID();
     await this.admin.query(
       `INSERT INTO coordinator.tasks (id, mission_id, depth, ordinal, title, question, role, capabilities, status, generation, fence_seq, attempt_count, budget)

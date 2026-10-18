@@ -35,15 +35,24 @@ export async function currentReceipt(
   identity: {
     ownerId: string;
     environment: Environment;
+    /** null (default) is the no-Space scope, one value like any other. */
+    spaceId?: string | null;
     resource: string;
     key: string;
   },
 ): Promise<ObservationReceipt | null> {
   const { rows } = await client.query(
     `${RECEIPT_SELECT}
-      WHERE s.owner_id = $1 AND s.environment = $2 AND s.resource = $3 AND s.key = $4
+      WHERE s.owner_id = $1 AND s.environment = $2 AND s.space_id IS NOT DISTINCT FROM $5
+        AND s.resource = $3 AND s.key = $4
       ORDER BY r.source_revision DESC LIMIT 1`,
-    [identity.ownerId, identity.environment, identity.resource, identity.key],
+    [
+      identity.ownerId,
+      identity.environment,
+      identity.resource,
+      identity.key,
+      identity.spaceId ?? null,
+    ],
   );
   return rows[0]
     ? toReceipt(mapReceiptRow(rows[0] as unknown as ReceiptDbRow))
@@ -125,6 +134,7 @@ export interface EvidenceItem {
 export interface EvidenceFilter {
   ownerId: string;
   environment: Environment;
+  spaceId?: string | null;
   resource: string;
   /** Only branches of this mission are listed as consumers. */
   missionId?: string;
@@ -144,6 +154,7 @@ export async function listEvidence(
   const { rows } = await client.query(
     `${RECEIPT_SELECT}
       WHERE s.owner_id = $1 AND s.environment = $2 AND s.resource = $3
+        AND s.space_id IS NOT DISTINCT FROM $5
         AND ($4::boolean OR r.source_revision = (
               SELECT max(h.source_revision) FROM ledger.observation_receipts h
                WHERE h.source_id = r.source_id))
@@ -153,6 +164,7 @@ export async function listEvidence(
       filter.environment,
       filter.resource,
       filter.includeHistory ?? false,
+      filter.spaceId ?? null,
     ],
   );
   const receipts = rows.map((row) =>

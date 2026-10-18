@@ -27,6 +27,7 @@ import {
   type SourceRef,
   type TransitionReason,
   type TrustClass,
+  type Affected,
 } from '../contracts/index.js';
 import {
   ControlledSourceMissingError,
@@ -39,7 +40,9 @@ import {
   StaleObservationRejectedError,
 } from './errors.js';
 import type { ClosureLimits } from './closure.js';
-import type { LedgerOptions } from './options.js';
+import { requireEventSink, type RegistrationLedgerOptions } from './options.js';
+import { verifiedSelfWriteAction } from './lineage.js';
+import { runWithClosureLocks, unionAffected } from './prelock.js';
 import {
   appendConfirmation,
   getReceiptRow,
@@ -52,7 +55,9 @@ import {
 } from './receipt-store.js';
 import {
   COLLECTION_SOURCE_KEY,
+  configMemberKey,
   ensureSource,
+  liveMember,
   liveMemberKeys,
   liveVersion,
   lockSource,
@@ -60,6 +65,7 @@ import {
 } from './sources.js';
 import {
   invalidateRetired,
+  loadClosure,
   supersedeAndInvalidate,
   supersedeWithoutClosure,
   type ClosureMarker,
@@ -110,7 +116,8 @@ export interface RegisterObservationInput {
 }
 
 export interface RegisterOptions {
-  ledger?: LedgerOptions;
+  /** Required: `events` is the sink for the per-mission invalidation events. */
+  ledger: RegistrationLedgerOptions;
   limits?: ClosureLimits;
   /** null skips marks on the coordinator's rows; default marks them. */
   marker?: ClosureMarker | null;
@@ -214,6 +221,24 @@ function prepare(input: RegisterObservationInput): Prepared {
         'collection value must be { keys: sorted unique string[], collectionVersion }',
       );
   }
+  if (ref.sourceType === 'controlled_config') {
+    const memberKey = configMemberKey(ref.key);
+    const value = input.normalizedValue as Record<string, unknown> | null;
+    const keys =
+      value !== null && typeof value === 'object' && !Array.isArray(value)
+        ? Object.keys(value).sort()
+        : [];
+    if (
+      keys.join(',') !== 'key,value,version' ||
+      value === null ||
+      value.key !== memberKey ||
+      !Number.isInteger(value.version) ||
+      (value.version as number) < 1
+    )
+      throw new InvalidObservationError(
+        `a config member value must be exactly { key: "${memberKey}", value, version }`,
+      );
+  }
   if (input.negative && ref.sourceType !== 'controlled_collection')
     throw new InvalidObservationError(
       'a negative membership predicate belongs on the checkout.config collection receipt',
@@ -290,6 +315,22 @@ async function readControlled(
   if (!isCollection) {
     if (collectionRevision === null)
       throw new ControlledSourceMissingError(COLLECTION_SOURCE_KEY);
+    // The value must describe the locked authority row: version and content.
+    checkClaim(input.claimed?.sourceRevision, revision);
+    const embedded = prepared.value as { value: unknown; version: number };
+    if (embedded.version < revision)
+      throw new StaleObservationRejectedError(embedded.version, revision);
+    if (embedded.version > revision)
+      throw new RevisionMismatchError(embedded.version, revision);
+    const row = await liveMember(
+      client,
+      configMemberKey(key) as string,
+      options.ledger,
+    );
+    if (!row || digest(row.value) !== digest(embedded.value))
+      throw new DigestMismatchError(
+        `the value of ${key} at version ${revision} differs from the authority row`,
+      );
     if (
       input.collectionRevision !== undefined &&
       input.collectionRevision !== null &&
@@ -371,14 +412,77 @@ function derivedReason(
 export async function registerObservation(
   client: PgClient,
   input: RegisterObservationInput,
-  options: RegisterOptions = {},
+  options: RegisterOptions,
 ): Promise<RegisterResult> {
+  requireEventSink(options?.ledger);
   const prepared = prepare(input);
+  if (prepared.observedAt) await checkObservedAt(client, prepared.observedAt);
   const source = await ensureSource(client, prepared.ref);
   if (options.hooks?.afterPreliminaryRead) {
     const head = await headReceipt(client, source.id);
     await options.hooks.afterPreliminaryRead({ sourceId: source.id, head });
   }
+  const skip = options.closure === 'skip';
+  // Coordinator rows the step will mark are locked BEFORE any ledger lock
+  // (prelock.ts); the closure is re-read under the ledger locks and verified.
+  return runWithClosureLocks(
+    client,
+    {
+      enabled: options.marker !== null,
+      ledger: options.ledger,
+      preview: async () => {
+        const head = await headReceipt(client, source.id);
+        if (
+          !head ||
+          (head.status !== 'supported' && head.status !== 'contested')
+        )
+          return null;
+        // A same-value re-observation confirms the head and marks nothing.
+        if (
+          head.status === 'supported' &&
+          head.contentDigest === prepared.digest
+        )
+          return null;
+        if (skip)
+          return options.coarse
+            ? unionAffected(options.coarse.perMission.map((m) => m.affected))
+            : null;
+        return (
+          await loadClosure(
+            client,
+            { receiptId: head.id, sourceKey: source.key },
+            options.limits,
+            options.ledger,
+          )
+        ).affected;
+      },
+    },
+    (locked) =>
+      registerLocked(client, input, options, prepared, source, locked),
+  );
+}
+
+/** Registration clock skew tolerated for observedAt (database clock). */
+const OBSERVED_AT_SKEW_MS = 5_000;
+
+async function checkObservedAt(client: PgClient, observedAt: Date) {
+  const { rows } = await client.query<{ now: Date }>(
+    'SELECT clock_timestamp() AS now',
+  );
+  if (observedAt.getTime() > rows[0].now.getTime() + OBSERVED_AT_SKEW_MS)
+    throw new InvalidObservationError(
+      'observedAt is later than the database clock plus the allowed skew',
+    );
+}
+
+async function registerLocked(
+  client: PgClient,
+  input: RegisterObservationInput,
+  options: RegisterOptions,
+  prepared: Prepared,
+  source: SourceRow,
+  locked: Affected,
+): Promise<RegisterResult> {
   await lockSource(client, source.id);
 
   const head = await headReceipt(client, source.id);
@@ -460,6 +564,7 @@ export async function registerObservation(
     transitionReason,
     sourceKey: source.key,
     ledger: options.ledger,
+    marker: options.marker,
   };
   const result =
     options.closure === 'skip'
@@ -470,7 +575,17 @@ export async function registerObservation(
       : await supersedeAndInvalidate(client, {
           ...base,
           limits: options.limits,
-          marker: options.marker,
+          locked: options.marker === null ? undefined : locked,
+          excuseActionId: await verifiedSelfWriteAction(
+            client,
+            {
+              sourceKey: source.key,
+              revision,
+              selfWrite: prepared.provenance.selfWrite,
+              causedByActionId: prepared.provenance.causedByActionId,
+            },
+            options.ledger,
+          ),
         });
   return {
     receipt: toReceipt(result.receipt),
@@ -505,37 +620,70 @@ export interface TransitionReceiptResult {
 export async function transitionReceipt(
   client: PgClient,
   input: TransitionReceiptInput,
-  options: Pick<RegisterOptions, 'ledger' | 'limits' | 'marker'> = {},
+  options: Pick<RegisterOptions, 'ledger' | 'limits' | 'marker'>,
 ): Promise<TransitionReceiptResult> {
+  requireEventSink(options?.ledger);
   const probe = await getReceiptRow(client, input.receiptId);
-  const source: SourceRow = await lockSource(client, probe.sourceId);
-  const receipt = await getReceiptRow(client, input.receiptId);
-  assertTransition('receipt', receipt.status, input.to);
-
   const retiring = input.to === 'retracted' || input.to === 'expired';
   const invalidationReason = input.to === 'retracted' ? 'retraction' : 'expiry';
-  const eventId = retiring
-    ? invalidationEventId(source.key, receipt.id, null, invalidationReason)
-    : `transition:${receipt.id}:${receipt.statusVersion + 1}`;
-  await transitionRow(client, receipt, input.to, input.reason, eventId);
-
-  let invalidation: InvalidationEvent | null = null;
-  let marks: MarkSummary | null = null;
-  if (retiring) {
-    const retired = await invalidateRetired(client, {
-      receipt,
-      sourceKey: source.key,
-      reason: invalidationReason,
-      limits: options.limits,
-      marker: options.marker,
+  return runWithClosureLocks(
+    client,
+    {
+      enabled: retiring && options.marker !== null,
       ledger: options.ledger,
-    });
-    invalidation = retired.event;
-    marks = retired.marks;
-  }
-  return {
-    receipt: toReceipt(await getReceiptRow(client, receipt.id)),
-    invalidation,
-    marks,
-  };
+      preview: async () => {
+        const sourceKey = (await getSourceKey(
+          client,
+          probe.sourceId,
+        )) as string;
+        return (
+          await loadClosure(
+            client,
+            { receiptId: probe.id, sourceKey },
+            options.limits,
+            options.ledger,
+          )
+        ).affected;
+      },
+    },
+    async (locked) => {
+      const source: SourceRow = await lockSource(client, probe.sourceId);
+      const receipt = await getReceiptRow(client, input.receiptId);
+      assertTransition('receipt', receipt.status, input.to);
+
+      const eventId = retiring
+        ? invalidationEventId(source.key, receipt.id, null, invalidationReason)
+        : `transition:${receipt.id}:${receipt.statusVersion + 1}`;
+      await transitionRow(client, receipt, input.to, input.reason, eventId);
+
+      let invalidation: InvalidationEvent | null = null;
+      let marks: MarkSummary | null = null;
+      if (retiring) {
+        const retired = await invalidateRetired(client, {
+          receipt,
+          sourceKey: source.key,
+          reason: invalidationReason,
+          limits: options.limits,
+          marker: options.marker,
+          ledger: options.ledger,
+          locked: options.marker === null ? undefined : locked,
+        });
+        invalidation = retired.event;
+        marks = retired.marks;
+      }
+      return {
+        receipt: toReceipt(await getReceiptRow(client, receipt.id)),
+        invalidation,
+        marks,
+      };
+    },
+  );
+}
+
+async function getSourceKey(client: PgClient, sourceId: string) {
+  const { rows } = await client.query<{ key: string }>(
+    'SELECT key FROM ledger.sources WHERE id = $1',
+    [sourceId],
+  );
+  return rows[0]?.key;
 }

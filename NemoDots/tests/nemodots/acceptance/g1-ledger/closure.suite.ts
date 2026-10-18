@@ -18,6 +18,7 @@ import {
   insertRow,
   insertValues,
   withAccDatabase,
+  withLedgerEvents,
 } from './harness.js';
 import { barrier, withTimeout } from '../../helpers/barrier.js';
 import {
@@ -603,15 +604,44 @@ async function generatedRejection(
       ).toBe(0);
 
       // The source stays observable: the cap path registers without a closure (C14).
+      // ARCHITECTURE C14: the watcher pauses the missions first and hands the
+      // ledger the coarse per-mission set; superseding a live head without one
+      // is refused (coarse_required). The entry lists the paused mission with an
+      // empty affected set so the no-closure assertion below stays meaningful.
       const registerWithoutClosure = await entry<
-        (c: pg.PoolClient, input: Record<string, unknown>) => Promise<unknown>
+        (
+          c: pg.PoolClient,
+          input: Record<string, unknown>,
+          options: Record<string, unknown>,
+        ) => Promise<unknown>
       >('ledger/invalidation.ts', ['registerWithoutClosure']);
       const input = await w.registerInput({
         op: 'register',
         label: 'R1',
         sourceKey: 'checkout.config/db.pool_max',
       });
-      await w.inTx((client) => registerWithoutClosure(client, input));
+      const coarse = {
+        perMission: [
+          {
+            missionId,
+            affected: {
+              modelCallIds: [],
+              attemptIds: [],
+              outputIds: [],
+              actionIds: [],
+              taskIds: [],
+            },
+            preserved: { taskIds: [] },
+          },
+        ],
+      };
+      await w.inTx((client) =>
+        registerWithoutClosure(client, input, withLedgerEvents({ coarse })),
+      );
+      expect(
+        await countRows(w, T.invalidations),
+        'the cap path records exactly one coarse invalidation event (C14)',
+      ).toBe(eventsBefore + 1);
       const cur = await w.currentOf('test', 'checkout.config/db.pool_max');
       expect(
         cur?.revision,
@@ -625,7 +655,6 @@ async function generatedRejection(
         flippedAfter.rows[0].n,
         'the skip path must not compute a closure',
       ).toBe(0);
-      void missionId;
     } finally {
       await w.close();
     }
@@ -649,16 +678,35 @@ describe('gate 1 cycle and cap rejections (frozen oracle RJ-*)', () => {
       await withAccDatabase(async (db) => {
         const w = new World(db);
         try {
-          const watcher = await entry<unknown>('watcher/watcher.ts', [
-            'processSourceChange',
-            'pollOnce',
-            'runOnce',
-            'tick',
-          ]);
-          if (typeof watcher !== 'function')
-            throw new Error(
-              'DRIVER WIRING: watcher/watcher.ts export is not a function; bind it in closure.test.ts',
-            );
+          // watcher/watcher.ts#createWatcher(WatcherDeps); Watcher.pass({ keys })
+          // is the single deterministic step (leadership not required). The
+          // recovery and the pauser are the real coordinator ones.
+          const createWatcher = await entry<
+            (d: Record<string, unknown>) => {
+              pass(f: { keys: string[] }): Promise<{ errors: number }>;
+            }
+          >('watcher/watcher.ts', ['createWatcher']);
+          const { createRecovery } =
+            await import('../../../../src/server/nemodots/coordinator/recovery.js');
+          const { createMissionControl } =
+            await import('../../../../src/server/nemodots/coordinator/control.js');
+          const { composeDeps } = await import('./compose.js');
+          const deps = composeDeps(w);
+          const control = createMissionControl(deps as never);
+          const watcher = createWatcher({
+            pool: w.app,
+            reader: {
+              read: async (key: string) => {
+                throw new Error(
+                  `gate 1 polls controlled sources only (${key})`,
+                );
+              },
+            },
+            recovery: createRecovery(deps, {}),
+            missions: { pause: (id: string) => control.pause(id as never) },
+            intervalMs: 60_000,
+            ledger: withLedgerEvents().ledger,
+          });
           const { missionId } = await seedGenerated(w, op.shape, op.size);
           await w.advance({
             op: 'advance_config',
@@ -666,7 +714,10 @@ describe('gate 1 cycle and cap rejections (frozen oracle RJ-*)', () => {
             value: 9,
             actor: 'injector',
           });
-          await (watcher as (db: pg.Pool) => Promise<unknown>)(w.app);
+          const stats = await watcher.pass({
+            keys: ['checkout.config/db.pool_max'],
+          });
+          expect(stats.errors, 'watcher pass errors').toBe(0);
           const cur = await w.currentOf('test', 'checkout.config/db.pool_max');
           expect(
             cur?.revision,

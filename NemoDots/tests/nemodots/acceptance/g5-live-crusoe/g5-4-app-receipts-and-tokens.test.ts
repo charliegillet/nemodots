@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- NemoDots route payloads are untyped JSON */
 // TEST_PROMPT gate 5 cases 3, 4 (unused paths) and 8, driven through the
 // running NemoDots app over its documented HTTP routes (contracts/routes.ts,
 // prefix /api/nemodots). The app must be listening on the acc5 app port
@@ -62,10 +63,11 @@ async function api(
   } catch (error) {
     throw new Error(
       `ENTRY POINT MISSING: NemoDots app not reachable at ${base} (${(error as Error).message.slice(0, 100)}). Start it on the acc5 port block (app 4701, checkout 4700) before running Gate 5 app cases.`,
+      { cause: error },
     );
   }
   const text = await res.text();
-  let json: any = null;
+  let json: any;
   try {
     json = JSON.parse(text);
   } catch {

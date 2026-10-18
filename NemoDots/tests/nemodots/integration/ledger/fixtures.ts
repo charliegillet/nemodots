@@ -13,13 +13,39 @@ import type pg from 'pg';
 import { afterAll, beforeAll } from 'vitest';
 import type { SourceRef } from '../../../../src/server/nemodots/contracts/index.js';
 import { createRolePool } from '../../../../src/server/nemodots/db/pool.js';
-import type { LedgerOptions } from '../../../../src/server/nemodots/ledger/options.js';
+import { registerObservation } from '../../../../src/server/nemodots/ledger/receipts.js';
+import type {
+  LedgerOptions,
+  RegistrationLedgerOptions,
+} from '../../../../src/server/nemodots/ledger/options.js';
+import type { EventSinkPort } from '../../../../src/server/nemodots/contracts/index.js';
 import { withTestDatabase, type TestDatabase } from '../../helpers/test-db.js';
 
-export const FX: Required<LedgerOptions> = {
+/**
+ * A recording EventSinkPort for ledger-only tests: the fixture schemas have no
+ * coordinator.events table, so the events are kept in memory.
+ */
+export const recordedEvents: { missionId: string; payload: unknown }[] = [];
+export const recordingSink: EventSinkPort = {
+  async append(_client, event) {
+    recordedEvents.push({
+      missionId: event.missionId,
+      payload: event.payload,
+    });
+    return recordedEvents.length;
+  },
+};
+
+/** Ledger options of the fixture schemas, with a recording event sink. */
+export const FX: RegistrationLedgerOptions &
+  Required<Pick<LedgerOptions, 'checkoutSchema' | 'coordinatorSchema'>> = {
   checkoutSchema: 'fx_checkout',
   coordinatorSchema: 'fx_coordinator',
+  events: recordingSink,
 };
+
+/** Default-schema ledger options with a recording sink (real coordinator tables, no events table use). */
+export const REAL: RegistrationLedgerOptions = { events: recordingSink };
 
 const FIXTURE_SQL = `
 CREATE SCHEMA fx_checkout AUTHORIZATION nemodots_admin;
@@ -46,6 +72,9 @@ CREATE TABLE fx_coordinator.tasks (
 CREATE TABLE fx_coordinator.task_attempts (
   id uuid PRIMARY KEY, task_id uuid NOT NULL, mission_id uuid NOT NULL,
   status text NOT NULL, abort_reason text);
+CREATE TABLE fx_coordinator.missions (
+  id uuid PRIMARY KEY, owner_id text NOT NULL, environment text NOT NULL,
+  space_id text, resource text NOT NULL);
 CREATE TABLE fx_coordinator.task_outputs (
   id uuid PRIMARY KEY, task_id uuid NOT NULL, usable boolean NOT NULL DEFAULT true,
   unusable_reason text, dependency_vector jsonb NOT NULL DEFAULT '[]'::jsonb);
@@ -66,6 +95,8 @@ export interface LedgerDb {
 }
 
 /** One migrated database for a whole describe block; released in afterAll. */
+let active: LedgerDb | undefined;
+
 export function useLedgerDb(): () => LedgerDb {
   let current: LedgerDb | undefined;
   let finish!: () => void;
@@ -89,6 +120,7 @@ export function useLedgerDb(): () => LedgerDb {
       }).catch(reject);
     });
     current = await ready;
+    active = current;
   }, 60_000);
   afterAll(async () => {
     finish?.();
@@ -105,6 +137,7 @@ export async function inTx<T>(
   pool: pg.Pool,
   fn: (client: pg.PoolClient) => Promise<T>,
 ): Promise<T> {
+  await flushMissions();
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -127,15 +160,44 @@ export interface TestScope {
 }
 
 /** A scope no other test shares (sources are unique per owner/environment/resource/key). */
+/**
+ * Every scope handed out by newScope() is a mission: its row is written to
+ * both fx_coordinator.missions and coordinator.missions before the next
+ * ledger call (inTx / inMission), because the ledger establishes a mission's
+ * scope from its row and refuses an unknown mission (F4).
+ */
+const pendingMissions = new Map<string, TestScope>();
+
+export async function flushMissions() {
+  if (pendingMissions.size === 0 || !active) return;
+  const batch = [...pendingMissions.values()];
+  pendingMissions.clear();
+  for (const scope of batch) {
+    await active.admin.query(
+      `INSERT INTO fx_coordinator.missions (id, owner_id, environment, space_id, resource)
+       VALUES ($1, $2, $3, NULL, $4) ON CONFLICT (id) DO NOTHING`,
+      [scope.missionId, scope.ownerId, scope.environment, scope.resource],
+    );
+    await active.admin.query(
+      `INSERT INTO coordinator.missions (id, owner_id, environment, resource, goal, mode, status, budgets, provider)
+       VALUES ($1, $2, $3, $4, 'ledger fixture', 'fixture', 'running', '{}'::jsonb, '{}'::jsonb)
+       ON CONFLICT (id) DO NOTHING`,
+      [scope.missionId, scope.ownerId, scope.environment, scope.resource],
+    );
+  }
+}
+
 export function newScope(
   environment: TestScope['environment'] = 'test',
 ): TestScope {
-  return {
+  const scope = {
     ownerId: `owner-${randomUUID()}`,
     missionId: randomUUID(),
     environment,
     resource: 'checkout',
   };
+  pendingMissions.set(scope.missionId, scope);
+  return scope;
 }
 
 export function sourceRef(scope: TestScope, key: string): SourceRef {
@@ -175,7 +237,7 @@ export async function resetAuthority(admin: pg.Pool) {
      UPDATE fx_checkout.config_collection SET version = 1`,
   );
   await admin.query(
-    `TRUNCATE fx_coordinator.tasks, fx_coordinator.task_attempts,
+    `TRUNCATE fx_coordinator.missions, fx_coordinator.tasks, fx_coordinator.task_attempts,
               fx_coordinator.task_outputs, fx_coordinator.action_intents`,
   );
 }
@@ -303,4 +365,98 @@ export async function backendPid(client: pg.PoolClient): Promise<number> {
     'SELECT pg_backend_pid() AS pid',
   );
   return rows[0].pid;
+}
+
+/** The mission scope of a TestScope (ledger fixtures have no coordinator.missions row). */
+export function missionScope(scope: TestScope) {
+  return {
+    ownerId: scope.ownerId,
+    environment: scope.environment,
+    spaceId: null,
+    resource: scope.resource,
+  };
+}
+
+/**
+ * assertCurrent options bound to the mission the receipt was registered for:
+ * the scope check is mandatory (F4), and these fixtures have no
+ * coordinator.missions row, so the scope of the receipt's own source is
+ * claimed alongside the mission id.
+ */
+export async function inMission<T extends object>(
+  receiptIds: string | string[],
+  opts: T,
+) {
+  await flushMissions();
+  const { rows } = await active!.admin.query<{
+    mission_id: string;
+    owner_id: string;
+    environment: string;
+    space_id: string | null;
+    resource: string;
+  }>(
+    `SELECT r.mission_id, s.owner_id, s.environment, s.space_id, s.resource
+       FROM ledger.observation_receipts r JOIN ledger.sources s ON s.id = r.source_id
+      WHERE r.id = ANY($1::uuid[]) LIMIT 1`,
+    [Array.isArray(receiptIds) ? receiptIds : [receiptIds]],
+  );
+  // an unknown id is rejected before the scope check; any mission will do
+  const row = rows[0] ?? {
+    mission_id: randomUUID(),
+    owner_id: 'none',
+    environment: 'test',
+    space_id: null,
+    resource: 'checkout',
+  };
+  return {
+    ...opts,
+    missionId: row.mission_id,
+    scope: {
+      ownerId: row.owner_id,
+      environment: row.environment as 'dev' | 'test' | 'eval',
+      spaceId: row.space_id,
+      resource: row.resource,
+    },
+  };
+}
+
+/** registerObservation against the default schemas with a recording event sink. */
+export const registerReal = (
+  client: pg.PoolClient,
+  input: Parameters<typeof registerObservation>[1],
+) => registerObservation(client, input, { ledger: REAL });
+
+/** Writes a mission row (both fixture and default coordinator schemas). */
+export async function ensureMission(
+  missionId: string,
+  scope: {
+    ownerId: string;
+    environment: 'dev' | 'test' | 'eval';
+    spaceId?: string | null;
+    resource: string;
+  },
+) {
+  await active!.admin.query(
+    `INSERT INTO fx_coordinator.missions (id, owner_id, environment, space_id, resource)
+     VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING`,
+    [
+      missionId,
+      scope.ownerId,
+      scope.environment,
+      scope.spaceId ?? null,
+      scope.resource,
+    ],
+  );
+  await active!.admin.query(
+    `INSERT INTO coordinator.missions (id, owner_id, environment, space_id, resource, goal, mode, status, budgets, provider)
+     VALUES ($1, $2, $3, $4, $5, 'ledger fixture', 'fixture', 'running', '{}'::jsonb, '{}'::jsonb)
+     ON CONFLICT (id) DO NOTHING`,
+    [
+      missionId,
+      scope.ownerId,
+      scope.environment,
+      scope.spaceId ?? null,
+      scope.resource,
+    ],
+  );
 }

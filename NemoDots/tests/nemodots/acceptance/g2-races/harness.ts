@@ -81,6 +81,11 @@ import type {
 
 process.env.NEMODOTS_TEST_HOOKS = '1';
 
+// Every production registration needs the coordinator event sink
+// (ledger/options.ts requireEventSink, W2-R5): it writes the per-mission
+// invalidation.recorded events inside the registration transaction.
+const LEDGER_EVENTS = { ledger: { events: createEventSink() } };
+
 export const PORTS = { checkout: 4640, app: 4641 } as const;
 export const REDIS_DB = 3;
 export { barrier, latch, withTimeout, SETUP_CONFIG, ADMISSION_CASES };
@@ -422,9 +427,13 @@ const TASK_BUDGET = { maxIterations: 8, maxTokens: 20_000, maxChildren: 4 };
 
 async function requireEntries(need: readonly Need[]) {
   const wanted: [Need, string, string[]][] = [
-    ['actions', 'actions/index.ts', ['createActionAdmission']],
+    ['actions', 'actions/index.ts', ['createActions']],
+    ['actions', 'actions/dispatch.ts', ['effectKey']],
+    ['actions', 'actions/dispatch.ts', ['fenceKey']],
     ['hooks', 'actions/test-hooks.ts', ['setHook', 'clearHooks']],
-    ['cacheKey', 'actions/dispatch.ts', ['cacheKey']],
+    // The flush clears the checkout's own cache keys, so planted keys use the
+    // checkout's key format (sandbox/checkout-cache.ts), not an actions name.
+    ['cacheKey', 'sandbox/checkout-cache.ts', ['cacheKey']],
     ['watcher', 'watcher/watcher.ts', ['createWatcher']],
     [
       'control',
@@ -531,12 +540,19 @@ async function build(c: {
     return () => (p ??= entry<T>(file, names));
   };
   const loadActions = lazy<(d: Rec) => Rec>('actions/index.ts', [
-    'createActionAdmission',
+    'createActions',
   ]);
-  const loadCacheKey = lazy<(p: string, ns: string, n: string) => string>(
+  const loadEffectKey = lazy<(p: string, actionId: string) => string>(
     'actions/dispatch.ts',
-    ['cacheKey'],
+    ['effectKey'],
   );
+  const loadCacheKey = async () => {
+    const make = await entry<
+      (p: string, ns: string, schema: number, n: string) => string
+    >('sandbox/checkout-cache.ts', ['cacheKey']);
+    // schema 1: any schema suffix lies under the namespace prefix the flush scans
+    return (p: string, ns: string, n: string) => make(p, ns, 1, n);
+  };
   const loadWatcher = lazy<(d: Rec) => Promise<Rec> | Rec>(
     'watcher/watcher.ts',
     ['createWatcher'],
@@ -664,19 +680,24 @@ async function build(c: {
       'SELECT version FROM checkout.config_collection',
     );
     const res = await tx(app, (cl) =>
-      registerObservation(cl, {
-        source: {
-          key: `checkout.config/${key}`,
-          sourceType: 'controlled_config',
-          authority: 'controlled',
-          scope,
-        },
-        trust: 'controlled_authority',
-        normalizedValue: { value: cur.value },
-        provenance,
-        collectionRevision: Number(coll.rows[0].version),
-        claimed: { sourceRevision: cur.version },
-      } as unknown as RegisterObservationInput),
+      registerObservation(
+        cl,
+        {
+          source: {
+            key: `checkout.config/${key}`,
+            sourceType: 'controlled_config',
+            authority: 'controlled',
+            scope,
+          },
+          trust: 'controlled_authority',
+          // ARCHITECTURE 9.4 / D10: a config member's normalized value is { key, value, version }.
+          normalizedValue: { key, value: cur.value, version: cur.version },
+          provenance,
+          collectionRevision: Number(coll.rows[0].version),
+          claimed: { sourceRevision: cur.version },
+        } as unknown as RegisterObservationInput,
+        LEDGER_EVENTS as never,
+      ),
     );
     keep(`member:${key}`, res.receipt, `checkout.config/${key}`);
     return res.receipt.id;
@@ -688,20 +709,24 @@ async function build(c: {
   ) => {
     const key = label === 'health' ? 'checkout.health' : 'redis.stats';
     const res = await tx(app, (cl) =>
-      registerObservation(cl, {
-        source: {
-          key,
-          sourceType:
-            label === 'health' ? 'observed_endpoint' : 'observed_store',
-          authority: 'observed',
-          scope,
-        },
-        trust: 'observed_tool',
-        normalizedValue:
-          value ?? (label === 'health' ? { status: 'ok' } : { keys: 0 }),
-        provenance,
-        observedAt: o?.observedAt ?? null,
-      } as unknown as RegisterObservationInput),
+      registerObservation(
+        cl,
+        {
+          source: {
+            key,
+            sourceType:
+              label === 'health' ? 'observed_endpoint' : 'observed_store',
+            authority: 'observed',
+            scope,
+          },
+          trust: 'observed_tool',
+          normalizedValue:
+            value ?? (label === 'health' ? { status: 'ok' } : { keys: 0 }),
+          provenance,
+          observedAt: o?.observedAt ?? null,
+        } as unknown as RegisterObservationInput,
+        LEDGER_EVENTS as never,
+      ),
     );
     keep(label, res.receipt, key);
     return res.receipt.id;
@@ -713,17 +738,21 @@ async function build(c: {
   // distinct source key so it never supersedes the primary mission's receipts.
   const other = await seedMission();
   const foreign = await tx(app, (cl) =>
-    registerObservation(cl, {
-      source: {
-        key: 'checkout.metrics',
-        sourceType: 'observed_endpoint',
-        authority: 'observed',
-        scope: missionScope(other),
-      },
-      trust: 'observed_tool',
-      normalizedValue: { p95: 120 },
-      provenance,
-    } as unknown as RegisterObservationInput),
+    registerObservation(
+      cl,
+      {
+        source: {
+          key: 'checkout.metrics',
+          sourceType: 'observed_endpoint',
+          authority: 'observed',
+          scope: missionScope(other),
+        },
+        trust: 'observed_tool',
+        normalizedValue: { p95: 120 },
+        provenance,
+      } as unknown as RegisterObservationInput,
+      LEDGER_EVENTS as never,
+    ),
   );
   keep('foreign', foreign.receipt, 'checkout.metrics');
 
@@ -891,11 +920,16 @@ async function build(c: {
     rc.on('error', () => {});
     await rc.connect();
     c.cleanup.push(() => rc.destroy());
+    // actions/deps.ts ActionsDeps: the same support validator and event sink
+    // the coordinator deps use, an app-role pool and a Redis client through
+    // the fault proxy.
     const api = factory({
       pool,
+      validator: deps.supportValidator,
+      events: deps.events,
       redis: rc,
       redisPrefix: prefix,
-      dispatcherLeaseMs: 30_000,
+      dispatchLeaseMs: 30_000,
     }) as Actions;
     return { api, pool, redis: rc };
   };
@@ -1080,6 +1114,7 @@ async function build(c: {
   };
 
   let watcherCache: Rec | null = null;
+  const watcherLog: Rec[] = [];
   let controlCache: Rec | null = null;
   const w: World = {
     names: { db: c.db, prefix },
@@ -1325,7 +1360,11 @@ async function build(c: {
     },
     async headReceipt(sourceKey) {
       const r = await admin.query(
-        `SELECT r.* FROM ledger.observation_receipts r JOIN ledger.sources s ON s.id=r.source_id
+        // 0002 stores provenance as columns; expose it in the contract's shape
+        // (ObservationReceipt.provenance) for the self-write assertions.
+        `SELECT r.*, jsonb_build_object('kind', r.provenance_kind,
+                  'causedByActionId', r.caused_by_action_id, 'selfWrite', r.self_write) AS provenance
+           FROM ledger.observation_receipts r JOIN ledger.sources s ON s.id=r.source_id
           WHERE s.key=$1 AND s.environment='test' ORDER BY r.source_revision DESC LIMIT 1`,
         [sourceKey],
       );
@@ -1354,12 +1393,13 @@ async function build(c: {
       return Number(await c.redis.exists(keys));
     },
     async markerPresent(actionId) {
-      for await (const ks of c.redis.scanIterator({
-        MATCH: `${prefix}:*${actionId}*`,
-        COUNT: 200,
-      }))
-        if (ks.length) return true;
-      return false;
+      // actions/dispatch.ts: the effect marker holds the dispatch fence once the
+      // effect ran, or 'fence_newer' when the script refused it. Only the first
+      // records an applied effect.
+      const marker = await c.redis.get(
+        (await loadEffectKey())(prefix, actionId),
+      );
+      return marker !== null && marker !== 'fence_newer';
     },
     async fenceKeys() {
       const out: string[] = [];
@@ -1377,19 +1417,42 @@ async function build(c: {
       );
     },
     async watcher() {
+      // watcher/types.ts WatcherDeps. `intents` (SelfWriteIntentPort) is left
+      // out on purpose: no production adapter exists yet and the verifier does
+      // not supply its own, so self-writes classify as `none` until one lands.
+      // The reader refuses: this suite runs no checkout, and watcherPoll only
+      // passes controlled sources, which the watcher reads from the authority.
       const factory = await loadWatcher();
       const recovery = createRecovery(deps);
+      const control = await w.control();
       return (watcherCache ??= await factory({
         pool: app,
-        redis: c.redis,
-        redisPrefix: prefix,
+        reader: {
+          read: async (key: string) => {
+            throw new Error(`g2 polls controlled sources only (asked ${key})`);
+          },
+        },
         recovery,
-        clock: () => new Date(),
+        missions: { pause: (id: string) => control.pause(id) },
+        intervalMs: 60_000,
+        ledger: LEDGER_EVENTS.ledger,
+        log: (entry: Rec) => watcherLog.push(entry),
       }));
     },
     async watcherPoll() {
+      // Watcher.pass: one pass regardless of leadership, over the controlled
+      // sources the ledger knows (members and the collection).
       const wt = await w.watcher();
-      await wt.pollOnce();
+      const keys = (
+        await admin.query(
+          "SELECT DISTINCT key FROM ledger.sources WHERE authority = 'controlled'",
+        )
+      ).rows.map((r) => r.key as string);
+      const stats = await wt.pass({ keys });
+      if (stats.errors > 0)
+        throw new Error(
+          `watcher pass reported ${stats.errors} error(s): ${JSON.stringify(watcherLog.slice(-stats.errors))}`,
+        );
     },
     async control() {
       const factory = await loadControl();

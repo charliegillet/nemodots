@@ -6,6 +6,8 @@ import type { BlockReason, PgClient, ReceiptId } from '../contracts/index.js';
 import { addEdges, type AddEdgesResult } from './edges.js';
 import type { LedgerOptions } from './options.js';
 import { getReceiptRows } from './receipt-store.js';
+import type { MissionScope } from './scope.js';
+import { assertCurrent } from './support.js';
 import { liveVersion } from './sources.js';
 
 export async function recordReadSet(
@@ -15,8 +17,20 @@ export async function recordReadSet(
     taskId: string;
     attemptId: string;
     receiptIds: readonly string[];
+    /** Optional extra check against the stored mission scope. */
+    scope?: MissionScope;
   },
+  options?: LedgerOptions,
 ): Promise<AddEdgesResult> {
+  // A read set may only rest on receipts that are current right now; the share
+  // locks taken here make a concurrent retirement or supersession wait until
+  // this transaction's edges are committed (and so inside its closure).
+  await assertCurrent(
+    client,
+    input.receiptIds as readonly ReceiptId[],
+    { lockMode: 'share', missionId: input.missionId, scope: input.scope },
+    options,
+  );
   const attempt = {
     kind: 'attempt' as const,
     id: input.attemptId,

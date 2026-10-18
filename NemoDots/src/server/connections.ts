@@ -8,6 +8,7 @@ import type {
   ConnectionTool,
 } from '../shared/connection-types.js';
 import type { ConnectionStore } from './connection-store.js';
+import { getActivePolicy } from './nemodots/interception/active-policy.js';
 const MAX_TOOLS = 100;
 const MAX_SCHEMA_BYTES = 16_000;
 const MAX_RESULT_CHARS = 20_000;
@@ -283,6 +284,13 @@ export class ConnectionService {
     args: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<ConnectionActionResult> {
+    // The module-level policy covers per-turn instances too (finding I5).
+    const refusal = getActivePolicy().connectionCall({
+      dotId: exposed.connection.dotId,
+      connectionId: exposed.connection.id,
+      tool: exposed.tool.name,
+    });
+    if (refusal) return { isError: true, text: refusal };
     try {
       return await this.session(
         this.store.credentials(exposed.connection.id),

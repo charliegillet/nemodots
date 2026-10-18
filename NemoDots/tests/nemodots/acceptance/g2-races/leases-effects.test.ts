@@ -25,7 +25,6 @@ import {
   NS,
   POOL,
   SETUP_CONFIG,
-  TIMEOUT,
   authSummary,
   barrier,
   checkOutcome,
@@ -432,7 +431,46 @@ describe('G2 leases, duplicates, recovery: cases 9-12, 15', () => {
       );
     });
 
-    it('G2-09 takeover then propose/commit: the old author token cannot propose, a stale dispatch fence cannot commit, and nothing is written', async () => {
+    it('G2-09 ADM-09 an expired author cannot propose; an expired dispatcher cannot commit with its own fence; nothing is written', async () => {
+      await withWorld(async (w) => {
+        const base = await w.snapshotConfig();
+        // expire_author_lease, then the stale author proposes (FenceError, no intent)
+        const author = await w.newAttempt('database_specialist', {
+          reads: ['member:db.pool_max', 'health'],
+        });
+        await w.modelCallFor(author, 'tc-1');
+        await w.expireLease(author.ctx.attemptId);
+        const stale = await settle(
+          w.propose({ ...w.poolSpec('tc-1'), att: author }),
+        );
+        expect(
+          threwFence(stale),
+          'err' in stale ? errText(stale.err) : '',
+        ).toBe(true);
+        // a live author proposes I; d1 admits; d1's lease expires; d1 commits with its own fence
+        const i = await w.proposeAdmit(w.poolSpec('tc-2'));
+        await w.expireDispatcherLease(i.id);
+        const late = await settle(w.actions.commit(i.id, fence(i)));
+        expect(
+          threwDispatchFence(late),
+          'err' in late ? errText(late.err) : 'returned',
+        ).toBe(true);
+        expect(
+          (
+            await w.admin.query(
+              'SELECT count(*)::int n FROM coordinator.action_intents WHERE tool_call_id=$1',
+              ['tc-1'],
+            )
+          ).rows[0].n,
+        ).toBe(0);
+        await checkOutcome(w, oracleOutcome('ADM-09'), {
+          intents: { I: i.id },
+          base,
+        });
+      });
+    });
+
+    it('G2-09b takeover then propose/commit: the old author token cannot propose, a stale dispatch fence cannot commit, and nothing is written', async () => {
       await withWorld(async (w) => {
         const stale = await w.newAttempt('database_specialist', {
           reads: ['member:db.pool_max', 'health'],
@@ -482,7 +520,7 @@ describe('G2 leases, duplicates, recovery: cases 9-12, 15', () => {
   });
 
   describe('G2-10 duplicate delivery', () => {
-    it('G2-10a two simultaneous identical commits from two independent instances at the lock boundary: one effect, one receipt, the same intent returned to both', async () => {
+    it('G2-10a ADM-10 two simultaneous identical commits from two independent instances at the lock boundary: one effect, one receipt, the same intent returned to both', async () => {
       await withWorld(async (w) => {
         const base = await w.snapshotConfig();
         const i = await w.proposeAdmit(w.poolSpec('tc-1'));
@@ -546,7 +584,7 @@ describe('G2 leases, duplicates, recovery: cases 9-12, 15', () => {
   });
 
   describe('G2-11 crash recovery distinguishes uncommitted, committed and unknown', () => {
-    it('G2-11a crash after admission: the lease expires, a NEW instance re-claims and commits once; the old dispatcher’s fence is dead', async () => {
+    it('G2-11a ADM-11a crash after admission: the lease expires, a NEW instance re-claims and commits once; the old dispatcher’s fence is dead', async () => {
       await withWorld(async (w) => {
         const base = await w.snapshotConfig();
         const i = await w.proposeAdmit(w.poolSpec('tc-1')); // dispatcher-1 "crashes" here
@@ -641,14 +679,18 @@ describe('G2 leases, duplicates, recovery: cases 9-12, 15', () => {
 
     it('G2-11c-flush crash after the commit (outbox row pending), before dispatch: committed with no Redis effect; a new instance dispatches exactly once, a repeat dispatch does nothing', async () => {
       await withWorld(async (w) => {
-        const { i, keys } = await committedFlush(w);
+        // actions/commit.ts fires after_commit_before_dispatch at the end of
+        // commit(), once the transaction committed: arm the crash before the
+        // commit (lead ruling 2026-10-18; same crash point, assertions unchanged).
+        const keys = await w.plantCache(4);
+        const i = await w.proposeAdmit(w.flushSpec('tc-f'));
+        crashAt(w, 'after_commit_before_dispatch');
+        const out = await settle(w.actions.commit(i.id, fence(i)));
         const outbox = (await w.outboxFor(i.id)).length;
         expect(
           outbox,
           'the commit left a pending outbox row',
         ).toBeGreaterThanOrEqual(1);
-        crashAt(w, 'after_commit_before_dispatch');
-        const out = await settle(w.actions.dispatch(i.id, fence(i)));
         expect('err' in out && crashed(out.err)).toBe(true);
         expect(w.hits('after_commit_before_dispatch')).toBe(1);
         expect((await w.intent(i.id)).status).toBe('committed');
@@ -707,7 +749,7 @@ describe('G2 leases, duplicates, recovery: cases 9-12, 15', () => {
   });
 
   describe('G2-12 lost response after a real external effect', () => {
-    it('G2-12a the reply is lost after the Redis effect: outcome_unknown until a new instance reconciles from the marker; never re-applied', async () => {
+    it('G2-12a ADM-12a the reply is lost after the Redis effect: outcome_unknown until a new instance reconciles from the marker; never re-applied', async () => {
       await withWorld(async (w) => {
         const base = await w.snapshotConfig();
         const { i, keys } = await committedFlush(w, 'tc-f', 3);
@@ -735,7 +777,7 @@ describe('G2 leases, duplicates, recovery: cases 9-12, 15', () => {
       });
     });
 
-    it('G2-12b the request never reached Redis: no effect happened; a new instance’s reconcile settles failed(effect_not_applied) and does not re-run it', async () => {
+    it('G2-12b ADM-12b the request never reached Redis: no effect happened; a new instance’s reconcile settles failed(effect_not_applied) and does not re-run it', async () => {
       await withWorld(async (w) => {
         const base = await w.snapshotConfig();
         const { i, keys } = await committedFlush(w, 'tc-f', 3);
@@ -807,12 +849,12 @@ describe('G2 leases, duplicates, recovery: cases 9-12, 15', () => {
     });
   });
 
-  it('G2-15 / LS-5 separate lease lifecycles: a completed author’s proposal executes under a new dispatch lease; an expired author cannot propose; an expired dispatcher cannot commit and a re-claim has a higher fence', async () => {
+  it('G2-15 / LS-5 ADM-15 separate lease lifecycles: a completed author’s proposal is admitted, its expired dispatcher cannot commit, a re-claim with a higher fence commits it once; an expired author cannot propose', async () => {
     await withWorld(async (w) => {
-      const v1 = (await w.cfg(POOL)).version;
+      const base = await w.snapshotConfig();
       const author = await w.newAttempt('database_specialist');
       const i = await w.propose({ ...w.poolSpec('tc-1'), att: author });
-      // the author finishes: its authoring lease is over (real publication)
+      // complete_author_attempt: the author finishes (real publication)
       await publishOutput(w.deps, author.ctx, {
         kind: 'handoff',
         content: { done: true },
@@ -821,16 +863,35 @@ describe('G2 leases, duplicates, recovery: cases 9-12, 15', () => {
       expect((await leaseRows(w, [author.ctx.attemptId]))[0].status).toBe(
         'published',
       );
+      // d1 admits, its dispatch lease expires, d1's commit is refused
       const admitted = await w.actions.admit(i.id, 'dispatcher-1');
-      await w.actions.commit(i.id, fence(admitted));
-      expect((await w.intent(i.id)).status).toBe('committed');
+      await w.expireDispatcherLease(i.id);
+      expect(
+        threwDispatchFence(
+          await settle(w.actions.commit(i.id, fence(admitted))),
+        ),
+      ).toBe(true);
+      expect((await w.intent(i.id)).status).toBe('admitted');
+      expect(await w.actionRows()).toBe(0);
+      // d2 re-claims with a higher fence and commits exactly once
+      const r = await w.actions.reclaim(i.id, 'dispatcher-2');
+      expect(fence(r)).toBeGreaterThan(fence(admitted));
+      await w.actions.commit(i.id, fence(r));
       expect(await w.cfg(POOL)).toMatchObject({
-        version: v1 + 1,
+        version: base[POOL].version + 1,
         value: 12,
         causedBy: i.id,
       });
+      await checkOutcome(w, oracleOutcome('ADM-15'), {
+        intents: { I: i.id },
+        base,
+      });
 
-      // an author whose lease expired cannot propose
+      // LS-5 author half: an author whose lease expired cannot propose. The
+      // commit moved db.pool_max, so register the new revision first: the
+      // expired author must read current evidence, or the read itself is
+      // refused (stale_pending_observation) before the fence is ever checked.
+      await w.registerMember(POOL);
       const expired = await w.newAttempt('database_specialist', {
         reads: ['member:db.pool_max', 'health'],
       });
@@ -849,36 +910,7 @@ describe('G2 leases, duplicates, recovery: cases 9-12, 15', () => {
           )
         ).rows[0].n,
       ).toBe(0);
-
-      // an expired dispatcher cannot commit; a re-claim has a higher fence and can
-      const j = await w.proposeAdmit(
-        w.setSpec('tc-3', TIMEOUT, 120, [
-          'member:db.statement_timeout_ms',
-          'health',
-        ]),
-      );
-      await w.expireDispatcherLease(j.id);
-      expect(
-        threwDispatchFence(await settle(w.actions.commit(j.id, fence(j)))),
-      ).toBe(true);
-      expect((await w.intent(j.id)).status).toBe('admitted');
-      expect((await w.cfg(TIMEOUT)).value).toBe(SETUP_CONFIG[TIMEOUT]);
       expect(await w.actionRows()).toBe(1);
-      const r = await w.actions.reclaim(j.id, 'dispatcher-2');
-      expect(fence(r)).toBeGreaterThan(fence(j));
-      expect(
-        threwDispatchFence(await settle(w.actions.commit(j.id, fence(j)))),
-      ).toBe(true);
-      await w.actions.commit(j.id, fence(r));
-      expect((await w.intent(j.id)).status).toBe('committed');
-      expect(await w.cfg(TIMEOUT)).toMatchObject({
-        value: 120,
-        causedBy: j.id,
-      });
-      expect(await w.actionRows()).toBe(2);
-      expect(
-        (await authSummary(w, j.id)).filter((x) => x.decision === 'committed'),
-      ).toHaveLength(1);
     });
   });
 });
