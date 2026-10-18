@@ -115,7 +115,7 @@ export async function evaluatePredicates(
 
   if (mission.status !== 'running')
     return early('mission_not_running', `mission is ${mission.status}`);
-  if (false)
+  if (mission.generation !== intent.generation)
     return early(
       'generation_mismatch',
       `mission generation ${mission.generation}, intent generation ${intent.generation}`,

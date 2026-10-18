@@ -5,11 +5,13 @@ import { describe, expect, it } from 'vitest';
 import {
   ActionIntentSchema,
   AuthorizationSchema,
+  EventPayloadSchema,
   ResultReceiptSchema,
   digest,
 } from '../../../../src/server/nemodots/contracts/index.js';
 import { inspectAction } from '../../../../src/server/nemodots/actions/index.js';
 import {
+  admitAndCommit,
   authorizations,
   configState,
   countRows,
@@ -129,6 +131,35 @@ describe('propose -> admit -> commit', () => {
         [world.missionId],
       );
       expect(rows.map((r) => r.kind)).toEqual(['action.proposed']);
+    });
+  });
+
+  it('the events of the whole life are typed and in commit order', async () => {
+    await withWorld(async (world) => {
+      const s = await scenario(world);
+      const proposed = await proposePool(world, s, 20);
+      await admitAndCommit(world, proposed.id);
+      const { rows } = await world.admin.query<{
+        id: string;
+        kind: string;
+        payload: { kind: string; stage?: string; decision?: string };
+      }>(
+        'SELECT id, kind, payload FROM coordinator.events WHERE mission_id = $1 ORDER BY id',
+        [world.missionId],
+      );
+      expect(rows.map((r) => r.kind)).toEqual([
+        'action.proposed',
+        'action.decided',
+        'action.decided',
+        'action.committed',
+      ]);
+      expect(
+        rows
+          .filter((r) => r.kind === 'action.decided')
+          .map((r) => `${r.payload.stage}:${r.payload.decision}`),
+      ).toEqual(['admission:admitted', 'commit:committed']);
+      for (const row of rows)
+        expect(EventPayloadSchema.safeParse(row.payload).success).toBe(true);
     });
   });
 });

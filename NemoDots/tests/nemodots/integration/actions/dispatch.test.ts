@@ -412,6 +412,46 @@ describe('flush_cache_namespace', () => {
   });
 });
 
+describe('the port', () => {
+  it('dispatch(actionId, fence) accepts the stored fence and refuses a stale one', async () => {
+    await withWorld(
+      async (world) => {
+        await seedCache(world, 'catalog-a', ['p1']);
+        const { intent } = await committedFlush(world);
+        const fence = intent.dispatch!.fence;
+        await expect(
+          world.service.dispatch(intent.id, fence + 1),
+        ).rejects.toMatchObject({
+          name: 'DispatchFenceError',
+          reason: 'fence_mismatch',
+        });
+        expect(await cacheKeys(world, 'catalog-a')).toHaveLength(1);
+        const done = await world.service.dispatch(intent.id, fence);
+        expect(done.status).toBe('verified');
+        expect(await cacheKeys(world, 'catalog-a')).toEqual([]);
+        // The dispatcher that went first rotated the fence; the old one is stale.
+        await expect(
+          world.service.dispatch(intent.id, fence),
+        ).resolves.toMatchObject({ status: 'verified' });
+      },
+      { redis: true },
+    );
+  });
+
+  it('reconcile of an uncommitted flush reports uncommitted and changes nothing', async () => {
+    await withWorld(
+      async (world) => {
+        const s = await flushScenario(world);
+        const proposed = await proposeFlush(world, s);
+        const result = await reconcileIntentDetailed(world.deps, proposed.id);
+        expect(result.finding).toBe('uncommitted');
+        expect(result.intent.status).toBe('proposed');
+      },
+      { redis: true },
+    );
+  });
+});
+
 describe('a lost response after a real effect (gate 2 item 12)', () => {
   it('the call throws after the script ran: outcome_unknown, then reconcile reads the marker and no second effect happens', async () => {
     let lose = true;
@@ -449,6 +489,49 @@ describe('a lost response after a real effect (gate 2 item 12)', () => {
         redis: true,
         wrapRedis: (client) => ({
           get: (key) => client.get(key),
+          set: (key, value, options) => client.set(key, value, options),
+          async eval(script, options) {
+            const reply = await client.eval(script, options);
+            if (lose) throw new Error('connection reset after the script ran');
+            return reply;
+          },
+        }),
+      },
+    );
+  });
+
+  it('a marker that lands between reconcile’s read and its tombstone write is honoured (the tombstone is SET NX)', async () => {
+    let lose = true;
+    let staleReads = 1;
+    await withWorld(
+      async (world) => {
+        await seedCache(world, 'catalog-a', ['p1', 'p2']);
+        const { intent } = await committedFlush(world);
+        const done = await dispatchIntentDetailed(world.deps, intent.id, 'd');
+        expect(done.disposition).toBe('outcome_unknown');
+        expect(await redisValue(world, `effect:${intent.id}`)).toMatch(
+          /^applied:/,
+        );
+        lose = false;
+        // The first read reports "no marker" (as if it ran before the script landed).
+        const reconciled = await reconcileIntentDetailed(world.deps, intent.id);
+        expect(staleReads).toBe(0);
+        expect(reconciled.finding).toBe('effect_applied');
+        expect(reconciled.intent.status).toBe('verified');
+        expect(await redisValue(world, `effect:${intent.id}`)).toMatch(
+          /^applied:/,
+        );
+      },
+      {
+        redis: true,
+        wrapRedis: (client) => ({
+          async get(key) {
+            if (!lose && staleReads > 0) {
+              staleReads -= 1;
+              return null;
+            }
+            return client.get(key);
+          },
           set: (key, value, options) => client.set(key, value, options),
           async eval(script, options) {
             const reply = await client.eval(script, options);

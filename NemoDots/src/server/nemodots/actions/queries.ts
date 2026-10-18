@@ -56,10 +56,17 @@ export function createIntentReader(): IntentReader {
     },
     async committedEffects(client, missionId) {
       const { rows } = await client.query<{ id: string }>(
-        `SELECT id FROM coordinator.action_intents
-          WHERE mission_id = $1
-            AND status IN ('committed', 'dispatched', 'verified', 'outcome_unknown')
-          ORDER BY committed_at, id`,
+        // A set_config is a committed effect once its commit receipt exists,
+        // whatever happened to its verification afterwards; a flush is one
+        // only while its effect is (or may be) in Redis.
+        `SELECT i.id FROM coordinator.action_intents i
+          WHERE i.mission_id = $1
+            AND ((i.action = 'set_config' AND EXISTS (
+                    SELECT 1 FROM coordinator.result_receipts r
+                     WHERE r.action_id = i.id AND r.outcome = 'committed'))
+              OR (i.action = 'flush_cache_namespace'
+                  AND i.status IN ('committed', 'dispatched', 'verified', 'outcome_unknown')))
+          ORDER BY i.committed_at, i.id`,
         [missionId],
       );
       return rows.map((row) => row.id as ActionId);

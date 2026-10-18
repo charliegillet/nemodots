@@ -162,7 +162,7 @@ export async function proposeIntent(
     ]);
     // 1. author fence, mission share lock, attempt and task FOR UPDATE.
     const { mission, task, attempt } = await lockFencedAttempt(
-      client as never,
+      client,
       context,
       { missionLock: 'share' },
     );

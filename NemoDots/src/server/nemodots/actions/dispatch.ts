@@ -415,12 +415,19 @@ export async function recordVerified(
       [row.id, from],
     );
     if (updated.rows.length !== 1) return null;
-    if (from !== 'dispatched')
+    if (from !== 'dispatched') {
       await insertResultReceipt(client, {
         intent: row,
         outcome: 'dispatched',
         externalEffect: effectDto(facts),
       });
+      buffer.add(row.missionId, {
+        kind: 'action.dispatched',
+        actionId: row.id,
+        scriptResult: facts.scriptResult,
+        deletedCount: facts.deletedCount,
+      });
+    }
     const postcondition = {
       kind: 'observation' as const,
       receiptId: null,

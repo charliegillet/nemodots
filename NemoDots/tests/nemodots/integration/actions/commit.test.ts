@@ -23,7 +23,6 @@ import {
   externalChange,
   historyRows,
   intentRow,
-  memberReceipt,
   proposeCtx,
   proposePool,
   results,

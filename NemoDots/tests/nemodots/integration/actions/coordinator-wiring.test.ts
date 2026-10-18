@@ -241,8 +241,13 @@ describe('queries', () => {
       expect(
         await reader.committedEffects(world.app, world.missionId as never),
       ).toEqual([proposed.id]);
+      // A committed set_config stays a committed effect after a failed verification.
+      await world.service.settleFromHistory(proposed.id, 'failed');
+      expect(
+        await reader.committedEffects(world.app, world.missionId as never),
+      ).toEqual([proposed.id]);
       expect(await reader.statuses(world.app, [proposed.id])).toEqual([
-        { id: proposed.id, status: 'committed' },
+        { id: proposed.id, status: 'failed' },
       ]);
     });
   });
