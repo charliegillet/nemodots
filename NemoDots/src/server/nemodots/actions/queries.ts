@@ -1,11 +1,12 @@
 // Read side and the queue operations of the action boundary.
-import type {
-  ActionId,
-  ActionIntent,
-  Authorization,
-  MissionId,
-  PgClient,
-  ResultReceipt,
+import {
+  LIVE_STATUSES,
+  type ActionId,
+  type ActionIntent,
+  type Authorization,
+  type MissionId,
+  type PgClient,
+  type ResultReceipt,
 } from '../contracts/index.js';
 import type { IntentReader } from '../coordinator/types.js';
 import { withTransaction } from '../db/tx.js';
@@ -122,6 +123,15 @@ export function createIntentReader(): IntentReader {
             AND status IN ('committed', 'dispatched', 'verified', 'outcome_unknown')
           ORDER BY id`,
         [missionId],
+      );
+      return rows.map((row) => row.id as ActionId);
+    },
+    async liveIntents(client, missionId) {
+      const { rows } = await client.query<{ id: string }>(
+        `SELECT id FROM coordinator.action_intents
+          WHERE mission_id = $1 AND status = ANY($2::text[])
+          ORDER BY id`,
+        [missionId, [...LIVE_STATUSES]],
       );
       return rows.map((row) => row.id as ActionId);
     },

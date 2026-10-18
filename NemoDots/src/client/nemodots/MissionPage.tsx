@@ -190,6 +190,9 @@ function MissionDetail({
         receipts={state.receipts}
         probe={state.probe}
         acceptanceReceiptId={state.mission?.acceptanceReceiptId ?? null}
+        mission={state.mission}
+        invalidations={state.invalidations}
+        tasks={state.tasks}
         onChanged={() => void refresh()}
       />
       <TelemetryPanel

@@ -227,42 +227,52 @@ export function createToolExecutor(
     await deps.coordinator.markWaiting(context);
     const pollMs = deps.config.waitPollMs ?? 250;
     const deadline = Date.now() + (deps.config.waitTimeoutMs ?? 120_000);
-    for (;;) {
-      await helpers.checkpoint();
-      const status = await deps.coordinator.resumeFromWaiting(context);
-      if (status.allTerminal) {
-        const outputs = await deps.reads.outputsOf(
-          context,
-          status.children.map((child) => child.id),
-        );
-        const vector = unionDependencyVectors(
-          ...outputs.filter((o) => o.usable).map((o) => o.dependencyVector),
-        );
-        return done(
-          {
-            allTerminal: true,
-            children: outputs.map((child) => ({
-              taskId: child.taskId,
+    // The wait runs PARKED: it holds no worker slot, so the children it waits
+    // for (and their own children) can use the capacity this attempt would
+    // otherwise sit on. The attempt stays leased, fenced and drift-checked
+    // (checkpoint below), and takes a slot again before it continues. Test
+    // doubles without a host run the wait in place.
+    const park =
+      helpers.parked?.bind(helpers) ?? (<T>(wait: () => Promise<T>) => wait());
+    return park(async () => {
+      for (;;) {
+        await helpers.checkpoint();
+        const status = await deps.coordinator.resumeFromWaiting(context);
+        if (status.allTerminal) {
+          // fresh reads of what the children published, now
+          const outputs = await deps.reads.outputsOf(
+            context,
+            status.children.map((child) => child.id),
+          );
+          const vector = unionDependencyVectors(
+            ...outputs.filter((o) => o.usable).map((o) => o.dependencyVector),
+          );
+          return done(
+            {
+              allTerminal: true,
+              children: outputs.map((child) => ({
+                taskId: child.taskId,
+                role: child.role,
+                status: child.status,
+                usable: child.usable,
+                output: child.usable ? child.text : null,
+              })),
+            },
+            vector,
+          );
+        }
+        if (Date.now() >= deadline || helpers.signal.aborted)
+          return done({
+            allTerminal: false,
+            children: status.children.map((child) => ({
+              taskId: child.id,
               role: child.role,
               status: child.status,
-              usable: child.usable,
-              output: child.usable ? child.text : null,
             })),
-          },
-          vector,
-        );
+          });
+        await sleep(pollMs, helpers.signal);
       }
-      if (Date.now() >= deadline || helpers.signal.aborted)
-        return done({
-          allTerminal: false,
-          children: status.children.map((child) => ({
-            taskId: child.id,
-            role: child.role,
-            status: child.status,
-          })),
-        });
-      await sleep(pollMs, helpers.signal);
-    }
+    });
     void call;
   }
 

@@ -1139,6 +1139,22 @@ function probeFromReceipt(
   };
 }
 
+/**
+ * The earliest admission time: proposedAt + the mission's admission.minAgeMs
+ * (the coordinator defers admission until then). null only when either input
+ * is absent or unreadable.
+ */
+export function admissionNotBeforeOf(
+  proposedAt: string | null | undefined,
+  minAgeMs: number | null | undefined,
+): string | null {
+  if (!proposedAt || typeof minAgeMs !== 'number' || !Number.isFinite(minAgeMs))
+    return null;
+  const proposed = Date.parse(proposedAt);
+  if (!Number.isFinite(proposed)) return null;
+  return new Date(proposed + minAgeMs).toISOString();
+}
+
 function actionFromSnapshot(
   snapshot: MissionSnapshot,
   intent: MissionSnapshot['actions'][number],
@@ -1185,7 +1201,10 @@ function actionFromSnapshot(
     dependencyReceiptIds: intent.dependencyVector.map(
       (entry) => entry.receiptId,
     ),
-    admissionNotBefore: null,
+    admissionNotBefore: admissionNotBeforeOf(
+      intent.proposedAt,
+      snapshot.mission.admission.minAgeMs,
+    ),
     status: intent.status,
     statusEventId: at,
     decisions,

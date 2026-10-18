@@ -714,7 +714,8 @@ export async function collectEvidence(
     elapsedMs: run.elapsedMs,
     mission: (
       await q(
-        `SELECT status, failure_reason, admission_min_age_ms, recovery_scope_rule, started_at, finished_at
+        `SELECT status, failure_reason, admission_min_age_ms, recovery_scope_rule, mode, provider,
+                started_at, finished_at
            FROM coordinator.missions WHERE id = $1`,
       )
     )[0],

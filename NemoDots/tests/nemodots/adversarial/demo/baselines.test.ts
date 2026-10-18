@@ -93,13 +93,21 @@ describe('baseline arms run under the same checks and context (D8)', () => {
           problems.push(
             `${rule} ${title}: ${snap.injected.historyItems.length} transcript items on the first call`,
           );
+        // A replan after a failed acceptance probe answers no invalidation
+        // event (its marker is not an event id); every other repair must
+        // carry the summary of the event it answers.
+        const answers = snap.repair_of?.invalidationEventId;
+        const isEvent = ev.invalidationEvents.some((e) => e.id === answers);
         if (
-          !(snap.injected.invalidationEvents as string[]).includes(
-            snap.repair_of?.invalidationEventId,
-          )
+          isEvent &&
+          !(snap.injected.invalidationEvents as string[]).includes(answers)
         )
           problems.push(
             `${rule} ${title}: the invalidation summary is missing`,
+          );
+        if (!isEvent && snap.kind !== 'replan')
+          problems.push(
+            `${rule} ${title}: a repair that answers no invalidation event`,
           );
       }
       // the same text the model reads: the repair notice and the summary line

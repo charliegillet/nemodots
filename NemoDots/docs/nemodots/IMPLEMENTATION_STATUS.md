@@ -112,7 +112,7 @@ Review findings C1-C16, I1-I14, D1-D10 (ARCHITECTURE.md section 14) are folded i
 
 ## Wave 3 — action boundary, watcher, interception, telemetry, UI foundation
 
-### W3.1 `actions-admission-commit` — status: PASS (own checks; pending C-03 and the W5.3 review)
+### W3.1 `actions-admission-commit` — status: PASS (C-01 to C-13 fixed and adversary-confirmed; W5.2 and W5.3 PASS)
 
 - Owner: ledger-engineer. actionBoundary: **true**.
 - Allowed files: `src/server/nemodots/actions/**`, `src/server/nemodots/db/migrations/0005_actions.ts`, `tests/nemodots/actions/**`, `tests/nemodots/integration/actions/**`.
@@ -126,7 +126,7 @@ Review findings C1-C16, I1-I14, D1-D10 (ARCHITECTURE.md section 14) are folded i
 
 - Update (2026-10-18): F4 (cross-scope support refused: owner/environment/Space/resource; `missionId` required on the `SupportValidator` port; unknown missions and attempts fail closed, with no claimed-scope fallback), F4b (migration `0007_source_space`, source identity includes Space), the self-write lineage, W2-R5 (per-mission `invalidation.recorded` through the required event sink), cross-mission inheritance, G2-13b (compensation against a moved version gives a blocked `I_comp`), the `actions.selfWriteIntents` adapter, ADM-01/04/07 (closure-blocked intents get an immutable Authorization plus `action.decided`), ADM-06c (every payload-domain failure throws `payload_invalid` and stores nothing), C-01 (idempotency also keyed by attempt and tool call id), C-02 (lock order mission FOR SHARE → attempt → task → intent in every action transaction; prelock share-locks missions), C-04/C-05 (`clock_timestamp()` for lease expiry and grants). All landed. Verifier gate 1: 97/97.
 
-### W3.2 `source-watcher` — status: PASS (pending verifier G2-16g re-run)
+### W3.2 `source-watcher` — status: PASS (G2-16g passes; lifecycle 17/17)
 
 - Owner: runtime-engineer. actionBoundary: true.
 - Allowed files: `src/server/nemodots/watcher/**`, `tests/nemodots/watcher/**`, `tests/nemodots/integration/watcher/**`.
@@ -229,6 +229,8 @@ Review findings C1-C16, I1-I14, D1-D10 (ARCHITECTURE.md section 14) are folded i
 
 - Round 2 (2026-10-18): TP-01 fixed (no default provider host); W6.1 hooks added (`recoveryScopeRules`, `teamLayout`); default per-task budget 200,000 via `incidentTeamConfig()`; deferred flushes dispatched on resume; Dot-turn scope per the final ruling. **First live end-to-end pipeline (`changed-evidence` run 2, warmed cache, old readers, ~14 min):** fault observable; one `set_config` proposed, **really admitted, committed (v2→v3) and verified**; investigator→specialist delegation and depth 2 (policy-induced); probe pass; mission succeeded; all 79 calls on the Crusoe host and model. NOT_MET: the dependent change never fired (injector timeout of 300 s from start, shorter than the ~14 min to first proposal; routed to the sandbox owner), so the stale-block disjunction was not observed. The preserved-branch check is being tightened (no new attempt for any structurally independent task; zero calls for those already published). Re-runs on the fixed readers are in progress.
 
+- Round 3 (2026-10-18, fresh instances, fixed readers): **live `healthy` PASS in 82 s** (plan persisted, ≥ 2 workers, zero committed actions, probe pass, succeeded, provider checks pass; no false metrics churn). Live `changed-evidence` FAIL: unfinished at 16 min with no proposal (109 calls, 6 delegated tasks, depth 2). The end state is consistent with worker-slot starvation (demo-adversary defect #2). Acceptance integrity held: the mission reached acceptance once, the independent probe **failed** because the fault was still active, and the mission returned to running. Built-server fix: `findAppRoot()` walks up to `package.json` (`npm start` health is live); the runbook asset copy is still pending.
+
 ### W5.2 `concurrency-adversary` — status: PASS (enumerated races)
 
 - Owner: concurrency-devils-advocate. actionBoundary: **true**.
@@ -281,7 +283,9 @@ Review findings C1-C16, I1-I14, D1-D10 (ARCHITECTURE.md section 14) are folded i
 
 - Round 1 (2026-10-18, runtime-sandbox-engineer in the evaluation-engineer role, claude-sonnet-5-5): unit 138; mutations suite on a real stack catches all six (bypass_final_version_check 15 tests, drop_inherited_edges 51, ignore_fencing 7, accept_duplicate_differing_payloads 5, skip_effect_marker 6, skip_freshness 3); the oracle is import-isolated; each trial's arm is checked from the DB (`ARM_MISMATCH` trials are not scored); Wilson intervals and paired differences; timed-out trials are counted. **Live smoke (1 trial, selective, cache_aware): unresolved at 900 s**, 76 calls, $0.132 at provider prices, no proposal, zero safety violations. Repeated `readset_invalidated` churn after `checkout.metrics` revisions; the W2.3 metrics normalization fix is the blocker. Matched cohort NOT_RUN. The ordinary arm needs `TeamConfig.layout`.
 
-### W6.2 `e2e-browser` — status: IN_PROGRESS
+- **Cohort decision (user, 2026-10-18): matched suite, 3 replicates** (105 trials: 7 scenarios × 5 cells; estimated $14-32 and 18-52 h sequential at `--timeout-s 1800`; trials stay sequential because of shared prefix-cache and latency contamination). **Deferred** until three demo-adversary defects are fixed and one live `changed-evidence` passes: (1) `openInvalidation` does not follow `repairOf` transitively, so a repair aborted by a second invalidation leaves the first event open (ledger engineer); (2) `wait_for_children` holds a worker slot, so a depth-3 chain starves on 2 workers (runtime engineer); (3) `evaluateMission` moves to acceptance while intents are pending (ledger engineer). Paid live runs are paused until then.
+
+### W6.2 `e2e-browser` — status: FAIL (built server broken; fix routed)
 
 - Owner: frontend-engineer. actionBoundary: false.
 - Allowed files: `tests/nemodots/e2e/**`, `vitest.e2e.config.ts`, `docs/nemodots/E2E.md`.
@@ -290,7 +294,9 @@ Review findings C1-C16, I1-I14, D1-D10 (ARCHITECTURE.md section 14) are folded i
 - Acceptance checks: `npm run test:nemodots:e2e` PASS with the stack up (or `BLOCKED: Google Chrome not found` and non-zero exit); screenshots under `.local/<instance>/e2e/` contain no secrets; `check-format` exit 0.
 - Brief: no `@playwright/test`, no browser download. Fixture missions must assert the `FIXTURE` badge; one live smoke runs when the key is present, else BLOCKED. Stop what you start.
 
-### W6.3 `demo-adversary` — status: IN_PROGRESS
+- Round 1 (2026-10-18, frontend-engineer on claude-sonnet-5-5): Playwright as a library with system Chrome on a `ci-e2e` stack. With a hand-patched `dist`, `NEMODOTS_E2E_LIVE=0 npm run test:nemodots:e2e` gave 43 passed, 4 skipped (exit 0) and the live smoke 4/4; the secret scan of 104 files found 0 hits. **HIGH, in the integration engineer's files:** `npm run build` omits `team/runbooks/*.md`, so a built server fails every mission at the planner, and `APP_ROOT` resolves to `dist/` in built mode (wrong `.env`, `.local` and scenarios paths; found by the lead). Client fixes accepted: a status event re-reads the snapshot for the failure reason, and a 30 s snapshot re-read keeps `lastConfirmedAt` fresh (no server `receipt.confirmed` events). The result must be re-recorded against an unpatched build.
+
+### W6.3 `demo-adversary` — status: FAIL (findings being fixed; final verdict pending a quiet tree)
 
 - Owner: demo-and-novelty-devils-advocate. actionBoundary: false.
 - Allowed files: `tests/nemodots/adversarial/demo/**`, `docs/nemodots/review/DEMO_REVIEW.md`.
@@ -298,6 +304,8 @@ Review findings C1-C16, I1-I14, D1-D10 (ARCHITECTURE.md section 14) are folded i
 - Deliverables: tests: no seed baseline or scenario literal in `team/**` (allowlist = runbook vocabulary, forbidden = `sandbox/seed.ts` healthy literals) (D7); receipts and SSE corpus contain no control keys or scenario ids; preserved outputs' vectors current at mission end; broad-restart baseline re-runs with the same admission checks and the same repair context; the structural preserved set reported by the live test matches an independent recomputation from edges (D5); `DEMO_REVIEW.md` stating what the demo shows and does not show, including which disjunction branch occurred and whether any prompt text mentions delegation.
 - Acceptance checks: `npx vitest run tests/nemodots/adversarial/demo` PASS or documented FAIL; `check-format` exit 0; `DEMO_REVIEW.md` present.
 - Brief: challenge autonomy, leakage, preserved-work validity and baseline strength; every finding needs a reproduction or precise pointer. Do not edit production code.
+
+- Round 1 (2026-10-18, demo-devils-advocate on claude-opus-5-5, `docs/nemodots/review/DEMO_REVIEW.md`). High: DA-02 (invalidation never closes after an aborted repair), DA-05 (wait_for_children starves worker slots), DA-07 (no live disjunction observed). Medium: DA-04 (acceptance while intents pending), DA-01 (runbook encodes `primary` as a riddle to pass the literal test), DA-06 (delegation induced by prompts, nudges, refusals and the verifier policy; docs incomplete; "pre-change verification" checks only that a child completed), DA-03 (preserved-work metric counts re-runs), DA-09 (dependent step fires only on set_config). Lower: DA-08 (product injector skips preconditions; DEMO.md order), DA-10 (vacuous preservation check), DA-11 (broad-restart is the conservative upper bound), DA-12 (prior art not credited), DA-13 (overwritten artifacts; dirty-tree stamps), DA-14 (Live means any endpoint; cite the recorded host). Rulings: value domains are runbook vocabulary stated neutrally, never which value is healthy. DA-02/04/05 fixes pass the scripted repros, pending a quiet-tree re-run. The rest are routed (sandbox/evals, integration/docs, release report).
 
 ### W6.4 `release-report` — status: PLANNED
 

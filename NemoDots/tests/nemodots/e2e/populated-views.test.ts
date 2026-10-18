@@ -113,6 +113,11 @@ describe('changed evidence, before the change', () => {
     expect(inspector).toContain('Proposed');
     expect(inspector).toContain('checkout.config/db.pool_max');
     expect(inspector).toContain('Admission stage: not decided yet');
+    // derived from proposedAt + the mission's admission.minAgeMs (45 s)
+    expect(inspector).toMatch(
+      /Admission not before\s*\n?\s*\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC/,
+    );
+    expect(inspector).not.toMatch(/Admission not before\s*\n?\s*unknown/);
     await shot(ses.page, 'populated-changed-before');
   });
 
@@ -267,6 +272,18 @@ describe('changed evidence: the person edits the same setting', () => {
     expect(await body()).toContain('marked unusable');
   });
 
+  it('never implies acceptance: the probe result is separate and the mission says why it is not accepted', async () => {
+    const probe = section(/acceptance probe/i);
+    await probe.waitFor();
+    const text = await probe.innerText();
+    expect(text).toContain('Mission not accepted');
+    expect(text).not.toContain('Mission accepted');
+    expect(text).toMatch(
+      /evidence changes? (is|are) still open|tasks? (is|are) not finished/,
+    );
+    await shot(ses.page, 'populated-not-accepted');
+  });
+
   it('rebuilds the same facts from the server snapshot after a refresh, without duplicating entries', async () => {
     await ses.page.reload();
     await ses.page.getByText('Live updates: Open').waitFor();
@@ -324,9 +341,13 @@ describe('a succeeded fixture mission', () => {
       20_000,
     );
     const text = await probe.innerText();
+    expect(text).toContain('Probe result:');
     expect(text).toMatch(/pass/i);
+    // the mission itself is accepted, and says so apart from the probe result
+    expect(text).toContain('Mission accepted');
+    expect(text).not.toContain('Mission not accepted');
     const invariants = await ses.page
-      .getByRole('list', { name: 'Acceptance invariants' })
+      .getByRole('list', { name: 'Probe invariants' })
       .innerText();
     expect(invariants.length).toBeGreaterThan(0);
     await shot(ses.page, 'populated-probe');

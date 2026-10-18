@@ -235,8 +235,10 @@ export class StubCoordinator {
   }
   async markWaiting() {
     this.waiting += 1;
+    this.order.push('mark_waiting');
   }
   async resumeFromWaiting() {
+    this.order.push('resume_from_waiting');
     return this.resume.length > 1 ? this.resume.shift()! : this.resume[0];
   }
   async requestReplan(_context: AttemptContext, reason: string) {

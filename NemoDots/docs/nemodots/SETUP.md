@@ -10,8 +10,12 @@ Every command below is marked with what was observed when it was run on 2026-10-
 | ---------------------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------- |
 | OpenDots server and React app (upstream)                   | `npm run dev` / `npm start`, port 4310     | Node, SQLite (built in), an Intelligence key for chat         |
 | NemoDots sandbox stack: PostgreSQL 16, Redis, checkout API | native processes under `.local/<instance>` | `postgres`, `initdb`, `pg_ctl`, `redis-server` on `PATH`      |
-| NemoDots coordinator, ledger, watcher, routes              | inside the OpenDots server process         | the sandbox stack, and the bootstrap work listed in section 9 |
+| NemoDots coordinator, ledger, watcher, routes              | inside the OpenDots server process         | the sandbox stack (composed by `createNemoDots`, mounted at `/api/nemodots`) |
+| Extra NemoDots worker (optional)                           | `npm run nemodots:worker`, its own process | the sandbox stack and the three `OPENAI_*` names              |
 | Nemotron reasoning                                         | Crusoe Managed Inference over HTTPS        | `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`           |
+| Voice calls (optional, upstream OpenDots feature)          | OpenAI realtime, `api.openai.com`          | `VOICE_API_KEY`, `VOICE_MODEL`; not Crusoe, not part of NemoDots |
+
+The server starts the coordinator, the source watcher, the outbox and `NEMODOTS_WORKERS` in-process workers. A separate worker process is only needed to run more workers or to kill a worker without touching the server (section 8).
 
 Docker is optional. The native stack above is the primary path and does not use Docker. Docker (Colima) is installed on the build machine, but nothing in the core NemoDots path starts a container. The optional per-Dot computer feature uses containers and is **NOT_RUN** for NemoDots.
 

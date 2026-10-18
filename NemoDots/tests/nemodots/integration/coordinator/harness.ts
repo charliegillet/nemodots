@@ -30,6 +30,7 @@ import {
 } from '../../../../src/server/nemodots/coordinator/index.js';
 import {
   InvalidationEventSchema,
+  LIVE_STATUSES,
   invalidationEventId,
 } from '../../../../src/server/nemodots/contracts/index.js';
 import type {
@@ -151,6 +152,15 @@ export class FakeIntents implements IntentReader {
   }
   async committedEffects(_client: PgClient, missionId: MissionId) {
     return this.committed.get(missionId) ?? [];
+  }
+  async liveIntents(_client: PgClient, missionId: MissionId) {
+    return [...this.intents.values()]
+      .filter(
+        (intent) =>
+          intent.missionId === missionId &&
+          (LIVE_STATUSES as readonly string[]).includes(intent.status),
+      )
+      .map((intent) => intent.id as ActionId);
   }
 }
 

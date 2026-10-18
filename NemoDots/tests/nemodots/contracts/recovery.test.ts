@@ -86,6 +86,28 @@ describe('openInvalidation (CONTRACTS section 6)', () => {
     expect(C.openInvalidation(event([A1]), rows.slice(0, 2), [])).toBe(true);
   });
 
+  it('follows the repair chain through a repair that a later event aborted (DA-02)', () => {
+    // The repair for the second event names the aborted repair, not the original.
+    const rows = [
+      att(A1, 'invalidated'),
+      att(A2, 'aborted', A1),
+      att(A3, 'published', A2),
+    ];
+    expect(C.openInvalidation(event([A1]), rows, [])).toBe(false);
+    expect(C.openInvalidation(event([A2]), rows, [])).toBe(false);
+  });
+
+  it('a repair chain with nothing published stays open, whatever its last link is (fail-closed)', () => {
+    for (const last of ['running', 'failed', 'aborted', 'expired'] as const)
+      expect(
+        C.openInvalidation(
+          event([A1]),
+          [att(A1, 'invalidated'), att(A2, 'aborted', A1), att(A3, last, A2)],
+          [],
+        ),
+      ).toBe(true);
+  });
+
   it('terminates on a repairOf cycle (fail-closed)', () => {
     const rows = [att(A1, 'invalidated', A2), att(A2, 'invalidated', A1)];
     expect(C.openInvalidation(event([A1]), rows, [])).toBe(true);

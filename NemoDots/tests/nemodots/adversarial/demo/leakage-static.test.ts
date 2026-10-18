@@ -56,10 +56,45 @@ function stringLiterals(file: string): string[] {
   return out;
 }
 
-/** Model-visible text of one team file. */
+/**
+ * Lead ruling (W6.3 round 1): value domains are runbook vocabulary when stated
+ * neutrally, never saying which value is healthy. A bullet of a runbook's
+ * "Value domains" section is therefore exempt from the literal scan unless it
+ * uses evaluative words. Everything else in the runbook is scanned.
+ */
+const EVALUATIVE =
+  /\b(healthy|correct|default|normal|recommended|preferred|safe|right|good|baseline|expected|usual)\b/i;
+
+function neutralDomainLines(text: string): {
+  exempt: string[];
+  rest: string;
+} {
+  const exempt: string[] = [];
+  const kept: string[] = [];
+  let inDomains = false;
+  for (const line of text.split('\n')) {
+    if (/^\s*Value domains\s*$/i.test(line)) {
+      inDomains = true;
+      kept.push(line);
+      continue;
+    }
+    if (inDomains && line.trim() !== '' && !line.trimStart().startsWith('- '))
+      inDomains = false;
+    if (
+      inDomains &&
+      line.trimStart().startsWith('- ') &&
+      !EVALUATIVE.test(line)
+    )
+      exempt.push(line.trim());
+    else kept.push(line);
+  }
+  return { exempt, rest: kept.join('\n') };
+}
+
+/** Model-visible text of one team file, minus neutral value-domain bullets. */
 function visibleText(file: string): string {
   return file.endsWith('.md')
-    ? readFileSync(file, 'utf8')
+    ? neutralDomainLines(readFileSync(file, 'utf8')).rest
     : stringLiterals(file).join('\n');
 }
 
@@ -169,6 +204,19 @@ describe('no seed baseline or scenario literal in team/** (D7)', () => {
         offenders.push(`${rel(file)} names a control table`);
     }
     expect(offenders).toEqual([]);
+  });
+});
+
+describe('neutral value-domain bullets exempt from the literal scan (lead ruling)', () => {
+  it('lists them, and none of them says which value is healthy', () => {
+    const exempt = FILES.filter((f) => f.endsWith('.md')).flatMap((file) =>
+      neutralDomainLines(readFileSync(file, 'utf8')).exempt.map(
+        (line) => `${rel(file)}: ${line}`,
+      ),
+    );
+    // the domain sections exist in the cache, pool and routing runbooks
+    expect(exempt.length).toBeGreaterThanOrEqual(5);
+    for (const line of exempt) expect(line).not.toMatch(EVALUATIVE);
   });
 });
 

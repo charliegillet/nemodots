@@ -5,6 +5,7 @@ import {
 } from '../../../src/server/nemodots/contracts/index.js';
 import {
   LIMITS,
+  admissionNotBeforeOf,
   applyMissionEvent,
   createMissionState,
   mergeMissionSnapshot,
@@ -195,6 +196,36 @@ describe('snapshot merge', () => {
     expect(state.actions[0].dispatched?.scriptResult).toBe('applied');
     expect(state.invalidations[0].preservedTaskIds).toEqual([ids.task2]);
     expect(state.telemetry?.calls).toBe(3);
+  });
+
+  it('derives "admission not before" from proposedAt plus the mission minAgeMs', () => {
+    const base = snapshot();
+    const proposedAt = base.actions[0].proposedAt;
+    const withDelay = snapshot({
+      mission: { ...base.mission, admission: { minAgeMs: 45_000 } },
+    });
+    const { state } = mergeMissionSnapshot(fresh(), withDelay);
+    expect(state.actions[0].admissionNotBefore).toBe(
+      new Date(Date.parse(proposedAt) + 45_000).toISOString(),
+    );
+    // no delay: admission is not before the proposal itself
+    const none = mergeMissionSnapshot(
+      fresh(),
+      snapshot({ mission: { ...base.mission, admission: { minAgeMs: 0 } } }),
+    ).state;
+    expect(none.actions[0].admissionNotBefore).toBe(
+      new Date(Date.parse(proposedAt)).toISOString(),
+    );
+  });
+
+  it('admissionNotBeforeOf is null only when an input is absent or unreadable', () => {
+    expect(admissionNotBeforeOf(T0, 1000)).toBe(
+      new Date(Date.parse(T0) + 1000).toISOString(),
+    );
+    expect(admissionNotBeforeOf(null, 1000)).toBeNull();
+    expect(admissionNotBeforeOf(T0, null)).toBeNull();
+    expect(admissionNotBeforeOf(T0, Number.NaN)).toBeNull();
+    expect(admissionNotBeforeOf('not a time', 1000)).toBeNull();
   });
 
   it('rejects a snapshot for another mission', () => {

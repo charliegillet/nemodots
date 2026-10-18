@@ -392,3 +392,283 @@ describe('worker host', () => {
     expect(calls).not.toContain('publishOutput');
   });
 });
+
+// ---------------------------------------------------------------- slots
+
+import { latch } from '../helpers/barrier.js';
+import {
+  SlotPool,
+  type HostRun,
+} from '../../../src/server/nemodots/coordinator/worker-host.js';
+
+/** A scripted coordinator over several attempts, claimed in order. */
+function fleet(count: number) {
+  const attempts = Array.from({ length: count }, () => claimed());
+  const queue = [...attempts];
+  const states = new Map<string, AttemptState>(
+    attempts.map((a) => [a.context.attemptId, healthy(a.context)]),
+  );
+  const names = new Map(
+    attempts.map((a, i) => [a.context.attemptId, String.fromCharCode(65 + i)]),
+  );
+  const coordinator: WorkerHostCoordinator = {
+    async claimAttempt() {
+      return queue.shift() ?? null;
+    },
+    async startAttempt() {},
+    async heartbeat() {},
+    async readAttemptState(id) {
+      return states.get(id) ?? null;
+    },
+    async publishOutput() {},
+    async publishPlan() {},
+    async failAttempt() {},
+    async abortAttempt() {},
+  };
+  const name = (claim: ClaimedAttempt) => names.get(claim.context.attemptId)!;
+  const invalidate = (claim: ClaimedAttempt) => {
+    states.set(claim.context.attemptId, {
+      ...healthy(claim.context),
+      attemptStatus: 'invalidated',
+    });
+  };
+  return { attempts, coordinator, name, invalidate };
+}
+
+const until = async (check: () => boolean, label: string, ms = 3000) => {
+  const deadline = Date.now() + ms;
+  while (!check()) {
+    if (Date.now() > deadline)
+      throw new Error(`timed out waiting for ${label}`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+};
+
+describe('worker slots: a waiting attempt does not hold one', () => {
+  it('a parked attempt frees its slot for the next claim and takes one back (ahead of new claims) when its wait ends', async () => {
+    const f = fleet(2);
+    const log: string[] = [];
+    const runs: HostRun[] = [];
+    const aWait = latch();
+    let midway: ReturnType<ReturnType<typeof host>['slots']> | null = null;
+    const h = host(
+      f.coordinator,
+      async (claim, helpers) => {
+        const me = f.name(claim);
+        log.push(`${me}:start`);
+        if (me === 'A') {
+          await helpers.parked!(() => aWait.promise);
+          log.push('A:resumed');
+        } else {
+          midway = h.slots();
+          log.push('B:end');
+          aWait.open();
+        }
+        return out;
+      },
+      { concurrency: 1, onRun: (r: HostRun) => runs.push(r) },
+    );
+    h.start();
+    await until(() => runs.length === 2, 'both attempts to finish');
+    await h.stop();
+    expect(log).toEqual(['A:start', 'B:start', 'B:end', 'A:resumed']);
+    // while B worked, A was alive but held nothing: one slot of one, one parked
+    expect(midway).toEqual({ capacity: 1, held: 1, parked: 1, attempts: 2 });
+    expect(runs.map((r) => r.result)).toEqual(['published', 'published']);
+    expect(h.slots()).toEqual({ capacity: 1, held: 0, parked: 0, attempts: 0 });
+  });
+
+  it('a delegation chain of depth 3 completes on ONE slot, the leaf working while both ancestors are parked', async () => {
+    const f = fleet(3);
+    const log: string[] = [];
+    const runs: HostRun[] = [];
+    const bDone = latch();
+    const cDone = latch();
+    let atLeaf: ReturnType<ReturnType<typeof host>['slots']> | null = null;
+    const h = host(
+      f.coordinator,
+      async (claim, helpers) => {
+        const me = f.name(claim);
+        log.push(`${me}:start`);
+        if (me === 'A') await helpers.parked!(() => bDone.promise);
+        if (me === 'B') {
+          await helpers.parked!(() => cDone.promise);
+          bDone.open();
+        }
+        if (me === 'C') {
+          atLeaf = h.slots();
+          cDone.open();
+        }
+        log.push(`${me}:end`);
+        return out;
+      },
+      { concurrency: 1, onRun: (r: HostRun) => runs.push(r) },
+    );
+    h.start();
+    await until(() => runs.length === 3, 'the chain to finish');
+    await h.stop();
+    expect(log).toEqual([
+      'A:start',
+      'B:start',
+      'C:start',
+      'C:end',
+      'B:end',
+      'A:end',
+    ]);
+    expect(atLeaf).toEqual({ capacity: 1, held: 1, parked: 2, attempts: 3 });
+    expect(runs.map((r) => r.result)).toEqual([
+      'published',
+      'published',
+      'published',
+    ]);
+  });
+
+  it('resumed attempts are served before attempts that were not started yet', async () => {
+    const f = fleet(3);
+    const log: string[] = [];
+    const runs: HostRun[] = [];
+    const aWait = latch();
+    const bHold = latch();
+    const h = host(
+      f.coordinator,
+      async (claim, helpers) => {
+        const me = f.name(claim);
+        log.push(`${me}:start`);
+        if (me === 'A') {
+          await helpers.parked!(() => aWait.promise);
+          log.push('A:resumed');
+        }
+        if (me === 'B') await bHold.promise;
+        return out;
+      },
+      { concurrency: 1, onRun: (r: HostRun) => runs.push(r) },
+    );
+    h.start();
+    await until(() => log.includes('B:start'), 'B to hold the slot');
+    aWait.open(); // A's wait ends while B works and C is still queued
+    await new Promise((r) => setTimeout(r, 60));
+    bHold.open();
+    await until(() => runs.length === 3, 'all three to finish');
+    await h.stop();
+    expect(log.indexOf('A:resumed')).toBeGreaterThan(-1);
+    expect(log.indexOf('A:resumed')).toBeLessThan(log.indexOf('C:start'));
+  });
+
+  it('concurrency still bounds the attempts that are working', async () => {
+    const f = fleet(3);
+    const started: string[] = [];
+    const hold = latch();
+    const h = host(
+      f.coordinator,
+      async (claim) => {
+        started.push(f.name(claim));
+        await hold.promise;
+        return out;
+      },
+      { concurrency: 2 },
+    );
+    h.start();
+    await until(() => started.length === 2, 'two attempts to start');
+    await new Promise((r) => setTimeout(r, 80));
+    expect(started).toEqual(['A', 'B']);
+    expect(h.slots()).toMatchObject({ capacity: 2, held: 2, parked: 0 });
+    hold.open();
+    await until(() => started.length === 3, 'the third to start');
+    await h.stop();
+  });
+
+  it('an attempt aborted while parked unwinds at once, without waiting for a slot', async () => {
+    const f = fleet(2);
+    const runs: HostRun[] = [];
+    const bHold = latch();
+    const h = host(
+      f.coordinator,
+      async (claim, helpers) => {
+        if (f.name(claim) === 'B') {
+          await bHold.promise;
+          return out;
+        }
+        await helpers.parked!(
+          () =>
+            new Promise<void>((resolve) =>
+              helpers.signal.addEventListener('abort', () => resolve()),
+            ),
+        );
+        await helpers.checkpoint(); // what the wait loop does next
+        return out;
+      },
+      { concurrency: 1, onRun: (r: HostRun) => runs.push(r) },
+    );
+    h.start();
+    await until(() => h.slots().attempts === 2, 'A parked and B working');
+    f.invalidate(f.attempts[0]);
+    await until(() => runs.length === 1, 'A to unwind');
+    // B still holds the only slot: A did not queue for one
+    expect(runs[0]).toMatchObject({
+      result: 'aborted',
+      abortReason: 'readset_invalidated',
+    });
+    expect(h.slots().held).toBe(1);
+    bHold.open();
+    await until(() => runs.length === 2, 'B to finish');
+    await h.stop();
+  });
+
+  it('stop() ends parked attempts with host_stopped', async () => {
+    const f = fleet(1);
+    const runs: HostRun[] = [];
+    const parked = latch();
+    const h = host(
+      f.coordinator,
+      async (_claim, helpers) => {
+        await helpers.parked!(async () => {
+          parked.open();
+          await new Promise<void>((resolve) =>
+            helpers.signal.addEventListener('abort', () => resolve()),
+          );
+        });
+        return out;
+      },
+      { concurrency: 1, onRun: (r: HostRun) => runs.push(r) },
+    );
+    h.start();
+    await parked.promise;
+    expect(h.slots()).toMatchObject({ held: 0, parked: 1 });
+    await h.stop();
+    expect(runs[0]).toMatchObject({
+      result: 'aborted',
+      abortReason: 'host_stopped',
+    });
+  });
+});
+
+describe('SlotPool', () => {
+  it('grants up to its capacity, queues the rest and serves resumes first', async () => {
+    const pool = new SlotPool(1);
+    const order: string[] = [];
+    expect(await pool.acquire('claim')).toBe(true);
+    const claim = pool.acquire('claim').then(() => order.push('claim'));
+    const resume = pool.acquire('resume').then(() => order.push('resume'));
+    await Promise.resolve();
+    expect(pool.held).toBe(1);
+    pool.release();
+    await resume;
+    expect(order).toEqual(['resume']);
+    pool.release();
+    await claim;
+    expect(order).toEqual(['resume', 'claim']);
+    expect(pool.held).toBe(1);
+  });
+
+  it('an aborted waiter leaves the queue and never takes a slot', async () => {
+    const pool = new SlotPool(1);
+    await pool.acquire('claim');
+    const controller = new AbortController();
+    const waiting = pool.acquire('resume', controller.signal);
+    controller.abort();
+    expect(await waiting).toBe(false);
+    pool.release();
+    expect(pool.held).toBe(0);
+    expect(await pool.acquire('claim', controller.signal)).toBe(false);
+  });
+});

@@ -409,13 +409,31 @@ export async function evaluateOpen(
       })
       .map((row) => row.id),
   );
+  // A task that SUCCEEDED again with a usable output published after the event
+  // was recorded is repaired, however its repair chain is linked (a retry of a
+  // failed repair, repairs re-linked by a later event). Publication passed the
+  // support check against the then-current ledger, and `usable` says it still
+  // does, so the affected attempts of that task cannot hold the event open.
+  const repairedSince = (attemptId: string, since: Date) => {
+    const task = tasks.get(attemptTask.get(attemptId) ?? '');
+    const output = task?.output_id ? outputs.get(task.output_id) : undefined;
+    return (
+      task?.status === 'succeeded' &&
+      output !== undefined &&
+      output.usable &&
+      output.published_at >= since
+    );
+  };
   const liveAttempts = (
     event: Pick<StoredEvent, 'affected' | 'perMission' | 'missionIds'>,
     keepActions: boolean,
+    since: Date,
   ) => {
     const strip = (affected: StoredEvent['affected']) => ({
       ...affected,
-      attemptIds: affected.attemptIds.filter((id) => !deadTask.has(id)),
+      attemptIds: affected.attemptIds.filter(
+        (id) => !deadTask.has(id) && !repairedSince(id, since),
+      ),
       actionIds: keepActions ? affected.actionIds : [],
     });
     return {
@@ -436,7 +454,7 @@ export async function evaluateOpen(
       kind = 'unprocessed';
     } else if (
       openInvalidation(
-        liveAttempts(row.event, false),
+        liveAttempts(row.event, false, row.created_at),
         attempts,
         [],
         missionId as string,

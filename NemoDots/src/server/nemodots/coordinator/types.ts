@@ -117,6 +117,13 @@ export interface IntentReader {
   ): Promise<{ id: string; status: ActionStatus }[]>;
   /** Intents of the mission whose effect was already committed (cancel record, C12). */
   committedEffects(client: PgClient, missionId: MissionId): Promise<ActionId[]>;
+  /**
+   * Intents of the mission still in a live status (proposed, admitted,
+   * committed, dispatched, outcome_unknown): work that has not settled yet.
+   * The mission evaluation waits for them before it asks for acceptance. Every
+   * production reader provides it; a reader without it reports none.
+   */
+  liveIntents?(client: PgClient, missionId: MissionId): Promise<ActionId[]>;
 }
 
 /** The parts of MissionSnapshot owned by the ledger, actions, probe and telemetry packages. */

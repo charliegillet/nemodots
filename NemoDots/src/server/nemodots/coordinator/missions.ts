@@ -465,8 +465,8 @@ export type EvaluationOutcome =
  * Completion check, driven by the outbox after a task settles or an
  * invalidation resolves:
  *  - running, a root task failed for good -> failed;
- *  - running, every task is terminal, at least one planned task succeeded and
- *    no invalidation is open -> awaiting_acceptance;
+ *  - running, every task is terminal, at least one planned task succeeded, no
+ *    invalidation is open and no intent is live -> awaiting_acceptance;
  *  - awaiting_acceptance with unfinished work (a repair was scheduled) -> running.
  */
 export async function evaluateMission(
@@ -555,6 +555,16 @@ export async function evaluateMission(
         failedReason = `repair_not_schedulable: ${stuck.length} invalidation(s) cannot be repaired`;
         return 'failed';
       }
+      // Acceptance probes the world after the mission's work. An intent still
+      // live (waiting out its minimum age, admitted, committed, dispatched or
+      // outcome unknown) is work that has not happened or settled yet, so the
+      // probe would judge a half-applied repair. Wait: propose, admit and
+      // commit take the mission lock this evaluation holds, so no new intent
+      // can slip in before the transition, and the maintenance sweep
+      // (evaluateStalled) re-evaluates a running mission whose tasks are all
+      // terminal until the live intents have settled.
+      const live = (await deps.intents.liveIntents?.(client, missionId)) ?? [];
+      if (live.length > 0) return 'unchanged';
       await transitionMission(tx, mission, 'awaiting_acceptance', {
         reason: 'all_tasks_succeeded',
       });

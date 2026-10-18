@@ -16,6 +16,7 @@ import {
   DEFAULT_TASK_MAX_TOKENS,
   buildRuntime,
   createNemoDots,
+  findAppRoot,
   taskMaxTokens,
   phaseOfEvent,
   resolveNemoDotsEnv,
@@ -278,5 +279,23 @@ describe('runtime configuration', () => {
         { workspace: { ownerId: 'owner' }, appRoot: appRoot(0o600, false) },
       ).coordinator,
     ).toBeNull();
+  });
+});
+
+describe('findAppRoot', () => {
+  it('finds the project root from the source layout, the built layout and the real module', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'nd-root-'));
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+    writeFileSync(path.join(root, 'package.json'), '{}');
+    for (const layout of [
+      'src/server/nemodots',
+      'dist/server/server/nemodots',
+    ]) {
+      const dir = path.join(root, layout);
+      mkdirSync(dir, { recursive: true });
+      expect(findAppRoot(dir)).toBe(root);
+    }
+    // the real module resolves to this checkout
+    expect(findAppRoot()).toBe(process.cwd());
   });
 });

@@ -34,6 +34,19 @@ import type { HostAbortReason } from './publish.js';
 //
 // A transaction is never held across the handler or any network call: the host
 // only opens short transactions inside the coordinator functions it calls.
+//
+// Slots. `concurrency` bounds the attempts that are DOING WORK (model calls,
+// tool calls), not the attempts that exist. A handler that has nothing to do
+// but wait for other tasks (wait_for_children) runs that wait inside
+// `helpers.parked(...)`: the attempt keeps its lease, heartbeat, fence, budget
+// and drift checks (so an invalidation, pause or cancel still aborts it within
+// the check interval), but its slot goes back to the pool and the host claims
+// the next runnable task. When the wait ends the attempt takes a slot again
+// before the handler continues, ahead of any new claim, so a parent resumes as
+// soon as capacity exists. Without this a delegation chain of depth d needs d
+// slots just to make progress (the investigator waits for a specialist that
+// waits for its verifier), and with the default two workers a child sat in the
+// queue until its parent's wait timed out.
 
 export class AttemptAbortedError extends Error {
   constructor(readonly reason: AbortReason | 'host_stopped') {
@@ -48,6 +61,14 @@ export interface HandlerHelpers {
   checkpoint(): Promise<void>;
   /** The reason the host aborted the attempt, if it did. */
   abortReason(): AbortReason | 'host_stopped' | null;
+  /**
+   * Runs `wait` (a wait for other tasks: no model call, no tool side effect)
+   * without occupying a worker slot, then takes a slot again before returning
+   * (skipped when the attempt was aborted meanwhile, so it can unwind). The
+   * attempt stays leased, fenced and drift-checked throughout. Absent on test
+   * doubles; the wait then simply runs in place.
+   */
+  parked?<T>(wait: () => Promise<T>): Promise<T>;
 }
 
 export type HandlerOutcome =
@@ -130,9 +151,21 @@ export interface WorkerHostOptions {
   onError?: (error: unknown) => void;
 }
 
+export interface SlotStats {
+  /** NEMODOTS_WORKERS / concurrency */
+  capacity: number;
+  /** attempts currently holding a slot (doing work) */
+  held: number;
+  /** attempts alive but parked in a wait, holding no slot */
+  parked: number;
+  /** attempts the host is processing (held + parked + unwinding) */
+  attempts: number;
+}
+
 export interface WorkerHost {
   /** Claim and fully process at most one attempt. Null when nothing was runnable. */
   runOnce(): Promise<HostRun | null>;
+  slots(): SlotStats;
   start(): void;
   /** Stop claiming, abort in-flight attempts (their leases expire; the reaper requeues them) and wait. */
   stop(): Promise<void>;
@@ -177,6 +210,71 @@ const sleep = (ms: number, signal?: AbortSignal) =>
     );
   });
 
+interface SlotWaiter {
+  grant(): void;
+  cancel(): void;
+}
+
+/**
+ * Counting semaphore for attempt slots. Attempts coming back from a wait are
+ * served before new claims, so a parent never starves behind the queue it
+ * created.
+ */
+export class SlotPool {
+  private inUse = 0;
+  private readonly resumes: SlotWaiter[] = [];
+  private readonly claims: SlotWaiter[] = [];
+  constructor(readonly capacity: number) {}
+
+  get held() {
+    return this.inUse;
+  }
+
+  /** Resolves true with a slot, or false when `signal` aborted first. */
+  acquire(kind: 'claim' | 'resume', signal?: AbortSignal): Promise<boolean> {
+    if (signal?.aborted) return Promise.resolve(false);
+    return new Promise<boolean>((resolve) => {
+      const queue = kind === 'resume' ? this.resumes : this.claims;
+      const waiter: SlotWaiter = {
+        grant: () => {
+          signal?.removeEventListener('abort', onAbort);
+          resolve(true);
+        },
+        cancel: () => resolve(false),
+      };
+      const onAbort = () => {
+        const at = queue.indexOf(waiter);
+        if (at >= 0) {
+          queue.splice(at, 1);
+          waiter.cancel();
+        }
+      };
+      queue.push(waiter);
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.drain();
+    });
+  }
+
+  release() {
+    this.inUse -= 1;
+    this.drain();
+  }
+
+  private drain() {
+    while (this.inUse < this.capacity) {
+      const next = this.resumes.shift() ?? this.claims.shift();
+      if (!next) return;
+      this.inUse += 1;
+      next.grant();
+    }
+  }
+}
+
+/** One attempt's hold on the pool: released while parked, released again at the end. */
+interface AttemptSlot {
+  held: boolean;
+}
+
 export function createWorkerHost(options: WorkerHostOptions): WorkerHost {
   const {
     coordinator,
@@ -188,8 +286,14 @@ export function createWorkerHost(options: WorkerHostOptions): WorkerHost {
   } = options;
   const report = (error: unknown) => options.onError?.(error);
   const inflight = new Set<(reason: 'host_stopped') => void>();
-  const loops: Promise<void>[] = [];
+  const running = new Set<Promise<unknown>>();
+  let claimLoop: Promise<void> | null = null;
   const stopController = new AbortController();
+  const pool = new SlotPool(Math.max(1, concurrency));
+  // slots held by attempts that are working (not the claim loop's transient hold)
+  let heldByAttempts = 0;
+  let parkedAttempts = 0;
+  let activeAttempts = 0;
   let stopping = false;
 
   async function publish(
@@ -215,7 +319,10 @@ export function createWorkerHost(options: WorkerHostOptions): WorkerHost {
     }
   }
 
-  async function processAttempt(claimed: ClaimedAttempt): Promise<HostRun> {
+  async function processAttempt(
+    claimed: ClaimedAttempt,
+    slot: AttemptSlot,
+  ): Promise<HostRun> {
     const { context } = claimed;
     const base = {
       attemptId: context.attemptId,
@@ -243,6 +350,8 @@ export function createWorkerHost(options: WorkerHostOptions): WorkerHost {
       controller.abort(new AttemptAbortedError(reason));
     };
     inflight.add(abort);
+    // claimed while stop() was already sweeping: it must not run on
+    if (stopping) abort('host_stopped');
     let checking: Promise<void> | null = null;
     const check = (): Promise<void> => {
       if (!checking)
@@ -271,6 +380,7 @@ export function createWorkerHost(options: WorkerHostOptions): WorkerHost {
       check().catch(report);
     }, abortCheckMs);
 
+    let parkDepth = 0;
     const helpers: HandlerHelpers = {
       signal: controller.signal,
       async checkpoint() {
@@ -278,6 +388,30 @@ export function createWorkerHost(options: WorkerHostOptions): WorkerHost {
         if (abortReason) throw new AttemptAbortedError(abortReason);
       },
       abortReason: () => abortReason,
+      async parked<T>(wait: () => Promise<T>): Promise<T> {
+        parkDepth += 1;
+        const released = parkDepth === 1 && slot.held;
+        if (released) {
+          slot.held = false;
+          heldByAttempts -= 1;
+          pool.release();
+          parkedAttempts += 1;
+        }
+        try {
+          return await wait();
+        } finally {
+          parkDepth -= 1;
+          if (released && parkDepth === 0) {
+            parkedAttempts -= 1;
+            // Back to work: wait for capacity, ahead of any new claim. An
+            // aborted attempt only has to unwind and does not need one.
+            if (!abortReason && !stopping) {
+              slot.held = await pool.acquire('resume', controller.signal);
+              if (slot.held) heldByAttempts += 1;
+            }
+          }
+        }
+      },
     };
 
     let outcome: HandlerOutcome | undefined;
@@ -328,24 +462,83 @@ export function createWorkerHost(options: WorkerHostOptions): WorkerHost {
     }
   }
 
-  async function runOnce(): Promise<HostRun | null> {
-    const claimed = await coordinator.claimAttempt({
-      workerId: options.workerId,
-      missionId: options.missionId,
-      roles: options.roles,
-      leaseMs,
-    });
-    if (!claimed) return null;
-    const result = await processAttempt(claimed);
-    options.onRun?.(result);
-    return result;
+  /** Takes a slot, then claims; the slot travels with the claimed attempt. */
+  async function claimOne(): Promise<{
+    claimed: ClaimedAttempt;
+    slot: AttemptSlot;
+  } | null> {
+    if (!(await pool.acquire('claim', stopController.signal))) return null;
+    const slot: AttemptSlot = { held: true };
+    const giveBack = () => {
+      if (slot.held) {
+        slot.held = false;
+        pool.release();
+      }
+    };
+    try {
+      const claimed = await coordinator.claimAttempt({
+        workerId: options.workerId,
+        missionId: options.missionId,
+        roles: options.roles,
+        leaseMs,
+      });
+      if (!claimed) {
+        giveBack();
+        return null;
+      }
+      heldByAttempts += 1;
+      return { claimed, slot };
+    } catch (error) {
+      giveBack();
+      throw error;
+    }
   }
 
+  async function runClaimed(
+    claimed: ClaimedAttempt,
+    slot: AttemptSlot,
+  ): Promise<HostRun> {
+    activeAttempts += 1;
+    try {
+      const result = await processAttempt(claimed, slot);
+      options.onRun?.(result);
+      return result;
+    } finally {
+      activeAttempts -= 1;
+      if (slot.held) {
+        slot.held = false;
+        heldByAttempts -= 1;
+        pool.release();
+      }
+    }
+  }
+
+  async function runOnce(): Promise<HostRun | null> {
+    const picked = await claimOne();
+    if (!picked) return null;
+    return runClaimed(picked.claimed, picked.slot);
+  }
+
+  /**
+   * One claim loop over the slot pool. A claimed attempt runs detached: its
+   * slot is the loop's permission to claim again, and it comes back when the
+   * attempt parks or ends.
+   */
   async function loop() {
     while (!stopping) {
       try {
-        const handled = await runOnce();
-        if (!handled) await sleep(pollMs, stopController.signal);
+        const picked = await claimOne();
+        if (!picked) {
+          if (!stopping) await sleep(pollMs, stopController.signal);
+          continue;
+        }
+        const attempt: Promise<unknown> = runClaimed(
+          picked.claimed,
+          picked.slot,
+        )
+          .catch(report)
+          .finally(() => running.delete(attempt));
+        running.add(attempt);
       } catch (error) {
         report(error);
         await sleep(pollMs, stopController.signal);
@@ -355,17 +548,24 @@ export function createWorkerHost(options: WorkerHostOptions): WorkerHost {
 
   return {
     runOnce,
+    slots: () => ({
+      capacity: pool.capacity,
+      held: heldByAttempts,
+      parked: parkedAttempts,
+      attempts: activeAttempts,
+    }),
     start() {
-      if (loops.length > 0) return;
+      if (claimLoop) return;
       stopping = false;
-      for (let i = 0; i < concurrency; i += 1) loops.push(loop());
+      claimLoop = loop();
     },
     async stop() {
       stopping = true;
       stopController.abort();
       for (const abort of inflight) abort('host_stopped');
-      await Promise.all(loops);
-      loops.length = 0;
+      await claimLoop;
+      claimLoop = null;
+      await Promise.allSettled([...running]);
     },
   };
 }

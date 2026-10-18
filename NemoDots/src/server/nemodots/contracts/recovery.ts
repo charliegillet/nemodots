@@ -159,16 +159,22 @@ export type OpenInvalidationIntent = { id: string; status: ActionStatus };
 
 /**
  * open(e) := exists affected attempt not in {published, failed, aborted,
- * expired, invalidated-with-successor-published} OR exists affected intent not
- * in {blocked, failed, cancelled, verified}.
+ * expired, invalidated-with-a-published-descendant} OR exists affected intent
+ * not in {blocked, failed, cancelled, verified}.
  *
- * A successor is an attempt whose `repairOf.attemptId` names the invalidated
- * attempt; it counts when it published, or was itself invalidated and has a
- * published successor. Fail-closed: an affected id missing from `attempts` or
- * `intents` keeps the event open. With `missionId`, that mission's `perMission`
- * subset is used; a mission listed in `missionIds` without an entry falls back
- * to the global affected set (fail closed); a mission not in `missionIds` is
- * not affected (closed).
+ * A descendant of an attempt is any attempt whose `repairOf.attemptId` names it,
+ * or names one of its descendants (the repair chain). The chain is followed
+ * TRANSITIVELY through every status: a repair that was itself aborted by a
+ * later event (the next repair names the aborted one, not the original), failed
+ * or expired does not break it. An invalidated attempt is resolved when ANY
+ * descendant published; whether that output is still supported is the
+ * caller's check on the task's current output. A chain that ends without a
+ * published descendant (running, queued, failed, aborted, cyclic) leaves the
+ * event open, i.e. unrecoverable chains fail closed. Fail-closed also covers an
+ * affected id missing from `attempts` or `intents`. With `missionId`, that
+ * mission's `perMission` subset is used; a mission listed in `missionIds`
+ * without an entry falls back to the global affected set (fail closed); a
+ * mission not in `missionIds` is not affected (closed).
  *
  * Known limit (pending CONTRACTS revision, see handoff): per CONTRACTS section 6
  * an affected `published` attempt counts as closed and `affected.taskIds` /
@@ -199,27 +205,28 @@ export function openInvalidation(
     list.push(attempt);
     successors.set(attempt.repairOf.attemptId, list);
   }
-  const resolved = (
-    attempt: OpenInvalidationAttempt,
-    seen: Set<string>,
-  ): boolean => {
+  const resolved = (attempt: OpenInvalidationAttempt): boolean => {
     if (
       (CLOSED_ATTEMPT_STATUSES as readonly AttemptStatus[]).includes(
         attempt.status,
       )
     )
       return true;
-    if (attempt.status !== 'invalidated' || seen.has(attempt.id)) return false;
-    seen.add(attempt.id);
-    return (successors.get(attempt.id) ?? []).some(
-      (next) =>
-        next.status === 'published' ||
-        (next.status === 'invalidated' && resolved(next, seen)),
-    );
+    if (attempt.status !== 'invalidated') return false;
+    // Iterative so a long chain cannot exhaust the stack; `seen` ends cycles.
+    const seen = new Set<string>([attempt.id]);
+    const pending = [...(successors.get(attempt.id) ?? [])];
+    for (let next = pending.pop(); next; next = pending.pop()) {
+      if (seen.has(next.id)) continue;
+      seen.add(next.id);
+      if (next.status === 'published') return true;
+      pending.push(...(successors.get(next.id) ?? []));
+    }
+    return false;
   };
   for (const id of affected.attemptIds) {
     const attempt = byId.get(id);
-    if (!attempt || !resolved(attempt, new Set())) return true;
+    if (!attempt || !resolved(attempt)) return true;
   }
   const intentById = new Map(intents.map((intent) => [intent.id, intent]));
   for (const id of affected.actionIds) {

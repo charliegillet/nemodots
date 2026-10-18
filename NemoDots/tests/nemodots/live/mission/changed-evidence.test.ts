@@ -300,18 +300,28 @@ it('a dependent change after a proposal: honest outcome, structural preservation
     },
   });
 
-  // 4. the final set_config commits and the independent probe passes
-  const finalCommit = intents.rows.find(
+  // 4. a set_config commits after the dependent change and the independent probe passes
+  const committedSetConfig = intents.rows.filter(
     (i) =>
-      i.action === 'set_config' &&
-      ['committed', 'verified'].includes(i.status) &&
-      (depAt === null ||
-        (i.committed_at && new Date(i.committed_at).getTime() > depAt)),
+      i.action === 'set_config' && ['committed', 'verified'].includes(i.status),
+  );
+  const finalCommit = committedSetConfig.find(
+    (i) =>
+      depAt !== null &&
+      i.committed_at &&
+      new Date(i.committed_at).getTime() > depAt,
   );
   record({
-    name: 'final set_config committed after the dependent change',
-    status: finalCommit ? 'PASS' : 'FAIL',
-    observed: { found: !!finalCommit },
+    name: 'a set_config committed after the dependent change',
+    // without a dependent change "after" is undefined: never a vacuous PASS
+    status: finalCommit ? 'PASS' : fired ? 'FAIL' : 'NOT_MET',
+    observed: {
+      dependentChangeFired: fired,
+      committedSetConfigs: committedSetConfig.length,
+      note: fired
+        ? undefined
+        : 'the dependent change did not fire, so "after" is undefined; a set_config may still have committed',
+    },
   });
   record({
     name: 'independent probe passed',

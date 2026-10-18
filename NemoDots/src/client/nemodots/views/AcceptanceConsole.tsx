@@ -3,13 +3,20 @@ import type {
   CheckoutHealthResponse,
   ConfigValue,
   HealthStatus,
+  Mission,
 } from '../../../server/nemodots/contracts/index.js';
 import { HealthPanel } from '../components/HealthPanel';
 import { Panel } from '../components/Panel';
 import { StatusPill } from '../components/StatusPill';
 import { shortId } from '../format';
+import { statusLabel } from '../status';
 import { editSource, runInjector } from '../mission-api';
-import type { ProbeNode, ReceiptNode } from '../mission-events';
+import type {
+  InvalidationNode,
+  ProbeNode,
+  ReceiptNode,
+  TaskNode,
+} from '../mission-events';
 
 // Health and acceptance: system health, the latest acceptance probe, a manual
 // source edit (same version authority as the agents) and an injector run.
@@ -243,24 +250,111 @@ function InjectorRun({ onStarted }: { onStarted: () => void }) {
   );
 }
 
+const TERMINAL_TASK: readonly string[] = ['succeeded', 'failed', 'cancelled'];
+
+export interface AcceptanceExplanation {
+  accepted: boolean;
+  /** One line: whether the MISSION is accepted, which a probe result alone never says. */
+  summary: string;
+  /** Why it is not accepted, from the evidence and the tasks shown on this page. */
+  reasons: string[];
+}
+
+/**
+ * The mission's acceptance state, kept apart from the probe result. A probe can
+ * pass while the mission is not accepted (evidence changed after the probe, or
+ * work is still scheduled), so this reads the mission, its open invalidations
+ * and its unfinished tasks, never the probe verdict alone.
+ */
+export function explainAcceptance(input: {
+  mission: Pick<Mission, 'status' | 'acceptanceReceiptId'> | null;
+  probe: ProbeNode | null;
+  invalidations: readonly Pick<InvalidationNode, 'resolvedAt'>[];
+  tasks: readonly Pick<TaskNode, 'status'>[];
+}): AcceptanceExplanation | null {
+  const { mission, probe, invalidations, tasks } = input;
+  if (!mission) return null;
+  if (mission.status === 'succeeded')
+    return {
+      accepted: true,
+      summary: mission.acceptanceReceiptId
+        ? `Mission accepted: acceptance receipt ${shortId(mission.acceptanceReceiptId)} was accepted for this mission.`
+        : 'Mission accepted.',
+      reasons: [],
+    };
+  const reasons: string[] = [];
+  const open = invalidations.filter((item) => !item.resolvedAt).length;
+  if (open > 0)
+    reasons.push(
+      `${open} evidence ${open === 1 ? 'change is' : 'changes are'} still open. The mission cannot be accepted until ${open === 1 ? 'it is' : 'they are'} resolved.`,
+    );
+  const unfinished = tasks.filter(
+    (task) => !TERMINAL_TASK.includes(task.status),
+  );
+  if (unfinished.length > 0) {
+    const counts = new Map<string, number>();
+    for (const task of unfinished)
+      counts.set(task.status, (counts.get(task.status) ?? 0) + 1);
+    reasons.push(
+      `${unfinished.length} ${unfinished.length === 1 ? 'task is' : 'tasks are'} not finished (${[
+        ...counts,
+      ]
+        .map(
+          ([status, count]) => `${count} ${statusLabel(status).toLowerCase()}`,
+        )
+        .join(', ')}).`,
+    );
+  }
+  if (mission.status === 'failed' || mission.status === 'cancelled')
+    reasons.push(
+      `The mission ended ${statusLabel(mission.status).toLowerCase()}.`,
+    );
+  if (probe?.verdict === 'fail') reasons.push('The latest probe failed.');
+  if (reasons.length === 0)
+    reasons.push(
+      probe?.verdict === 'pass'
+        ? 'The latest probe passed, but acceptance has not been recorded for the mission yet.'
+        : 'Waiting for an acceptance probe to pass and be recorded.',
+    );
+  return {
+    accepted: false,
+    summary: `Mission not accepted (status: ${statusLabel(mission.status)}).`,
+    reasons,
+  };
+}
+
 function ProbePanel({
   probe,
   acceptanceReceiptId,
+  mission,
+  invalidations,
+  tasks,
 }: {
   probe: ProbeNode | null;
   acceptanceReceiptId: string | null;
+  mission: Mission | null;
+  invalidations: readonly InvalidationNode[];
+  tasks: readonly TaskNode[];
 }) {
+  const acceptance = explainAcceptance({
+    mission,
+    probe,
+    invalidations,
+    tasks,
+  });
   return (
     <Panel
       title="Acceptance probe"
       className="nd-probe"
-      empty={probe === null && acceptanceReceiptId === null}
+      empty={
+        probe === null && acceptanceReceiptId === null && acceptance === null
+      }
       emptyText="The acceptance probe has not run yet."
     >
-      {probe && (
+      {probe ? (
         <div>
           <p>
-            Verdict:{' '}
+            Probe result:{' '}
             <StatusPill
               status={probe.verdict ?? 'unknown'}
               label={
@@ -274,7 +368,7 @@ function ProbePanel({
             <span className="nd-id">receipt {shortId(probe.receiptId)}</span>
           </p>
           {probe.invariants.length > 0 && (
-            <ul aria-label="Acceptance invariants">
+            <ul aria-label="Probe invariants">
               {probe.invariants.map((invariant) => (
                 <li key={invariant.name}>
                   <StatusPill
@@ -287,12 +381,38 @@ function ProbePanel({
             </ul>
           )}
         </div>
+      ) : (
+        <p>The acceptance probe has not run yet.</p>
       )}
       {!probe && acceptanceReceiptId && (
         <p>
           Acceptance receipt <code>{shortId(acceptanceReceiptId)}</code> is
           recorded for this mission.
         </p>
+      )}
+      {acceptance && (
+        <div className="nd-acceptance-state" aria-label="Mission acceptance">
+          <p>
+            <StatusPill
+              status={acceptance.accepted ? 'accepted' : 'not_accepted'}
+              label={acceptance.accepted ? 'Accepted' : 'Not accepted'}
+              tone={acceptance.accepted ? 'ok' : 'warn'}
+            />{' '}
+            {acceptance.summary}
+          </p>
+          {acceptance.reasons.length > 0 && (
+            <ul aria-label="Why the mission is not accepted">
+              {acceptance.reasons.map((reason) => (
+                <li key={reason}>{reason}</li>
+              ))}
+            </ul>
+          )}
+          <p className="nd-note">
+            A probe result is not the mission&apos;s acceptance: the probe reads
+            the checkout app once, while acceptance also needs every evidence
+            change resolved and every task finished.
+          </p>
+        </div>
       )}
     </Panel>
   );
@@ -306,6 +426,9 @@ export function AcceptanceConsole({
   receipts,
   probe,
   acceptanceReceiptId,
+  mission,
+  invalidations,
+  tasks,
   onChanged,
 }: {
   health: HealthStatus | null;
@@ -315,6 +438,9 @@ export function AcceptanceConsole({
   receipts: readonly ReceiptNode[];
   probe: ProbeNode | null;
   acceptanceReceiptId: string | null;
+  mission: Mission | null;
+  invalidations: readonly InvalidationNode[];
+  tasks: readonly TaskNode[];
   /** called after an edit or an injector run so the page can refresh */
   onChanged: () => void;
 }) {
@@ -326,7 +452,13 @@ export function AcceptanceConsole({
         error={healthError}
         loading={healthLoading && health === null}
       />
-      <ProbePanel probe={probe} acceptanceReceiptId={acceptanceReceiptId} />
+      <ProbePanel
+        probe={probe}
+        acceptanceReceiptId={acceptanceReceiptId}
+        mission={mission}
+        invalidations={invalidations}
+        tasks={tasks}
+      />
       <section className="nd-panel nd-controls" aria-label="Scenario controls">
         <h3 className="nd-panel-title">Scenario controls</h3>
         <ManualEdit receipts={receipts} onChanged={onChanged} />

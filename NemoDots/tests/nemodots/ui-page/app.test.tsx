@@ -46,6 +46,7 @@ import { App } from '../../../src/client/App';
 import { ids } from '../contracts/fixtures.js';
 import { snapshot } from '../ui/helpers';
 import {
+  FakeApiError,
   byLabel,
   calls,
   fakeStream,
@@ -189,6 +190,37 @@ afterEach(async () => {
   await act(async () => root?.unmount());
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+describe('product name in the user-facing copy', () => {
+  it('the unlock screen says NemoDots and does not call the product a template or OpenDots', async () => {
+    installBrowser();
+    routedApi(api, {
+      'GET /state': new FakeApiError('Enter your owner access token.', 401),
+      'GET /workspace': new FakeApiError('Enter your owner access token.', 401),
+    });
+    await renderApp();
+    const text = textOf(root);
+    expect(text).toContain('NemoDots is locked.');
+    expect(text).toContain('configured on this NemoDots server');
+    expect(text).toContain('Unlock NemoDots');
+    expect(text).not.toContain('little corner');
+    expect(text).not.toMatch(/OpenDots|this template/);
+  });
+
+  it('keeps the upstream attribution in the sidebar and links to the upstream repository', async () => {
+    installBrowser();
+    await renderApp();
+    expect(textOf(root)).toContain('BUILT ON OPENDOTS');
+    const links = root.root.findAll(
+      (node) =>
+        node.type === 'a' &&
+        String(node.props.href ?? '').startsWith(
+          'https://github.com/CopilotKit/OpenDots',
+        ),
+    );
+    expect(links.length).toBeGreaterThan(0);
+  });
 });
 
 describe('App with the mission view', () => {

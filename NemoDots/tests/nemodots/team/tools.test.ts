@@ -11,6 +11,7 @@ import {
   claimed,
   digestToUuid,
   noDefect,
+  helpers,
   rig,
   runHandler,
   StubObserver,
@@ -85,6 +86,110 @@ describe('D5: an investigator cannot propose; the transcript shows the delegatio
       toolCallId: 'd',
       justification: expect.stringContaining('mismatch'),
     });
+  });
+
+  it('wait_for_children runs PARKED: the poll loop is inside helpers.parked (no worker slot), after the task is marked waiting', async () => {
+    const r = configRig([
+      calls({
+        id: 'd',
+        name: 'delegate_task',
+        args: {
+          title: 'Repair cache schema',
+          role: 'cache_specialist',
+          question: 'Restore the cache schema the entries carry.',
+          dependsOn: [],
+          justification: 'metrics show a schema mismatch (receipt cited)',
+        },
+      }),
+      calls({ id: 'w', name: 'wait_for_children', args: {} }),
+      text('The cache specialist handled the repair.'),
+    ]);
+    const child = uuid() as never;
+    r.coordinator.resume = [
+      {
+        allTerminal: false,
+        children: [
+          {
+            id: child,
+            status: 'running',
+            outputId: null,
+            role: 'cache_specialist',
+          },
+        ],
+      },
+      {
+        allTerminal: true,
+        children: [
+          {
+            id: child,
+            status: 'succeeded',
+            outputId: null,
+            role: 'cache_specialist',
+          },
+        ],
+      },
+    ];
+    const control = helpers();
+    control.parked = async (wait) => {
+      r.coordinator.order.push('park:enter');
+      try {
+        return await wait();
+      } finally {
+        r.coordinator.order.push('park:exit');
+      }
+    };
+    const outcome = await runHandler(r, claimed('investigator'), control);
+    expect(outcome.type).toBe('output');
+    const order = r.coordinator.order.filter(
+      (x) => !x.startsWith('model_call') && x !== 'read_set',
+    );
+    expect(order).toEqual([
+      'mark_waiting',
+      'park:enter',
+      'resume_from_waiting',
+      'resume_from_waiting',
+      'park:exit',
+    ]);
+  });
+
+  it('a wait that is aborted while parked ends the attempt at the next checkpoint and the slot is still given back', async () => {
+    const r = configRig([
+      calls({
+        id: 'd',
+        name: 'delegate_task',
+        args: {
+          title: 'Repair cache schema',
+          role: 'cache_specialist',
+          question: 'Restore the cache schema the entries carry.',
+          dependsOn: [],
+          justification: 'metrics show a schema mismatch (receipt cited)',
+        },
+      }),
+      calls({ id: 'w', name: 'wait_for_children', args: {} }),
+      text('unreachable'),
+    ]);
+    r.coordinator.resume = [{ allTerminal: false, children: [] }];
+    const control = helpers();
+    let exited = false;
+    control.parked = async (wait) => {
+      try {
+        return await wait();
+      } finally {
+        exited = true;
+      }
+    };
+    // invalidation arrives while parked: the wait loop's checkpoint throws
+    const original = control.checkpoint.bind(control);
+    let waitCheckpoints = 0;
+    control.checkpoint = async () => {
+      if (r.coordinator.waiting > 0 && ++waitCheckpoints === 2)
+        control.abortAtCheckpoint = 0;
+      await original();
+    };
+    await expect(
+      runHandler(r, claimed('investigator'), control),
+    ).rejects.toThrow(/attempt aborted/);
+    expect(exited).toBe(true);
   });
 
   it('delegation pre-checks: role table, justification, capability', () => {

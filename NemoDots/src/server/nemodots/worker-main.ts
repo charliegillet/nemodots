@@ -11,16 +11,10 @@
 // exits non-zero. No fallback provider.
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { NemoDotsEnvError } from './config/env.js';
-import { buildRuntime } from './bootstrap.js';
+import { buildRuntime, findAppRoot } from './bootstrap.js';
 
-const APP_ROOT = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  '..',
-  '..',
-  '..',
-);
+const APP_ROOT = findAppRoot();
 
 // Fills only names that are unset; never overrides the environment.
 if (process.env.NEMODOTS_ENV_FILE !== 'none')

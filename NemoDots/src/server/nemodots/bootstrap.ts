@@ -17,6 +17,7 @@
 //
 // Role URLs are read into this process only (never exported to children).
 import { randomInt, randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Hono } from 'hono';
@@ -132,12 +133,23 @@ import {
 } from './telemetry/index.js';
 import { createWatcher, ownerEdit, type Watcher } from './watcher/index.js';
 
-const APP_ROOT = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  '..',
-  '..',
-  '..',
-);
+/**
+ * The project root: the nearest ancestor of this module with a package.json.
+ * A fixed number of `..` is wrong for one of the two layouts this file runs
+ * in (src/server/nemodots/ under tsx, dist/server/server/nemodots/ built).
+ */
+export function findAppRoot(
+  start = path.dirname(fileURLToPath(import.meta.url)),
+): string {
+  let dir = start;
+  for (;;) {
+    if (existsSync(path.join(dir, 'package.json'))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) return process.cwd();
+    dir = parent;
+  }
+}
+const APP_ROOT = findAppRoot();
 
 export type NemoDotsState =
   'unconfigured' | 'stopped' | 'starting' | 'running' | 'failed' | 'stopping';

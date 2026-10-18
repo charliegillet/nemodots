@@ -269,10 +269,8 @@ export function App() {
     return (
       <main className="unlock">
         <Mascot />
-        <h1>Your own little corner.</h1>
-        <p>
-          Enter the owner access token configured on this template’s server.
-        </p>
+        <h1>NemoDots is locked.</h1>
+        <p>Enter the owner access token configured on this NemoDots server.</p>
         <form
           onSubmit={async (e) => {
             e.preventDefault();
@@ -550,7 +548,7 @@ export function App() {
             <ArrowUpRight size={13} />
           </a>
           <div className="version">
-            OPEN SOURCE TEMPLATE <span>v0.1</span>
+            BUILT ON OPENDOTS <span>v0.1</span>
           </div>
         </div>
       </aside>

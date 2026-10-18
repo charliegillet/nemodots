@@ -130,6 +130,12 @@ const attemptTask = () =>
 
 describe('[scripted demo] the honest disjunction on the demo path (D6)', () => {
   beforeAll(use('demo'));
+
+  it('[fact, DA-14] a mission on a local scripted endpoint is stamped live: the badge says "not fixture", only the host says Crusoe', () => {
+    expect(ev.mission.mode).toBe('live');
+    expect(JSON.stringify(ev.mission.provider)).toContain('127.0.0.1');
+  });
+
   it('the dependent change fired on the proposal', () => {
     expect(ev.faultSteps.map((s) => [s.step_index, s.status])).toEqual([
       [0, 'applied'],
@@ -196,9 +202,12 @@ describe.each(['demo', 'single'])(
     it('every model request body (the complete agent-visible corpus) is clean', () => {
       expect(ev.calls.length).toBeGreaterThan(20);
       const found = ev.calls.flatMap((call) =>
-        hits(call.raw, [...forbidden(), 'PROBE-SKU', 'caused_by']).map(
-          (hit) => `call ${call.n} (${call.role}): ${hit}`,
-        ),
+        hits(call.raw, [
+          ...forbidden(),
+          'PROBE-SKU',
+          'caused_by',
+          'checkout.acceptance',
+        ]).map((hit) => `call ${call.n} (${call.role}): ${hit}`),
       );
       expect(found).toEqual([]);
     });
@@ -333,6 +342,15 @@ describe.each(['demo', 'single'])(
 
 describe('[scripted demo] DA-02: an invalidation whose affected tasks were all repaired must close', () => {
   beforeAll(use('demo'));
+
+  it('control: the single-fault mission (no second invalidation in quick succession) succeeds', () => {
+    const single = runs.get('single')!;
+    expect({
+      status: single.mission.status,
+      reason: single.mission.failure_reason,
+    }).toEqual({ status: 'succeeded', reason: null });
+  });
+
   // openInvalidation (contracts/recovery.ts) treats an `invalidated` attempt as
   // resolved only through successors whose repairOf points at it and that are
   // `published` or `invalidated`. A schema advance supersedes the config key
