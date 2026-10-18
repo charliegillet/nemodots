@@ -15,6 +15,9 @@ export default mergeConfig(
         'tests/nemodots/live/**',
         'tests/nemodots/e2e/**',
         'tests/nemodots/acceptance/**',
+        // DB/Redis-backed concurrency adversary; run it through the stack
+        // script with tests/nemodots/adversarial/concurrency/vitest.config.ts.
+        'tests/nemodots/adversarial/concurrency/**',
       ],
     },
   }),
