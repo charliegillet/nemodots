@@ -128,8 +128,8 @@ export function createPgTeamReader(pool: pg.Pool): TeamReader {
           WHERE t.mission_id = $1
             AND t.status = 'succeeded'
             AND o.id = t.output_id
-            AND t.id = ANY((SELECT prerequisites FROM coordinator.tasks
-                             WHERE id = $2 AND mission_id = $1))
+            AND t.id = ANY(COALESCE((SELECT prerequisites FROM coordinator.tasks
+                                      WHERE id = $2 AND mission_id = $1), '{}'::uuid[]))
           ORDER BY t.ordinal, o.id`,
         [missionId, taskId],
       );

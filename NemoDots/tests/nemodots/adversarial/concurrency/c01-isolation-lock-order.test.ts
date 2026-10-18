@@ -1,12 +1,24 @@
 // C1 (high): the collection version must advance only on key insert/delete, so
 // the benign B1 change (ui.banner_text) leaves every receipt current; and every
 // writer must lock the collection row FIRST and members in key order, so an
-// injector key insert and an action commit never deadlock (40P01).
+// injector key insert/delete and an action commit never deadlock (40P01).
 // Expected (ARCHITECTURE 3, 5.1, 14 C1): see the per-test comments.
 //
 // The deadlock detector is the instrumented pool (harness.ts): it records
 // SQLSTATE 40P01 / 40001 before withTransaction retries, so a retried deadlock
-// is still counted. A negative control proves the detector sees a real one.
+// is still counted.
+//
+// What discriminates a reversed lock order: a raw session pre-locks ONE row so
+// that a commit and an injector delete both queue on it, in a chosen order,
+// each already holding the other row. With collection-first writers both
+// complete ("member pre-locked", "collection pre-locked"). The same shapes
+// with a writer that takes the member BEFORE the collection (a raw session
+// standing in for a reversed commit) deadlock and the detector records the
+// 40P01 (negative controls A and B), so a reversed order in production would
+// turn those tests red. The randomized stress is non-vacuous: its intents are
+// admitted BEFORE the writers start, the pipelines no writer can invalidate
+// must commit, and in "parked" mode one commit holding the collection and a
+// member lock is parked while every writer queues behind it.
 import { describe, expect, it } from 'vitest';
 import {
   advanceConfig,
@@ -14,12 +26,14 @@ import {
 } from '../../../../src/server/nemodots/sandbox/version-authority.js';
 import { withTransaction } from '../../../../src/server/nemodots/db/tx.js';
 import {
+  actionHistory,
   collectionReceipt,
   collectionVersion,
   configState,
   createAttempt,
   emitModelCall,
   externalChange,
+  historyRows,
   intentStatus,
   memberReceipt,
   observed,
@@ -54,6 +68,125 @@ async function intentWithCollection(
     proposeCtx({ attempt, ...call }),
   );
   return { intent, collection, member };
+}
+
+/** An intent whose emitting snapshot carries the member, the health and (optionally) the collection. */
+async function intentWithVector(
+  world: World,
+  key: string,
+  value: ConfigScalar,
+  options: { collection: boolean },
+) {
+  const attempt = await createAttempt(world);
+  const member = await memberReceipt(world, key);
+  const extra = options.collection ? [await collectionReceipt(world)] : [];
+  const health = await observed(world, 'checkout.health');
+  const call = await emitModelCall(world, attempt, [member, ...extra, health]);
+  const state = await configState(world, key);
+  return world.service.propose(
+    setConfigInput(value, state.value as ConfigScalar, { key }),
+    proposeCtx({ attempt, ...call }),
+  );
+}
+
+const MEMBER_LOCK =
+  "SELECT 1 FROM checkout.config_entries WHERE key = 'db.pool_max' FOR UPDATE";
+const COLLECTION_LOCK =
+  'SELECT 1 FROM checkout.config_collection WHERE singleton FOR UPDATE';
+
+/** A raw injector session that holds one row lock until released. */
+async function holdLock(world: World, lockSql: string) {
+  const client = await world.injector.connect();
+  await client.query('BEGIN');
+  await client.query(lockSql);
+  return {
+    async release() {
+      try {
+        await client.query('COMMIT');
+      } finally {
+        client.release();
+      }
+    },
+  };
+}
+
+const insertKey = (world: World, key: string, value: ConfigScalar) =>
+  withTransaction(world.injector, (client) =>
+    advanceConfigUnconditionally(client, {
+      key,
+      value,
+      insertIfMissing: true,
+      causedBy: { actor: 'injector' },
+    }),
+  );
+
+const deleteKey = (world: World, key: string) =>
+  withTransaction(world.injector, (client) =>
+    advanceConfigUnconditionally(client, {
+      key,
+      deleteKey: true,
+      causedBy: { actor: 'injector' },
+    }),
+  );
+
+/**
+ * A writer with the REVERSED order (member row, then collection row), as a raw
+ * session. It stands in for a commit that locked members before the
+ * collection; resolves to 'ok' or the SQLSTATE that killed it.
+ */
+async function reversedWriter(world: World): Promise<string> {
+  const client = await world.injector.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(MEMBER_LOCK);
+    await client.query(COLLECTION_LOCK);
+    await client.query('COMMIT');
+    return 'ok';
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    return (error as { code?: string }).code ?? 'error';
+  } finally {
+    client.release();
+  }
+}
+
+const settleCode = <T>(work: Promise<T>) =>
+  work.then(
+    (value) => ({ ok: true as const, value }),
+    (error: { code?: string; name?: string }) => ({
+      ok: false as const,
+      code: error.code ?? error.name ?? 'error',
+    }),
+  );
+
+/** Per key: history is 1..n without gaps; the head equals the last row; a deleted key ends in a NULL value. */
+async function expectGaplessAuthority(world: World) {
+  const history = await world.admin.query<{
+    key: string;
+    version: string;
+    value: unknown;
+  }>(
+    'SELECT key, version, value FROM checkout.config_versions ORDER BY key, version',
+  );
+  const heads = new Map(
+    (
+      await world.admin.query<{ key: string; version: string }>(
+        'SELECT key, version FROM checkout.config_entries',
+      )
+    ).rows.map((row) => [row.key, Number(row.version)]),
+  );
+  const byKey = new Map<string, { version: number; value: unknown }[]>();
+  for (const row of history.rows)
+    byKey.set(row.key, [
+      ...(byKey.get(row.key) ?? []),
+      { version: Number(row.version), value: row.value },
+    ]);
+  for (const [key, rows] of byKey) {
+    rows.forEach((row, i) => expect(row.version, key).toBe(i + 1));
+    const head = heads.get(key);
+    if (head !== undefined) expect(head, key).toBe(rows.length);
+    else expect(rows.at(-1)!.value, `${key} deleted`).toBeNull();
+  }
 }
 
 describe('C1 benign change isolation (B1)', () => {
@@ -171,81 +304,257 @@ describe('C1 collection-first lock order', () => {
     });
   });
 
-  it('stress: commits, key inserts, key deletes and value updates interleaved: zero deadlocks, authority history stays gapless', async () => {
+  it('member pre-locked: a commit and an injector delete of the same key queue behind it (commit first, then the delete); both complete, zero 40P01', async () => {
     await withWorld(async (world) => {
-      const keys = [
-        'cache.namespace',
-        'cache.schema_version',
-        'db.pool_max',
-        'db.statement_timeout_ms',
-        'routing.inventory_source',
-        'orders.write_enabled',
-      ];
-      const proposals: Awaited<ReturnType<typeof intentWithCollection>>[] = [];
-      const values: ConfigScalar[] = [
-        'catalog-b',
-        2,
-        12,
-        6000,
-        'replica_stale',
-        false,
-      ];
-      for (let i = 0; i < keys.length; i += 1)
-        proposals.push(await intentWithCollection(world, keys[i], values[i]));
-      const writers: Promise<unknown>[] = [];
-      for (let round = 0; round < 6; round += 1) {
-        writers.push(
-          withTransaction(world.injector, (client) =>
-            advanceConfigUnconditionally(client, {
-              key: `adv.stress_${round}`,
-              value: round,
-              insertIfMissing: true,
-              causedBy: { actor: 'injector' },
-            }),
-          ),
-        );
-        writers.push(externalChange(world, 'ui.banner_text', `b${round}`));
-      }
-      const pipelines = proposals.map(({ intent }, i) =>
-        (async () => {
-          await sleep(i * 3);
-          const admitted = await world.service.admit(
-            intent.id,
-            `dispatcher-${i}`,
-          );
-          if (admitted.status !== 'admitted') return admitted;
-          return world.service.commit(intent.id, admitted.dispatch!.fence);
-        })(),
+      const intent = await intentWithVector(world, 'db.pool_max', 20, {
+        collection: true,
+      });
+      const admitted = await world.service.admit(intent.id, 'dispatcher-a');
+      expect(admitted.status).toBe('admitted');
+      const held = await holdLock(world, MEMBER_LOCK);
+      // The commit takes intent, mission share and the collection row, then
+      // queues on the member row.
+      const commit = settleCode(
+        world.service.commit(intent.id, admitted.dispatch!.fence),
       );
-      const settled = await Promise.allSettled([...writers, ...pipelines]);
-      for (const result of settled) expect(result.status).toBe('fulfilled');
+      await waitForLockWaiters(world, 1);
+      // The delete takes the collection row FIRST, so it queues on it behind
+      // the commit (a delete that took the member first would deadlock here).
+      const removal = settleCode(deleteKey(world, 'db.pool_max'));
+      await waitForLockWaiters(world, 2);
+      await held.release();
+      const [committed, deleted] = await Promise.all([commit, removal]);
+      expect(committed).toMatchObject({
+        ok: true,
+        value: { status: 'committed' },
+      });
+      expect(deleted).toMatchObject({
+        ok: true,
+        value: { operation: 'delete' },
+      });
+      expect(
+        (await historyRows(world, 'db.pool_max')).map((r) => [
+          r.version,
+          r.caused_by_action_id === intent.id ? 'action' : r.caused_by_actor,
+          r.value === null ? null : 'value',
+        ]),
+      ).toEqual([
+        [1, 'seed', 'value'],
+        [2, 'action', 'value'],
+        [3, 'injector', null],
+      ]);
       expect(world.deadlocks()).toEqual([]);
-      // Authority invariants: per key, history versions are 1..n without gaps,
-      // and the head equals the last history row.
-      const { rows } = await world.admin.query<{
-        key: string;
-        head: string;
-        max: string;
-        count: string;
-      }>(
-        `SELECT e.key, e.version AS head, max(v.version) AS max, count(v.*) AS count
-           FROM checkout.config_entries e
-           JOIN checkout.config_versions v ON v.key = e.key
-          GROUP BY e.key, e.version`,
-      );
-      for (const row of rows) {
-        expect(Number(row.max)).toBe(Number(row.head));
-        expect(Number(row.count)).toBe(Number(row.head));
-      }
-      // Every committed intent moved exactly its own key by one.
-      for (const { intent } of proposals) {
-        const status = (await intentStatus(world, intent.id)).status;
-        expect(['committed', 'blocked']).toContain(status);
-      }
     });
   });
 
-  it('negative control: opposite lock orders DO deadlock and the detector records the 40P01 (so the zero counts above mean something)', async () => {
+  it('collection pre-locked: an injector delete queues first, the commit second; the delete lands, the commit fails closed (blocked), zero 40P01', async () => {
+    await withWorld(async (world) => {
+      const intent = await intentWithVector(world, 'db.pool_max', 20, {
+        collection: true,
+      });
+      const admitted = await world.service.admit(intent.id, 'dispatcher-a');
+      expect(admitted.status).toBe('admitted');
+      const held = await holdLock(world, COLLECTION_LOCK);
+      const removal = settleCode(deleteKey(world, 'db.pool_max'));
+      await waitForLockWaiters(world, 1);
+      const commit = settleCode(
+        world.service.commit(intent.id, admitted.dispatch!.fence),
+      );
+      await waitForLockWaiters(world, 2);
+      await held.release();
+      const [committed, deleted] = await Promise.all([commit, removal]);
+      expect(deleted).toMatchObject({
+        ok: true,
+        value: { operation: 'delete' },
+      });
+      expect(committed).toMatchObject({
+        ok: true,
+        value: { status: 'blocked' },
+      });
+      expect(await actionHistory(world, intent.id)).toHaveLength(0);
+      expect(world.deadlocks()).toEqual([]);
+    });
+  });
+
+  it('negative control A: the "member pre-locked" shape with a REVERSED writer (member before collection) deadlocks, and the detector records the 40P01', async () => {
+    await withWorld(async (world) => {
+      const held = await holdLock(world, MEMBER_LOCK);
+      // Stand-in for a reversed commit: queues on the member row.
+      const reversed = reversedWriter(world);
+      await waitForLockWaiters(world, 1);
+      // Collection-first delete: holds the collection row, queues on the member.
+      const removal = settleCode(deleteKey(world, 'db.pool_max'));
+      await waitForLockWaiters(world, 2);
+      await held.release();
+      await Promise.all([reversed, removal]);
+      expect(world.deadlocks().length).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  it('negative control B: the "collection pre-locked" shape with a REVERSED writer deadlocks, and the detector records the 40P01', async () => {
+    await withWorld(async (world) => {
+      const held = await holdLock(world, COLLECTION_LOCK);
+      const removal = settleCode(deleteKey(world, 'db.pool_max'));
+      await waitForLockWaiters(world, 1);
+      // Takes the member row at once, then queues on the collection row.
+      const reversed = reversedWriter(world);
+      await waitForLockWaiters(world, 2);
+      await held.release();
+      await Promise.all([reversed, removal]);
+      expect(world.deadlocks().length).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  // Non-vacuous stress. Five pipelines, admitted BEFORE any writer starts:
+  //   P (vector holds the collection): cache.schema_version, db.pool_max,
+  //     routing.inventory_source: a membership change before their commit
+  //     legitimately blocks them;
+  //   Q (member + health only): db.statement_timeout_ms, orders.write_enabled:
+  //     nothing the writers do touches their rows, so they MUST commit.
+  // Writers: four key inserts, an insert followed by a delete, a delete of a P
+  // member, a value update of another P member, and the benign ui.banner_text.
+  // "parked": the first P commit is parked after its last write with the
+  // collection row and its member held, while every writer and commit queues;
+  // it is released once they all wait. "free": staggered start, no barrier.
+  describe.each(['parked', 'free-a', 'free-b'] as const)(
+    'stress (%s): commits, key inserts, key deletes and value updates interleaved',
+    (mode) => {
+      it('zero deadlocks; Q commits; every outcome consistent; authority history gapless', async () => {
+        await withWorld(async (world) => {
+          const pipelines: {
+            key: string;
+            value: ConfigScalar;
+            collection: boolean;
+          }[] = [
+            { key: 'cache.schema_version', value: 2, collection: true },
+            { key: 'db.pool_max', value: 12, collection: true },
+            {
+              key: 'routing.inventory_source',
+              value: 'replica_stale',
+              collection: true,
+            },
+            { key: 'db.statement_timeout_ms', value: 6000, collection: false },
+            { key: 'orders.write_enabled', value: false, collection: false },
+          ];
+          const intents = [];
+          const fences: number[] = [];
+          for (const [i, pipeline] of pipelines.entries()) {
+            const intent = await intentWithVector(
+              world,
+              pipeline.key,
+              pipeline.value,
+              { collection: pipeline.collection },
+            );
+            const admitted = await world.service.admit(
+              intent.id,
+              `dispatcher-${i}`,
+            );
+            expect(admitted.status, pipeline.key).toBe('admitted');
+            intents.push(intent);
+            fences.push(admitted.dispatch!.fence);
+          }
+          const commitOf = (i: number) =>
+            world.service.commit(intents[i].id, fences[i]);
+
+          const parked =
+            mode === 'parked' ? park('after_lock_before_commit') : null;
+          const work: Promise<unknown>[] = [];
+          if (parked) {
+            work.push(commitOf(0));
+            await parked.arrived; // P0 holds intent, mission share, collection, member
+          }
+          const stagger = (n: number) =>
+            mode === 'free-b'
+              ? sleep((n * 3) % 7)
+              : mode === 'free-a'
+                ? sleep(n % 4)
+                : Promise.resolve();
+          const deleted: Promise<{ operation: string }>[] = [];
+          for (let round = 0; round < 4; round += 1)
+            work.push(
+              (async () => {
+                await stagger(round);
+                return insertKey(world, `adv.stress_${round}`, round);
+              })(),
+            );
+          work.push(
+            (async () => {
+              await stagger(5);
+              await insertKey(world, 'adv.tmp', 1);
+              return deleteKey(world, 'adv.tmp');
+            })(),
+          );
+          const removal = (async () => {
+            await stagger(6);
+            return deleteKey(world, 'routing.inventory_source');
+          })();
+          deleted.push(removal);
+          work.push(removal);
+          work.push(
+            (async () => {
+              await stagger(7);
+              return externalChange(world, 'cache.schema_version', 99);
+            })(),
+          );
+          work.push(externalChange(world, 'ui.banner_text', 'b1'));
+          for (let i = parked ? 1 : 0; i < intents.length; i += 1)
+            work.push(
+              (async () => {
+                await stagger(i + 1);
+                return commitOf(i);
+              })(),
+            );
+          if (parked) {
+            await waitForLockWaiters(world, 3);
+            parked.release();
+          }
+          const settled = await Promise.allSettled(work);
+          expect(
+            settled
+              .filter((r) => r.status === 'rejected')
+              .map((r) => String((r as PromiseRejectedResult).reason)),
+          ).toEqual([]);
+          expect(world.deadlocks()).toEqual([]);
+          expect((await deleted[0]).operation).toBe('delete');
+          await expectGaplessAuthority(world);
+
+          let committed = 0;
+          for (const [i, pipeline] of pipelines.entries()) {
+            const status = await intentStatus(world, intents[i].id);
+            const wrote = await actionHistory(world, intents[i].id);
+            if (!pipeline.collection)
+              expect(
+                status.status,
+                `${pipeline.key} cannot be invalidated`,
+              ).toBe('committed');
+            if (status.status === 'committed') {
+              committed += 1;
+              // Moved exactly its own key, exactly one version, exactly once.
+              expect(wrote).toHaveLength(1);
+              expect(wrote[0].key).toBe(pipeline.key);
+              expect(wrote[0].version).toBe(
+                intents[i].expectedTargetVersion + 1,
+              );
+            } else {
+              expect(status.status).toBe('blocked');
+              expect(['stale_version', 'stale_pending_observation']).toContain(
+                status.blockReason,
+              );
+              expect(wrote).toHaveLength(0);
+            }
+          }
+          // Lower bounds so a run in which nothing commits cannot pass.
+          expect(committed).toBeGreaterThanOrEqual(mode === 'parked' ? 3 : 2);
+          if (mode === 'parked')
+            expect((await intentStatus(world, intents[0].id)).status).toBe(
+              'committed',
+            );
+        });
+      });
+    },
+  );
+
+  it('negative control C: opposite lock orders on two raw sessions DO deadlock and the detector records the 40P01 (the detector itself is live)', async () => {
     await withWorld(async (world) => {
       const one = await world.injector.connect();
       const two = await world.injector.connect();

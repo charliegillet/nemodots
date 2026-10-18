@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { digest } from '../../../../src/server/nemodots/contracts/index.js';
 import type { AttemptContext } from '../../../../src/server/nemodots/contracts/index.js';
+import { createPgTeamReader } from '../../../../src/server/nemodots/team/index.js';
 import { withLiveWorld, type LiveWorld } from './world.js';
 
 // The team tools over the REAL coordinator, ledger and PostgreSQL (a fresh
@@ -56,6 +57,36 @@ async function counts(world: LiveWorld, context: AttemptContext) {
     ),
   };
 }
+
+describe('team reader over PostgreSQL', () => {
+  it('every read the worker loop makes runs against the real schema', async () => {
+    await withLiveWorld('model', 'host.invalid', async (world) => {
+      const context = await claim(world);
+      const reader = createPgTeamReader(world.app);
+      const mission = await reader.mission(context.missionId);
+      expect(mission.budgets.maxDepth).toBe(3);
+      expect(
+        await reader.prerequisiteOutputs(context.missionId, context.taskId),
+      ).toEqual([]);
+      expect(await reader.taskOutputs(context.missionId, [])).toEqual([]);
+      expect(await reader.receipts([])).toEqual([]);
+      expect(await reader.snapshotVector('not-a-uuid', context)).toBeNull();
+      expect(
+        await reader.readSetOf(context.attemptId, context.missionId),
+      ).toEqual([]);
+      expect(
+        (await reader.planOverview(context.missionId)).length,
+      ).toBeGreaterThanOrEqual(2);
+      expect(await reader.missionUsage(context.missionId)).toEqual({
+        calls: 0,
+        tokens: 0,
+      });
+      const facts = await reader.delegationFacts(context);
+      expect(facts.parent.role).toBe('investigator');
+      expect(facts.limits.maxTasks).toBe(24);
+    });
+  }, 60_000);
+});
 
 describe('team tools over PostgreSQL', () => {
   it('observe_source: one receipt, one evidence edge, one readset entry, one event; a repeat confirms; unreadable sources write nothing', async () => {

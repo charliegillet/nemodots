@@ -10,13 +10,21 @@
 //   commit-first      the commit holds its locks, the writer waits: commit lands at the
 //                     expected version, the writer follows at version + 1
 //   invalidate-first / commit-first for an observed premise (registration of a new revision)
-//   random races      every committed action wrote exactly at its expected version
-//                     and nothing but the action's row sits between expected and the result
+//   contended commits 12 intents admitted at one expected version race 4 writers: the
+//                     parked winner commits exactly once, at its expected version; every
+//                     other commit is blocked; nothing else is written (lower bounds on
+//                     commits make a vacuous run fail)
 // 40001 serialization failures are retried by withTransaction (counted, reported);
-// one that ESCAPES the retries is a liveness finding.
+// one that ESCAPES the retries is finding CW-2 (medium), reproduced deterministically
+// in the second half of this file.
 import { describe, expect, it } from 'vitest';
 import {
+  clearBarriers,
+  setBarrier,
+} from '../../../../src/server/nemodots/actions/index.js';
+import {
   actionHistory,
+  authorizations,
   configState,
   externalChange,
   historyRows,
@@ -25,11 +33,19 @@ import {
   park,
   proposePool,
   scenario,
-  sleep,
   waitForLockWaiters,
   withWorld,
   type World,
 } from './harness.js';
+
+const settleOutcome = <T>(work: Promise<T>) =>
+  work.then(
+    (value) => ({ ok: true as const, value }),
+    (error: { code?: string }) => ({
+      ok: false as const,
+      code: error.code ?? 'error',
+    }),
+  );
 
 const LEVELS = ['read committed', 'repeatable read', 'serializable'] as const;
 
@@ -114,87 +130,209 @@ describe.each(LEVELS)('invalidation vs commit under %s', (isolation) => {
     });
   });
 
-  it('12 random races: every committed action wrote exactly at its expected version, nothing escapes the retries', async () => {
+  it('contended commits: 12 admitted intents at one expected version race 4 writers on the row; exactly one action wins, at its expected version; the rest are blocked, nothing else is written', async () => {
     await run(async (world) => {
-      const rounds: { id: string; expected: number }[] = [];
-      for (let i = 0; i < 12; i += 1) {
-        const s = await scenario(world, { key: 'db.pool_max' });
-        const intent = await proposePool(world, s, 11 + (i % 8));
-        rounds.push({ id: intent.id, expected: intent.expectedTargetVersion });
-      }
-      const tagged = <T>(label: string, work: Promise<T>) =>
-        work.catch(
-          (error: { code?: string; message?: string; stack?: string }) => {
-            throw Object.assign(
-              new Error(`${label}: ${error.code} ${error.message}`),
-              {
-                code: error.code,
-                origin: (error.stack ?? '').split('\n').slice(1, 6).join(' | '),
-              },
-            );
-          },
-        );
-      const outcomes = await Promise.allSettled([
-        ...rounds.map((round, i) =>
-          tagged(
-            `intent ${i}`,
-            (async () => {
-              await sleep((i * 5) % 17);
-              const admitted = await world.service.admit(
-                round.id as never,
-                `d${i}`,
-              );
-              if (admitted.status !== 'admitted') return admitted;
-              return world.service.commit(
-                round.id as never,
-                admitted.dispatch!.fence,
-              );
-            })(),
+      const escaped: string[] = [];
+      let totalCommitted = 0;
+      for (let round = 0; round < 3; round += 1) {
+        // All intents are admitted BEFORE any writer starts: the admissions
+        // are not the race, the commits are.
+        const intents: {
+          id: string;
+          expected: number;
+          fence: number;
+        }[] = [];
+        for (let i = 0; i < 12; i += 1) {
+          const s = await scenario(world, { key: 'db.pool_max' });
+          const intent = await proposePool(world, s, 11 + (i % 8));
+          const admitted = await world.service.admit(intent.id, `d${i}`);
+          expect(admitted.status).toBe('admitted');
+          intents.push({
+            id: intent.id,
+            expected: intent.expectedTargetVersion,
+            fence: admitted.dispatch!.fence,
+          });
+        }
+        const winner = (round * 5) % intents.length;
+        const commitOf = (i: number) =>
+          world.service.commit(intents[i].id as never, intents[i].fence);
+        const rejected = (label: string) => (error: { code?: string }) => {
+          escaped.push(`${label}: ${error.code ?? error}`);
+          return null;
+        };
+        // The winner parks holding the member row with every write done.
+        const parked = park('after_lock_before_commit');
+        const winning = commitOf(winner).catch(rejected(`winner ${winner}`));
+        await parked.arrived;
+        const others = intents
+          .map((_, i) => i)
+          .filter((i) => i !== winner)
+          .map((i) => commitOf(i).catch(rejected(`commit ${i}`)));
+        const writers = Array.from({ length: 4 }, (_, w) =>
+          externalChange(world, 'db.pool_max', 15 + round * 4 + w).catch(
+            rejected(`writer ${w}`),
           ),
-        ),
-        ...Array.from({ length: 4 }, (_, i) =>
-          tagged(
-            `writer ${i}`,
-            (async () => {
-              await sleep(i * 9);
-              return externalChange(world, 'db.pool_max', 15 + i);
-            })(),
-          ),
-        ),
-      ]);
-      const escaped = outcomes
-        .filter((o): o is PromiseRejectedResult => o.status === 'rejected')
-        .map(
-          (o) => o.reason as { code?: string; message: string; origin: string },
         );
-      // FINDING CW-2 (low, outside the design level): under SERIALIZABLE a
-      // 40001 can survive withTransaction's 5 attempts (observed in about 4 of
-      // 30 runs of this scenario, always from admit's blockIntent under heavy
-      // same-row contention). It is a liveness defect only: the safety
-      // assertions below hold for every outcome. At the design level (READ
-      // COMMITTED) nothing may escape.
-      const tolerated = isolation === 'read committed' ? [] : ['40001'];
-      expect(
-        escaped
-          .filter((reason) => !tolerated.includes(reason.code ?? ''))
-          .map((reason) => `${reason.message} @ ${reason.origin}`),
-      ).toEqual([]);
-      const history = await historyRows(world, 'db.pool_max');
-      history.forEach((row, i) => expect(row.version).toBe(i + 1)); // gapless
-      for (const round of rounds) {
-        const status = await intentStatus(world, round.id);
-        const wrote = await actionHistory(world, round.id);
-        if (status.status === 'committed') {
-          expect(wrote).toHaveLength(1);
-          expect(wrote[0].version).toBe(round.expected + 1); // CAS: only at the expected version
-        } else expect(wrote).toHaveLength(0);
+        await waitForLockWaiters(world, 4);
+        parked.release();
+        await Promise.all([winning, ...others, ...writers]);
+
+        const history = await historyRows(world, 'db.pool_max');
+        history.forEach((row, i) => expect(row.version).toBe(i + 1)); // gapless
+        let committed = 0;
+        for (const [i, round_] of intents.entries()) {
+          const status = await intentStatus(world, round_.id);
+          const wrote = await actionHistory(world, round_.id);
+          if (status.status === 'committed') {
+            committed += 1;
+            expect(i).toBe(winner);
+            expect(wrote).toHaveLength(1);
+            // CAS: only at the expected version.
+            expect(wrote[0].version).toBe(round_.expected + 1);
+          } else {
+            expect(wrote).toHaveLength(0);
+            if (status.status === 'blocked')
+              expect(status.blockReason).toBe('stale_version');
+            // A commit that was rejected (serialization failure that survived
+            // the retries) leaves the intent admitted and retryable.
+            else expect(status.status).toBe('admitted');
+          }
+        }
+        totalCommitted += committed;
+        // At most one action can win a version.
+        expect(committed).toBeLessThanOrEqual(1);
+        const sawSerializationFailure = world.failures.some(
+          (f) => f.code === '40001',
+        );
+        // Lower bound: the parked winner committed, unless PostgreSQL itself
+        // reported a serialization failure at a stronger isolation level.
+        if (isolation === 'read committed') {
+          expect(committed).toBe(1);
+          expect(escaped).toEqual([]);
+        } else expect(committed === 1 || sawSerializationFailure).toBe(true);
+        expect(world.failures.filter((f) => f.code === '40P01')).toEqual([]);
       }
-      // At most one action can win the same expected version.
-      const committedCount = (
-        await Promise.all(rounds.map((r) => intentStatus(world, r.id)))
-      ).filter((x) => x.status === 'committed').length;
-      expect(committedCount).toBeLessThanOrEqual(1);
-      expect(world.failures.filter((f) => f.code === '40P01')).toEqual([]);
+      expect(totalCommitted).toBeGreaterThanOrEqual(
+        isolation === 'read committed' ? 3 : 1,
+      );
+      // Anything that escaped the retries may be a serialization failure
+      // (finding CW-2) and nothing else.
+      for (const reason of escaped) expect(reason).toMatch(/: 40001$/);
     });
   });
 });
+
+// FINDING CW-2 (medium): withTransaction retries 40001 five times, then
+// rethrows. admit and commit use that budget, so under REPEATABLE READ or
+// SERIALIZABLE a persistent serialization failure surfaces as a REJECTED call,
+// not as a `blocked` decision: ARCHITECTURE 5.1 says the outcomes are
+// equivalent at every level, which is true for safety and false for liveness.
+//
+// Deterministic forcing: the before_lock barrier runs inside the real
+// admission / commit transaction AFTER its first statement (so a snapshot
+// exists at the stronger levels) and BEFORE the intent row lock. The handler
+// modifies the intent row in another session and commits, which makes
+// PostgreSQL itself raise 40001 ("could not serialize access due to concurrent
+// update") at the FOR UPDATE of every attempt at REPEATABLE READ and
+// SERIALIZABLE. At READ COMMITTED the same hook is harmless: FOR UPDATE reads
+// the latest row version (the design level is immune).
+describe.each(LEVELS)(
+  'CW-2 persistent serialization failure under %s',
+  (isolation) => {
+    const stronger = isolation !== 'read committed';
+
+    async function touchOnEveryAttempt(
+      world: World,
+      stage: 'admit' | 'commit',
+    ) {
+      const attempts: string[] = [];
+      setBarrier('before_lock', async (context) => {
+        if (context.stage !== stage) return;
+        attempts.push(context.actionId);
+        await world.admin.query(
+          'UPDATE coordinator.action_intents SET status = status WHERE id = $1',
+          [context.actionId],
+        );
+      });
+      return attempts;
+    }
+
+    it('admit: the escape is a loud rejection after the retry budget; the intent stays proposed, nothing is decided silently', async () => {
+      await withWorld(
+        async (world) => {
+          const s = await scenario(world);
+          const intent = await proposePool(world, s, 20);
+          const attempts = await touchOnEveryAttempt(world, 'admit');
+          const outcome = await settleOutcome(
+            world.service.admit(intent.id, 'dispatcher-a'),
+          );
+          if (!stronger) {
+            expect(outcome).toMatchObject({ ok: true });
+            expect(attempts).toHaveLength(1);
+            expect(world.failures.filter((f) => f.code === '40001')).toEqual(
+              [],
+            );
+            expect((await intentStatus(world, intent.id)).status).toBe(
+              'admitted',
+            );
+            return;
+          }
+          // The retry budget is spent (withTransaction default of 5 attempts)...
+          expect(attempts).toHaveLength(5);
+          expect(outcome).toMatchObject({ ok: false, code: '40001' });
+          expect(world.failures.filter((f) => f.code === '40001')).toHaveLength(
+            5,
+          );
+          // ...and nothing was decided: not blocked, not admitted, no Authorization.
+          expect((await intentStatus(world, intent.id)).status).toBe(
+            'proposed',
+          );
+          expect(await authorizations(world, intent.id)).toHaveLength(0);
+          // The rejection is recoverable: once the contention stops, the same
+          // call decides normally.
+          clearBarriers();
+          const retried = await world.service.admit(intent.id, 'dispatcher-a');
+          expect(retried.status).toBe('admitted');
+        },
+        { isolation },
+      );
+    });
+
+    it('commit: the escape is a loud rejection; the intent stays admitted and claimable, nothing is written', async () => {
+      await withWorld(
+        async (world) => {
+          const s = await scenario(world);
+          const intent = await proposePool(world, s, 20);
+          const admitted = await world.service.admit(intent.id, 'dispatcher-a');
+          expect(admitted.status).toBe('admitted');
+          const attempts = await touchOnEveryAttempt(world, 'commit');
+          const outcome = await settleOutcome(
+            world.service.commit(intent.id, admitted.dispatch!.fence),
+          );
+          if (!stronger) {
+            expect(outcome).toMatchObject({
+              ok: true,
+              value: { status: 'committed' },
+            });
+            expect(attempts).toHaveLength(1);
+            return;
+          }
+          expect(attempts).toHaveLength(5); // commit passes maxAttempts: 5 explicitly
+          expect(outcome).toMatchObject({ ok: false, code: '40001' });
+          expect((await intentStatus(world, intent.id)).status).toBe(
+            'admitted',
+          );
+          expect(await actionHistory(world, intent.id)).toHaveLength(0);
+          expect((await configState(world, 'db.pool_max')).value).toBe(10);
+          clearBarriers();
+          const retried = await world.service.commit(
+            intent.id,
+            admitted.dispatch!.fence,
+          );
+          expect(retried.status).toBe('committed');
+        },
+        { isolation },
+      );
+    });
+  },
+);
