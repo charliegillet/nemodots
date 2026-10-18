@@ -65,7 +65,10 @@ async function restartRedis(world: World) {
   }))
     keys.push(...batch);
   const doomed = keys.filter(
-    (key) => key.startsWith(`${r.prefix}:effect:`) || key.endsWith(':epoch') || key.includes(':fence:'),
+    (key) =>
+      key.startsWith(`${r.prefix}:effect:`) ||
+      key.endsWith(':epoch') ||
+      key.includes(':fence:'),
   );
   if (doomed.length > 0) await r.client.del(doomed);
 }
@@ -76,7 +79,8 @@ function counting(counter: { evals: number }) {
     get: (key) => client.get(key),
     set: (key, value, options) => client.set(key, value, options),
     eval(script, options) {
-      counter.evals += 1;
+      // Only the effect script counts: tombstone writes are not effects.
+      if (script === EFFECT_SCRIPT) counter.evals += 1;
       return client.eval(script, options);
     },
   });
@@ -92,7 +96,9 @@ describe('idempotency is bound to the tool call (C5)', () => {
     await withWorld(
       async (world) => {
         await seedCache(world, 'catalog-a', ['p1']);
-        const attempt = await createAttempt(world, { role: 'cache_specialist' });
+        const attempt = await createAttempt(world, {
+          role: 'cache_specialist',
+        });
         const ns = await memberReceipt(world, 'cache.namespace');
         const pool = await memberReceipt(world, 'db.pool_max');
         const stats = await observed(world, 'redis.stats', {
@@ -101,12 +107,11 @@ describe('idempotency is bound to the tool call (C5)', () => {
         const health = await observed(world, 'checkout.health', {
           status: 'degraded',
         });
-        const { modelCallId, toolCallId } = await emitModelCall(world, attempt, [
-          ns,
-          pool,
-          stats,
-          health,
-        ]);
+        const { modelCallId, toolCallId } = await emitModelCall(
+          world,
+          attempt,
+          [ns, pool, stats, health],
+        );
         const ctx = { ...attempt.context, modelCallId, toolCallId } as never;
         const flush = await world.service.propose(flushInput('catalog-a'), ctx);
         const tampered = await world.service.propose(
@@ -180,12 +185,14 @@ describe('idempotency is bound to the tool call (C5)', () => {
       expect(replay.blockReason).toBe('idempotency_conflict');
       const done = await admitAndCommit(world, replay.id);
       expect(done.committed.status).toBe('blocked');
-      expect(await configState(world, 'db.statement_timeout_ms')).toMatchObject({
-        value: 6000,
-        version: 2,
-        actor: 'injector',
-        causedBy: null,
-      });
+      expect(await configState(world, 'db.statement_timeout_ms')).toMatchObject(
+        {
+          value: 6000,
+          version: 2,
+          actor: 'injector',
+          causedBy: null,
+        },
+      );
       expect(await configState(world, 'db.pool_max')).toMatchObject({
         value: 10,
         version: 1,
@@ -242,9 +249,13 @@ describe('idempotency is bound to the tool call (C5)', () => {
         pool,
         health,
       ]);
-      const input = setConfigInput(world, await configState(world, 'db.pool_max'), {
-        value: 20,
-      });
+      const input = setConfigInput(
+        world,
+        await configState(world, 'db.pool_max'),
+        {
+          value: 20,
+        },
+      );
       const before = {
         intents: await countRows(world, 'coordinator.action_intents'),
         outbox: await countRows(world, 'coordinator.outbox'),
@@ -295,17 +306,29 @@ describe('dispatch leases (ARCHITECTURE section 6)', () => {
           reached = true;
           await parked;
         });
-        const first = dispatchIntentDetailed(world.deps, intent.id, 'dispatcher-a');
+        const first = dispatchIntentDetailed(
+          world.deps,
+          intent.id,
+          'dispatcher-a',
+        );
         while (!reached) await sleep(10);
         const live = await intentRow(world, intent.id);
         expect(
           new Date(live.dispatcher_lease_expires_at as string).getTime(),
         ).toBeGreaterThan(Date.now());
 
-        const other = await dispatchIntentDetailed(world.deps, intent.id, 'dispatcher-b');
+        const other = await dispatchIntentDetailed(
+          world.deps,
+          intent.id,
+          'dispatcher-b',
+        );
         expect(other.disposition).toBe('unchanged');
         expect(other.intent.status).toBe('committed');
-        const same = await dispatchIntentDetailed(world.deps, intent.id, 'dispatcher-a');
+        const same = await dispatchIntentDetailed(
+          world.deps,
+          intent.id,
+          'dispatcher-a',
+        );
         expect(same.disposition).toBe('unchanged');
         expect(await dispatchAuthorizations(world, intent.id)).toHaveLength(1);
 
@@ -342,7 +365,11 @@ describe('dispatch leases (ARCHITECTURE section 6)', () => {
           if (ctx.stage === 'dispatch')
             await expireDispatcherLease(world, intent.id);
         });
-        const late = await dispatchIntentDetailed(world.deps, intent.id, 'dispatcher-a');
+        const late = await dispatchIntentDetailed(
+          world.deps,
+          intent.id,
+          'dispatcher-a',
+        );
         setBarrier('after_effect_before_record', null);
         // Its lease was gone: nothing was recorded under it.
         expect(late.disposition).toBe('unchanged');
@@ -377,11 +404,19 @@ describe('dispatch leases (ARCHITECTURE section 6)', () => {
       async (world) => {
         await seedCache(world, 'catalog-a', ['p1']);
         const intent = await committedFlush(world); // dispatcher-a
-        const other = await dispatchIntentDetailed(world.deps, intent.id, 'dispatcher-b');
+        const other = await dispatchIntentDetailed(
+          world.deps,
+          intent.id,
+          'dispatcher-b',
+        );
         expect(other.disposition).toBe('unchanged');
         expect(await cacheKeys(world, 'catalog-a')).toHaveLength(1);
         await expireDispatcherLease(world, intent.id);
-        const done = await dispatchIntentDetailed(world.deps, intent.id, 'dispatcher-b');
+        const done = await dispatchIntentDetailed(
+          world.deps,
+          intent.id,
+          'dispatcher-b',
+        );
         expect(done.intent.status).toBe('verified');
         expect(await cacheKeys(world, 'catalog-a')).toEqual([]);
       },
@@ -413,7 +448,11 @@ describe('no second effect without a new authorization (C3)', () => {
         await seedCache(world, 'catalog-a', ['fresh1', 'fresh2', 'fresh3']);
         await expireDispatcherLease(world, intent.id);
 
-        const second = await dispatchIntentDetailed(world.deps, intent.id, 'dispatcher-b');
+        const second = await dispatchIntentDetailed(
+          world.deps,
+          intent.id,
+          'dispatcher-b',
+        );
         expect(second.disposition).toBe('outcome_unknown');
         expect(second.scriptResult).toBeNull();
         expect(second.intent.status).toBe('outcome_unknown');
@@ -428,10 +467,9 @@ describe('no second effect without a new authorization (C3)', () => {
         expect(counter.evals).toBe(1); // zero additional scripts, zero additional UNLINKs
         expect(await cacheKeys(world, 'catalog-a')).toHaveLength(3);
         expect(await dispatchAuthorizations(world, intent.id)).toHaveLength(1);
-        expect((await results(world, intent.id)).map((r) => r.outcome)).toEqual([
-          'committed',
-          'outcome_unknown',
-        ]);
+        expect((await results(world, intent.id)).map((r) => r.outcome)).toEqual(
+          ['committed', 'outcome_unknown'],
+        );
       },
       { redis: true, wrapRedis: counting(counter) },
     );
@@ -493,11 +531,17 @@ describe('no second effect without a new authorization (C3)', () => {
         expect(settled.failureReason).toBe('effect_not_applied');
         expect(await cacheKeys(world, 'catalog-a')).toHaveLength(2);
         expect(counter.evals).toBe(0);
-        expect(await redisValue(world, `effect:${intent.id}`)).toMatch(/^tombstone/);
+        expect(await redisValue(world, `effect:${intent.id}`)).toMatch(
+          /^tombstone/,
+        );
         // A late script call (an abandoned request) is inert.
         const r = world.redis!;
         const lateReply = (await r.client.eval(EFFECT_SCRIPT, {
-          keys: [effectKey(r.prefix, intent.id), fenceKey(r.prefix), epochKey(r.prefix)],
+          keys: [
+            effectKey(r.prefix, intent.id),
+            fenceKey(r.prefix),
+            epochKey(r.prefix),
+          ],
           arguments: ['9', '1', `${r.prefix}:cache:catalog-a:*`, '600', 'x'],
         })) as unknown[];
         expect(lateReply[0]).not.toBe('applied');
@@ -525,11 +569,18 @@ describe('no second effect without a new authorization (C3)', () => {
       async (world) => {
         await seedCache(world, 'catalog-a', ['p1', 'p2']);
         const intent = await committedFlush(world);
-        const done = await dispatchIntentDetailed(world.deps, intent.id, 'dispatcher-a');
+        const done = await dispatchIntentDetailed(
+          world.deps,
+          intent.id,
+          'dispatcher-a',
+        );
         expect(done.disposition).toBe('failed');
         expect(done.intent.failureReason).toBe('effect_not_applied');
         expect(await cacheKeys(world, 'catalog-a')).toHaveLength(2);
-        expect(await redisValue(world, `effect:${intent.id}`)).toBeNull();
+        // The refusal leaves a tombstone, so a replay of this call is inert too.
+        expect(await redisValue(world, `effect:${intent.id}`)).toBe(
+          'tombstone:epoch_changed',
+        );
         expect(await dispatchAuthorizations(world, intent.id)).toHaveLength(1);
       },
       {
@@ -539,10 +590,10 @@ describe('no second effect without a new authorization (C3)', () => {
           set: (key, value, options) => client.set(key, value, options),
           async eval(script, options) {
             // The restart: everything volatile is gone before the script lands.
-            await client.eval(
-              "redis.call('DEL', KEYS[1]) return 1",
-              { keys: [options.keys[2]], arguments: [] },
-            );
+            await client.eval("redis.call('DEL', KEYS[1]) return 1", {
+              keys: [options.keys[2]],
+              arguments: [],
+            });
             return client.eval(script, options);
           },
         }),
@@ -558,7 +609,11 @@ describe('reconcile never overrides durable evidence that the effect was applied
       async (world) => {
         await seedCache(world, 'catalog-a', ['p1', 'p2', 'p3']);
         const intent = await committedFlush(world);
-        const first = await dispatchIntentDetailed(world.deps, intent.id, 'dispatcher-a');
+        const first = await dispatchIntentDetailed(
+          world.deps,
+          intent.id,
+          'dispatcher-a',
+        );
         expect(first.disposition).toBe('outcome_unknown');
         expect(first.scriptResult).toBe('applied');
         expect(await cacheKeys(world, 'catalog-a')).toEqual([]);
@@ -605,7 +660,11 @@ describe('reconcile never overrides durable evidence that the effect was applied
       async (world) => {
         await seedCache(world, 'catalog-a', ['p1']);
         const intent = await committedFlush(world);
-        const done = await dispatchIntentDetailed(world.deps, intent.id, 'dispatcher-a');
+        const done = await dispatchIntentDetailed(
+          world.deps,
+          intent.id,
+          'dispatcher-a',
+        );
         expect(done.disposition).toBe('outcome_unknown');
         lose = false;
         await restartRedis(world);

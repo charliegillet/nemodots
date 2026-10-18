@@ -7,6 +7,7 @@ import {
   SimulatedCrash,
   dispatchIntentDetailed,
   effectKey,
+  epochKey,
   fenceKey,
   reconcileIntentDetailed,
   setBarrier,
@@ -119,7 +120,11 @@ describe('flush_cache_namespace', () => {
         await seedCache(world, 'catalog-ab', ['must-survive']);
         await seedCache(world, 'catalog-b', ['q1', 'q2']);
         const { intent } = await committedFlush(world);
-        const done = await dispatchIntentDetailed(world.deps, intent.id, 'd');
+        const done = await dispatchIntentDetailed(
+          world.deps,
+          intent.id,
+          'dispatcher-a',
+        );
         expect(done.disposition).toBe('verified');
         expect(done.deletedCount).toBe(1300);
         expect(await cacheKeys(world, 'catalog-a')).toEqual([]);
@@ -159,7 +164,7 @@ describe('flush_cache_namespace', () => {
     );
   });
 
-  it('a dispatcher crash after the effect: the second dispatcher gets already_applied, no additional UNLINK, and settles verified (C3)', async () => {
+  it('a dispatcher crash after the effect: the second dispatcher never calls the script, settles from the marker, and deletes nothing (C3)', async () => {
     await withWorld(
       async (world) => {
         await seedCache(world, 'catalog-a', ['p1', 'p2']);
@@ -171,34 +176,48 @@ describe('flush_cache_namespace', () => {
         await expect(
           dispatchIntentDetailed(world.deps, intent.id, 'dispatcher-a'),
         ).rejects.toBeInstanceOf(SimulatedCrash);
-        // The effect happened, nothing was recorded.
+        // The effect happened, nothing was recorded but the attempt itself.
         expect(await cacheKeys(world, 'catalog-a')).toEqual([]);
-        expect((await intentRow(world, intent.id)).status).toBe('committed');
+        const crashed = await intentRow(world, intent.id);
+        expect(crashed.status).toBe('committed');
+        expect(crashed.effect_attempted_at).not.toBeNull();
         expect(await redisValue(world, `effect:${intent.id}`)).toMatch(
           /^applied:/,
         );
         // New entries appear before the second dispatcher runs: they must survive.
         await seedCache(world, 'catalog-a', ['fresh1', 'fresh2', 'fresh3']);
         setBarrier('after_effect_before_record', null);
+        // While the first dispatcher's lease is live nobody else may touch it.
+        const early = await dispatchIntentDetailed(
+          world.deps,
+          intent.id,
+          'dispatcher-b',
+        );
+        expect(early.disposition).toBe('unchanged');
+        await expireDispatcherLease(world, intent.id);
         const second = await dispatchIntentDetailed(
           world.deps,
           intent.id,
           'dispatcher-b',
         );
-        expect(second.scriptResult).toBe('already_applied');
-        expect(second.deletedCount).toBe(0);
-        expect(second.disposition).toBe('verified');
-        expect(second.intent.status).toBe('verified');
+        expect(second.priorAttempt).toBe(true);
+        expect(second.scriptResult).toBeNull();
+        expect(second.disposition).toBe('outcome_unknown');
+        const settled = await reconcileIntentDetailed(world.deps, intent.id);
+        expect(settled.finding).toBe('effect_applied');
+        expect(settled.intent.status).toBe('verified');
         expect(await cacheKeys(world, 'catalog-a')).toHaveLength(3);
         const rows = await results(world, intent.id);
         expect(rows.map((r) => r.outcome)).toEqual([
           'committed',
+          'outcome_unknown',
           'dispatched',
           'verified',
         ]);
-        expect(rows[1].external_effect).toMatchObject({
-          scriptResult: 'already_applied',
-          deletedCount: 0,
+        expect(rows[2].external_effect).toMatchObject({
+          scriptResult: 'applied',
+          deletedCount: 2,
+          markerPresent: true,
         });
       },
       { redis: true },
@@ -258,6 +277,11 @@ describe('flush_cache_namespace', () => {
         expect(reconciled.finding).toBe('awaiting_dispatch');
         expect(reconciled.intent.status).toBe('committed');
         expect(await cacheKeys(world, 'catalog-a')).toHaveLength(1);
+        // dispatcher-a's lease is still live: dispatcher-b must wait for it.
+        expect(
+          (await world.service.process(proposed.id, 'dispatcher-b')).status,
+        ).toBe('committed');
+        await expireDispatcherLease(world, proposed.id);
         const done = await world.service.process(proposed.id, 'dispatcher-b');
         expect(done.status).toBe('verified');
         expect(await cacheKeys(world, 'catalog-a')).toEqual([]);
@@ -308,7 +332,11 @@ describe('flush_cache_namespace', () => {
         await seedCache(world, 'catalog-a', ['p1']);
         const { intent } = await committedFlush(world);
         await world.redis!.client.set(fenceKey(world.redis!.prefix), '1');
-        const done = await dispatchIntentDetailed(world.deps, intent.id, 'd');
+        const done = await dispatchIntentDetailed(
+          world.deps,
+          intent.id,
+          'dispatcher-a',
+        );
         expect(done.intent.status).toBe('verified');
         expect(await cacheKeys(world, 'catalog-a')).toEqual([]);
       },
@@ -374,7 +402,11 @@ describe('flush_cache_namespace', () => {
         await world.admin.query(
           'ALTER TABLE coordinator.action_intents ENABLE TRIGGER action_intents_guard',
         );
-        const done = await dispatchIntentDetailed(world.deps, intent.id, 'd');
+        const done = await dispatchIntentDetailed(
+          world.deps,
+          intent.id,
+          'dispatcher-a',
+        );
         expect(done.intent.status).toBe('failed');
         expect(done.intent.failureReason).toBe('expired');
         expect(await cacheKeys(world, 'catalog-a')).toHaveLength(1);
@@ -392,7 +424,11 @@ describe('flush_cache_namespace', () => {
           `UPDATE coordinator.missions SET generation = generation + 1 WHERE id = $1`,
           [world.missionId],
         );
-        const done = await dispatchIntentDetailed(world.deps, intent.id, 'd');
+        const done = await dispatchIntentDetailed(
+          world.deps,
+          intent.id,
+          'dispatcher-a',
+        );
         expect(done.intent.status).toBe('failed');
         const auth = await authorizations(world, intent.id);
         expect(auth[auth.length - 1]).toMatchObject({
@@ -414,7 +450,11 @@ describe('flush_cache_namespace', () => {
           `UPDATE coordinator.missions SET status = 'paused' WHERE id = $1`,
           [world.missionId],
         );
-        const done = await dispatchIntentDetailed(world.deps, intent.id, 'd');
+        const done = await dispatchIntentDetailed(
+          world.deps,
+          intent.id,
+          'dispatcher-a',
+        );
         expect(done.disposition).toBe('unchanged');
         expect(done.intent.status).toBe('committed');
         expect(await cacheKeys(world, 'catalog-a')).toHaveLength(1);
@@ -423,8 +463,8 @@ describe('flush_cache_namespace', () => {
           [world.missionId],
         );
         expect(
-          (await dispatchIntentDetailed(world.deps, intent.id, 'd')).intent
-            .status,
+          (await dispatchIntentDetailed(world.deps, intent.id, 'dispatcher-a'))
+            .intent.status,
         ).toBe('verified');
       },
       { redis: true },
@@ -479,7 +519,11 @@ describe('a lost response after a real effect (gate 2 item 12)', () => {
       async (world) => {
         await seedCache(world, 'catalog-a', ['p1', 'p2']);
         const { intent } = await committedFlush(world);
-        const done = await dispatchIntentDetailed(world.deps, intent.id, 'd');
+        const done = await dispatchIntentDetailed(
+          world.deps,
+          intent.id,
+          'dispatcher-a',
+        );
         expect(done.disposition).toBe('outcome_unknown');
         expect(done.intent.status).toBe('outcome_unknown');
         expect(done.scriptResult).toBeNull();
@@ -527,7 +571,11 @@ describe('a lost response after a real effect (gate 2 item 12)', () => {
       async (world) => {
         await seedCache(world, 'catalog-a', ['p1', 'p2']);
         const { intent } = await committedFlush(world);
-        const done = await dispatchIntentDetailed(world.deps, intent.id, 'd');
+        const done = await dispatchIntentDetailed(
+          world.deps,
+          intent.id,
+          'dispatcher-a',
+        );
         expect(done.disposition).toBe('outcome_unknown');
         expect(await redisValue(world, `effect:${intent.id}`)).toMatch(
           /^applied:/,
@@ -568,7 +616,11 @@ describe('a lost response after a real effect (gate 2 item 12)', () => {
       async (world) => {
         await seedCache(world, 'catalog-a', ['p1', 'p2']);
         const { intent } = await committedFlush(world);
-        const done = await dispatchIntentDetailed(world.deps, intent.id, 'd');
+        const done = await dispatchIntentDetailed(
+          world.deps,
+          intent.id,
+          'dispatcher-a',
+        );
         expect(done.disposition).toBe('outcome_unknown');
         expect(await redisValue(world, `effect:${intent.id}`)).toBeNull();
 
@@ -582,9 +634,20 @@ describe('a lost response after a real effect (gate 2 item 12)', () => {
 
         // The abandoned call finally reaches Redis: the marker is there, so nothing is deleted.
         const redis = world.redis!;
+        const epoch = (await redis.client.get(epochKey(redis.prefix)))!;
         const late = (await redis.client.eval(EFFECT_SCRIPT, {
-          keys: [effectKey(redis.prefix, intent.id), fenceKey(redis.prefix)],
-          arguments: ['5', '1', `${redis.prefix}:cache:catalog-a:*`, '600'],
+          keys: [
+            effectKey(redis.prefix, intent.id),
+            fenceKey(redis.prefix),
+            epochKey(redis.prefix),
+          ],
+          arguments: [
+            '5',
+            '1',
+            `${redis.prefix}:cache:catalog-a:*`,
+            '600',
+            epoch,
+          ],
         })) as unknown[];
         expect(late[0]).toBe('already_applied');
         expect(await cacheKeys(world, 'catalog-a')).toHaveLength(2);
@@ -596,7 +659,10 @@ describe('a lost response after a real effect (gate 2 item 12)', () => {
         wrapRedis: (client) => ({
           get: (key) => client.get(key),
           set: (key, value, options) => client.set(key, value, options),
-          eval: () => new Promise(() => {}),
+          eval: (script, options) =>
+            script === EFFECT_SCRIPT
+              ? new Promise(() => {})
+              : client.eval(script, options),
         }),
       },
     );
@@ -606,7 +672,11 @@ describe('a lost response after a real effect (gate 2 item 12)', () => {
     await withWorld(
       async (world) => {
         const { intent } = await committedFlush(world);
-        const done = await dispatchIntentDetailed(world.deps, intent.id, 'd');
+        const done = await dispatchIntentDetailed(
+          world.deps,
+          intent.id,
+          'dispatcher-a',
+        );
         expect(done.disposition).toBe('outcome_unknown');
         await world.admin.query(
           `UPDATE coordinator.action_intents
@@ -632,21 +702,64 @@ describe('a lost response after a real effect (gate 2 item 12)', () => {
     );
   });
 
-  it('Redis down at dispatch: outcome_unknown; reconcile with Redis still down stays unknown', async () => {
+  it('Redis down at dispatch: nothing was attempted, so the intent stays committed (not outcome_unknown) and no attempt is recorded', async () => {
     await withWorld(
       async (world) => {
         const { intent } = await committedFlush(world);
-        const done = await dispatchIntentDetailed(world.deps, intent.id, 'd');
-        expect(done.disposition).toBe('outcome_unknown');
+        const done = await dispatchIntentDetailed(
+          world.deps,
+          intent.id,
+          'dispatcher-a',
+        );
+        expect(done.disposition).toBe('unchanged');
+        expect(done.intent.status).toBe('committed');
+        const row = await intentRow(world, intent.id);
+        expect(row.effect_attempted_at).toBeNull();
+        expect(row.redis_epoch).toBeNull();
+        expect(
+          (await authorizations(world, intent.id)).map(
+            (a) => `${a.stage}:${a.decision}`,
+          ),
+        ).toEqual(['admission:admitted', 'commit:committed']);
         const reconciled = await reconcileIntentDetailed(world.deps, intent.id);
-        expect(reconciled.finding).toBe('unknown');
-        expect(reconciled.intent.status).toBe('outcome_unknown');
+        expect(reconciled.finding).toBe('awaiting_dispatch');
       },
       {
         redis: true,
         wrapRedis: (): RedisEffectClient => ({
           get: () => Promise.reject(new Error('ECONNREFUSED')),
           set: () => Promise.reject(new Error('ECONNREFUSED')),
+          eval: () => Promise.reject(new Error('ECONNREFUSED')),
+        }),
+      },
+    );
+  });
+
+  it('Redis answers the epoch but the script call fails: outcome_unknown; reconcile with Redis down afterwards stays unknown', async () => {
+    let down = false;
+    await withWorld(
+      async (world) => {
+        const { intent } = await committedFlush(world);
+        const done = await dispatchIntentDetailed(
+          world.deps,
+          intent.id,
+          'dispatcher-a',
+        );
+        expect(done.disposition).toBe('outcome_unknown');
+        down = true;
+        const reconciled = await reconcileIntentDetailed(world.deps, intent.id);
+        expect(reconciled.finding).toBe('unknown');
+        expect(reconciled.intent.status).toBe('outcome_unknown');
+      },
+      {
+        redis: true,
+        wrapRedis: (client): RedisEffectClient => ({
+          get: (key) =>
+            down ? Promise.reject(new Error('ECONNREFUSED')) : client.get(key),
+          set: (key, value, options) =>
+            down
+              ? Promise.reject(new Error('ECONNREFUSED'))
+              : client.set(key, value, options),
           eval: () => Promise.reject(new Error('ECONNREFUSED')),
         }),
       },

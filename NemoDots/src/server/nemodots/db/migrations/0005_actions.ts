@@ -15,6 +15,18 @@
 //                                   cache.namespace version claimDispatch
 //                                   compares, C11)
 //     compensates_action_id         set only on compensation intents
+//     effect_attempted_at, redis_epoch
+//                                   written by claimDispatch in the same statement that
+//                                   grants the dispatch fence, BEFORE the Redis script
+//                                   runs. They are the durable fact "an effect attempt
+//                                   may exist": a committed flush with effect_attempted_at
+//                                   is never dispatched again (the next dispatcher moves
+//                                   it to outcome_unknown and reconcile decides), so a
+//                                   lost Redis marker can never cause a second effect.
+//                                   redis_epoch is the id of the Redis instance state
+//                                   the attempt was made against; reconcile concludes
+//                                   "not applied" only while that epoch is unchanged.
+//                                   Both are write-once (guard trigger).
 //   Immutable once inserted (trigger): everything that binds the decision to a
 //   payload (payload, payload_hash, target, vector, expected version, policy,
 //   idempotency key, identity columns). The status column only moves along
@@ -22,6 +34,9 @@
 //   drift).
 //   Partial unique index on idempotency_key WHERE status IN LIVE_STATUSES (C5):
 //   blocked, failed, cancelled and verified intents do not reserve their key.
+//   A second partial unique index on (attempt_id, tool_call_id) over the same
+//   statuses binds the guarantee to the emitted TOOL CALL: one call can never
+//   become two live actions, whatever action kind or target key it names.
 //   AFTER INSERT of a `proposed` row notifies nemodots_action_proposed with the
 //   target config key only (the injector's "dependent change after proposal"
 //   trigger, finding C15).
@@ -147,6 +162,8 @@ CREATE TABLE coordinator.action_intents (
   dispatcher_lease_expires_at timestamptz,
   committed_target_version bigint CHECK (committed_target_version IS NULL OR committed_target_version >= 0),
   compensates_action_id uuid REFERENCES coordinator.action_intents (id),
+  effect_attempted_at timestamptz,
+  redis_epoch text CHECK (redis_epoch IS NULL OR char_length(redis_epoch) BETWEEN 1 AND 128),
   proposed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   admitted_at timestamptz,
   committed_at timestamptz,
@@ -159,12 +176,21 @@ CREATE TABLE coordinator.action_intents (
          OR (dispatch_fence IS NOT NULL AND dispatch_owner IS NOT NULL
              AND dispatcher_lease_expires_at IS NOT NULL)),
   CHECK (status NOT IN ('committed', 'dispatched', 'verified', 'outcome_unknown')
-         OR committed_target_version IS NOT NULL)
+         OR committed_target_version IS NOT NULL),
+  CHECK ((effect_attempted_at IS NULL) = (redis_epoch IS NULL)),
+  CHECK (effect_attempted_at IS NULL OR adapter = 'redis_cache')
 )`);
 
     await q(`
 CREATE UNIQUE INDEX action_intents_idempotency_live_idx
   ON coordinator.action_intents (idempotency_key)
+  WHERE status IN (${list(LIVE_STATUSES)})`);
+    // C5: one live intent per emitted tool call, whatever its action or target.
+    // propose() decides conflicts by (attempt, tool call); this index is the
+    // backstop when two transactions race past its advisory lock.
+    await q(`
+CREATE UNIQUE INDEX action_intents_tool_call_live_idx
+  ON coordinator.action_intents (attempt_id, tool_call_id)
   WHERE status IN (${list(LIVE_STATUSES)})`);
     await q(
       'CREATE INDEX action_intents_idempotency_idx ON coordinator.action_intents (idempotency_key, proposed_at)',
@@ -201,6 +227,12 @@ BEGIN
   IF NEW.status IS DISTINCT FROM OLD.status AND NOT (
        ${transitionPredicate()}) THEN
     RAISE EXCEPTION 'illegal action transition % -> % for %', OLD.status, NEW.status, OLD.id
+      USING ERRCODE = 'integrity_constraint_violation';
+  END IF;
+  IF (OLD.effect_attempted_at IS NOT NULL
+      AND NEW.effect_attempted_at IS DISTINCT FROM OLD.effect_attempted_at)
+     OR (OLD.redis_epoch IS NOT NULL AND NEW.redis_epoch IS DISTINCT FROM OLD.redis_epoch) THEN
+    RAISE EXCEPTION 'the recorded effect attempt of % cannot change', OLD.id
       USING ERRCODE = 'integrity_constraint_violation';
   END IF;
   IF NEW.status_version < OLD.status_version THEN

@@ -21,10 +21,13 @@ export {
 } from './commit.js';
 export {
   EFFECT_SCRIPT,
+  TOMBSTONE_SCRIPT,
   claimDispatch,
+  ensureEpoch,
   dispatchIntent,
   dispatchIntentDetailed,
   effectKey,
+  epochKey,
   fenceKey,
   parseMarker,
   type DispatchDisposition,

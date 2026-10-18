@@ -83,10 +83,10 @@ export function createActionService(deps: ActionDeps): ActionService {
       return row.adapter === 'redis_cache' && deps.redis
         ? reconcileIntent(deps, actionId)
         : toIntent(row);
-    if (row.status === 'committed')
-      return row.adapter === 'redis_cache' && deps.redis
-        ? dispatchIntent(deps, actionId, dispatcher)
-        : toIntent(row);
+    if (row.status === 'committed') {
+      if (row.adapter !== 'redis_cache' || !deps.redis) return toIntent(row);
+      return dispatchAndSettle(actionId, dispatcher);
+    }
     if (row.status !== 'proposed' && row.status !== 'admitted')
       return toIntent(row);
 
@@ -113,8 +113,23 @@ export function createActionService(deps: ActionDeps): ActionService {
     }
     if (committed.disposition !== 'committed') return committed.intent;
     if (committed.intent.adapter === 'redis_cache' && deps.redis)
-      return dispatchIntent(deps, actionId, dispatcher);
+      return dispatchAndSettle(actionId, dispatcher);
     return committed.intent;
+  }
+
+  /**
+   * Dispatch; when an earlier dispatcher may already have run the effect the
+   * intent was moved to outcome_unknown instead of being claimed again, and
+   * reconcile (marker, stored receipts, epoch) settles it. The script is never
+   * called a second time.
+   */
+  async function dispatchAndSettle(
+    actionId: string,
+    dispatcher: string,
+  ): Promise<ActionIntent> {
+    const dispatched = await dispatchIntentDetailed(deps, actionId, dispatcher);
+    if (dispatched.priorAttempt) return reconcileIntent(deps, actionId);
+    return dispatched.intent;
   }
 
   return {

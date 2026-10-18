@@ -7,13 +7,21 @@
 //   marker `fence_newer:...`  a newer flush won; nothing was deleted:
 //                             failed(dispatch_fence_invalid)
 //   marker `tombstone:...`    reconcile itself fenced the action: failed(effect_not_applied)
-//   dispatched | outcome_unknown, no marker
-//                             the script did not run (it is atomic). Reconcile
-//                             writes a tombstone with SET NX first, so a late
-//                             arriving script call sees the marker and does
-//                             nothing, and only then fails the intent
-//                             (failed(effect_not_applied)); re-dispatch needs a
-//                             new authorization (a new intent).
+//   no marker, an effect attempt recorded (dispatched | outcome_unknown, or a
+//   committed flush whose dispatcher lease lapsed), decided in this order:
+//     1. a stored result receipt says the script answered `applied`: the effect
+//        happened whatever Redis remembers; settle verified (markerPresent
+//        false in the receipt). Durable evidence is never overridden by the
+//        absence of a volatile marker.
+//     2. otherwise absence is proof only while the Redis epoch recorded with
+//        the claim is unchanged (the script is atomic: no marker means it never
+//        ran). Reconcile then writes a tombstone with SET NX, in the same Lua
+//        call that checks the epoch, so a late arriving script call sees the
+//        marker and does nothing, and only then fails the intent
+//        (failed(effect_not_applied)); re-dispatch needs a new authorization.
+//     3. the epoch changed (Redis restarted, lost its state): absence proves
+//        nothing. The intent stays outcome_unknown (finding epoch_changed) for
+//        an operator; nothing is concluded and nothing is run again.
 //   anything older than the marker horizon is never concluded (the marker may
 //   have expired): the intent stays outcome_unknown.
 // The count of deleted keys in any readback is never treated as proof.
@@ -22,7 +30,9 @@
 import type { ActionIntent } from '../contracts/index.js';
 import { ActionNotFoundError } from './errors.js';
 import {
+  TOMBSTONE_SCRIPT,
   effectKey,
+  epochKey,
   parseMarker,
   prefixOf,
   recordFailed,
@@ -49,7 +59,9 @@ export type ReconcileFinding =
   /** already verified / failed / blocked / cancelled */
   | 'terminal'
   /** cannot conclude (Redis unreachable, marker expired or unreadable) */
-  | 'unknown';
+  | 'unknown'
+  /** Redis lost its state since the attempt: absence of the marker proves nothing */
+  | 'epoch_changed';
 
 export interface ReconcileResult {
   intent: ActionIntent;
@@ -68,6 +80,32 @@ const factsFor = (
   fenceBefore: null,
   fenceAfter: row.committedTargetVersion,
 });
+
+/**
+ * Durable proof that the script answered `applied` for this action: the
+ * `dispatched` receipt (written only when the effect was effective) or an
+ * `outcome_unknown` receipt that kept the script's own answer.
+ */
+async function appliedEvidence(
+  deps: ActionDeps,
+  actionId: string,
+): Promise<{ deleted: number | null } | null> {
+  const { rows } = await deps.pool.query<{
+    external_effect: { deletedCount?: number | null } | null;
+  }>(
+    `SELECT external_effect FROM coordinator.result_receipts
+      WHERE action_id = $1
+        AND ((outcome = 'dispatched'
+              AND external_effect->>'scriptResult' IN ('applied', 'already_applied'))
+          OR (outcome = 'outcome_unknown'
+              AND external_effect->>'scriptResult' = 'applied'))
+      ORDER BY seq LIMIT 1`,
+    [actionId],
+  );
+  if (!rows[0]) return null;
+  const deleted = rows[0].external_effect?.deletedCount;
+  return { deleted: typeof deleted === 'number' ? deleted : null };
+}
 
 export async function reconcileIntentDetailed(
   deps: ActionDeps,
@@ -92,6 +130,10 @@ export async function reconcileIntentDetailed(
   )
     return result('terminal');
   if (row.adapter !== 'redis_cache') return result('committed');
+  // Nobody has attempted the effect (the attempt is recorded in PostgreSQL
+  // before the script runs): there is nothing in Redis to read.
+  if (row.status === 'committed' && row.effectAttemptedAt === null)
+    return result('awaiting_dispatch');
 
   const redis = requireRedis(deps);
   const prefix = prefixOf(deps);
@@ -150,40 +192,60 @@ export async function reconcileIntentDetailed(
   if (marker) return result('unknown'); // pending or unreadable
 
   // No marker.
-  if (row.status === 'committed') return result('awaiting_dispatch');
-  const horizonMs =
-    (deps.markerHorizonSeconds ?? DEFAULT_MARKER_HORIZON_SECONDS) * 1000;
-  const since = (row.dispatchedAt ?? row.committedAt)?.getTime() ?? 0;
-  if (Date.now() - since >= horizonMs) return result('unknown');
+  // A committed flush whose dispatcher is still working under a live lease is
+  // simply not done.
+  if (row.status === 'committed' && row.leaseValid)
+    return result('awaiting_dispatch');
+
+  // 1. Durable evidence beats a missing volatile marker.
+  const evidence = await appliedEvidence(deps, row.id);
+  if (evidence) {
+    const done = await recordVerified(deps, row, from, {
+      ...factsFor(row, { deleted: evidence.deleted }),
+      markerPresent: false,
+    });
+    return done ? result('effect_applied', done) : reload('effect_applied');
+  }
+
+  // 2/3. Absence proves "never ran" only against the same Redis epoch.
+  if (!row.redisEpoch) return result('unknown');
+  const markerHorizon =
+    deps.markerHorizonSeconds ?? DEFAULT_MARKER_HORIZON_SECONDS;
+  const times = [row.effectAttemptedAt, row.dispatchedAt, row.committedAt]
+    .filter((time): time is Date => time !== null)
+    .map((time) => time.getTime());
+  const since = times.length > 0 ? Math.min(...times) : 0;
+  if (Date.now() - since >= markerHorizon * 1000) return result('unknown');
   // Fence the action: after this SET NX no script call can apply it.
+  let fenced: unknown;
   try {
-    const set = await withinBudget(
-      redis.set(key, 'tombstone:reconcile', {
-        condition: 'NX',
-        expiration: {
-          type: 'EX',
-          value: deps.markerHorizonSeconds ?? DEFAULT_MARKER_HORIZON_SECONDS,
-        },
+    fenced = await withinBudget(
+      redis.eval(TOMBSTONE_SCRIPT, {
+        keys: [key, epochKey(prefix)],
+        arguments: [row.redisEpoch, String(markerHorizon)],
       }),
       redisBudget(deps),
       'the tombstone write',
     );
-    if (set === null)
-      // The marker appeared between the read and the write: read it again.
-      return depth < 2
-        ? reconcileIntentDetailed(deps, actionId, depth + 1)
-        : result('unknown');
   } catch (error) {
     if (isSimulatedCrash(error)) throw error;
     return result('unknown');
   }
+  const verdict = Array.isArray(fenced) ? fenced[0] : null;
+  if (verdict === 'epoch_changed') return result('epoch_changed');
+  if (verdict === 'exists')
+    // The marker appeared between the read and the write: read it again.
+    return depth < 2
+      ? reconcileIntentDetailed(deps, actionId, depth + 1)
+      : result('unknown');
+  if (verdict !== 'fenced') return result('unknown');
   const done = await recordFailed(
     deps,
     row,
     from,
     'effect_not_applied',
     { ...factsFor(row, null), markerPresent: false },
-    'no effect marker exists; the effect did not run',
+    'no effect marker exists and the Redis epoch is unchanged; the effect did not run',
   );
   return done
     ? result('effect_not_applied', done)

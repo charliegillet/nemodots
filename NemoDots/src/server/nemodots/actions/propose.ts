@@ -11,10 +11,13 @@
 //   3. the intent's dependency vector is the snapshot vector UNION the in-scope
 //      citations; required sources, value domain and capability come from the
 //      server's policy, never from the model;
-//   4. the idempotency key is derived from the emitting tool call and bound to
-//      the payload hash: the same key with the same hash returns the stored
-//      intent, the same key with a different hash stores
-//      `blocked(idempotency_conflict)`;
+//   4. idempotency is bound to the emitting TOOL CALL (attempt + toolCallId),
+//      which must be one the emitting model call actually produced as a
+//      `propose_action` call. Every intent of that tool call is looked up,
+//      whatever its action kind or target key: the same payload hash returns
+//      the stored intent, any other payload stores `blocked(idempotency_conflict)`
+//      (a partial unique index on (attempt, tool call) is the backstop). The
+//      idempotency key itself is derived from the tool call as well (C5);
 //   5. a proposed intent gets evidence edges (receipt -> intent, model call ->
 //      intent, attempt -> intent), an `action.proposed` outbox message (admission
 //      is scheduled by the coordinator) and an `action.proposed` event; the
@@ -61,7 +64,7 @@ import {
 } from './policy.js';
 import {
   claimAuthorizationWriter,
-  loadIntentsByKey,
+  loadIntentsByToolCall,
   toIntent,
 } from './rows.js';
 import { storeIntent } from './store.js';
@@ -77,6 +80,8 @@ interface EmittingCall {
   taskId: string;
   attemptId: string;
   dependencyVector: DependencyVector;
+  /** ids of the `propose_action` calls the model actually emitted */
+  proposeToolCallIds: string[];
 }
 
 async function loadEmittingCall(
@@ -88,8 +93,9 @@ async function loadEmittingCall(
     task_id: string;
     attempt_id: string;
     dependency_vector: unknown;
+    tool_calls: unknown;
   }>(
-    `SELECT m.mission_id, m.task_id, m.attempt_id, s.dependency_vector
+    `SELECT m.mission_id, m.task_id, m.attempt_id, s.dependency_vector, m.tool_calls
        FROM ledger.model_call_records m
        JOIN ledger.context_snapshots s ON s.id = m.context_snapshot_id
       WHERE m.id = $1`,
@@ -101,6 +107,15 @@ async function loadEmittingCall(
     taskId: rows[0].task_id,
     attemptId: rows[0].attempt_id,
     dependencyVector: DependencyVectorSchema.parse(rows[0].dependency_vector),
+    proposeToolCallIds: (Array.isArray(rows[0].tool_calls)
+      ? (rows[0].tool_calls as { toolCallId?: unknown; name?: unknown }[])
+      : []
+    )
+      .filter(
+        (call) =>
+          call.name === 'propose_action' && typeof call.toolCallId === 'string',
+      )
+      .map((call) => call.toolCallId as string),
   };
 }
 
@@ -178,6 +193,13 @@ export async function proposeIntent(
       throw new InvalidProposalError(
         'the emitting model call is unknown or belongs to another attempt',
       );
+    // The tool call id binds idempotency, so it must be one the model really
+    // emitted: a regenerated or invented id would mint a fresh key (and, for a
+    // flush, a fresh effect) for what is one model tool call.
+    if (!call.proposeToolCallIds.includes(ctx.toolCallId))
+      throw new InvalidProposalError(
+        'the tool call id was not emitted as a propose_action call by the emitting model call',
+      );
     const cited = [...new Set(proposal.supportingReceiptIds)] as ReceiptId[];
     const outside = new Set(
       citationsOutsideScope(cited, {
@@ -227,7 +249,12 @@ export async function proposeIntent(
       expectedTargetVersion,
       toolCallId: ctx.toolCallId,
     });
-    const known = await loadIntentsByKey(client, key);
+    // Every intent this tool call ever produced, whatever its action or target.
+    const known = await loadIntentsByToolCall(
+      client,
+      context.attemptId,
+      ctx.toolCallId,
+    );
     const same = known.find((stored) => stored.payloadHash === payloadHash);
     if (same) return { stored: same, created: false as const };
 
@@ -237,7 +264,8 @@ export async function proposeIntent(
     if (known.length > 0) {
       block = {
         reason: 'idempotency_conflict',
-        detail: 'the tool call id was already used with a different payload',
+        detail:
+          'the tool call id was already used with a different action, target or payload',
       };
       binding = 'conflict';
     } else if (!task.capabilities.includes(capability)) {

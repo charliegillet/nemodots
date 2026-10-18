@@ -69,6 +69,8 @@ export interface IntentDbRow {
   dispatcher_lease_expires_at: Date | null;
   committed_target_version: string | number | null;
   compensates_action_id: string | null;
+  effect_attempted_at: Date | null;
+  redis_epoch: string | null;
   proposed_at: Date;
   admitted_at: Date | null;
   committed_at: Date | null;
@@ -113,6 +115,10 @@ export interface IntentRow {
   dispatcherLeaseExpiresAt: Date | null;
   committedTargetVersion: number | null;
   compensatesActionId: ActionId | null;
+  /** Set (write-once) by claimDispatch before the Redis script runs. */
+  effectAttemptedAt: Date | null;
+  /** Redis epoch the attempt was made against (see dispatch.ts). */
+  redisEpoch: string | null;
   proposedAt: Date;
   admittedAt: Date | null;
   committedAt: Date | null;
@@ -159,6 +165,8 @@ export function mapIntentRow(row: IntentDbRow): IntentRow {
     dispatcherLeaseExpiresAt: row.dispatcher_lease_expires_at,
     committedTargetVersion: numOrNull(row.committed_target_version),
     compensatesActionId: row.compensates_action_id as ActionId | null,
+    effectAttemptedAt: row.effect_attempted_at,
+    redisEpoch: row.redis_epoch,
     proposedAt: row.proposed_at,
     admittedAt: row.admitted_at,
     committedAt: row.committed_at,
@@ -252,6 +260,20 @@ export async function loadIntentsByKey(
     `SELECT ${INTENT_COLUMNS} FROM coordinator.action_intents
       WHERE idempotency_key = $1 ORDER BY proposed_at, id`,
     [idempotencyKey],
+  );
+  return rows.map(mapIntentRow);
+}
+
+/** Every intent of one emitted tool call, whatever its action, target or status. */
+export async function loadIntentsByToolCall(
+  client: PgClient,
+  attemptId: string,
+  toolCallId: string,
+): Promise<IntentRow[]> {
+  const { rows } = await client.query<IntentDbRow>(
+    `SELECT ${INTENT_COLUMNS} FROM coordinator.action_intents
+      WHERE attempt_id = $1 AND tool_call_id = $2 ORDER BY proposed_at, id`,
+    [attemptId, toolCallId],
   );
   return rows.map(mapIntentRow);
 }
