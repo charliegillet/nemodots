@@ -25,8 +25,8 @@ No LLM, Redis or HTTP call ever happens inside a PostgreSQL transaction. The onl
 | `predicates.ts` | The G1 predicates, shared by admission (`FOR SHARE`) and commit (`FOR UPDATE`).                                                                                                                         |
 | `admit.ts`      | Admission and re-admission: `proposed → admitted \| blocked`; claims the dispatch lease.                                                                                                                |
 | `commit.ts`     | Commit steps 1-10. Duplicate short-circuit, `DispatchFenceError`, lock order, `advanceConfig`, receipt, Authorization, outbox, events.                                                                  |
-| `dispatch.ts`   | `claimDispatch` CAS, the marker-first Lua script, record (`dispatched → verified`, `failed`, `outcome_unknown`).                                                                                        |
-| `reconcile.ts`  | Reads the effect marker; never re-runs the effect.                                                                                                                                                      |
+| `dispatch.ts`   | Redis epoch, `claimDispatch` CAS (records the attempt), the epoch-and-marker-first Lua script, record (`dispatched → verified`, `failed`, `outcome_unknown`).                                           |
+| `reconcile.ts`  | Reads the effect marker, the stored receipts and the Redis epoch; never re-runs the effect.                                                                                                             |
 | `reclaim.ts`    | Finds stuck work (expired admission leases, undispatched flushes, unsettled effects); re-admission is `admit.ts`.                                                                                       |
 | `settle.ts`     | `settleFromHistory(actionId, outcome)`: the watcher's way to move a committed `set_config` to `verified` or `failed`, and to tell the `RecoveryPort`.                                                   |
 | `compensate.ts` | `set_config` reversal as a **new** intent (refused when the version moved; a flush is never "undone").                                                                                                  |
@@ -50,11 +50,18 @@ throws `FenceError` and writes nothing. The intent's dependency vector is the em
 call's `snapshot.dependencyVector` **union** the cited receipts, each of which must be in scope
 (snapshot vector, attempt readset or inherited vector) or the intent is stored
 `blocked(citation_out_of_scope)`. Required sources, value domain and capability come from the
-server's policy, never from the model. The idempotency key is
-`sha256(missionId, taskId, attemptId, action, expectedTargetVersion, toolCallId)`; the payload hash
-(action, payload, target, environment, policy version, expected version, vector) is bound beside
-it: same key and hash returns the stored intent, same key and a different hash stores
-`blocked(idempotency_conflict)`. A proposal the policy refuses is stored as a blocked intent with
+server's policy, never from the model. The `toolCallId` must be one the emitting model call
+produced as a `propose_action` call (`ledger.model_call_records.tool_calls`); an invented or
+regenerated id throws `InvalidProposalError` and writes nothing. Idempotency is bound to that
+**tool call**: inside the per-tool-call advisory lock every intent of `(attempt, toolCallId)` is
+looked up, whatever its action or target key. The payload hash (action, payload, target,
+environment, policy version, expected version, vector) decides: the same hash returns the stored
+intent, any other payload (a different value, a different `ActionKind`, a target key at another
+version, other citations) stores `blocked(idempotency_conflict)`. The idempotency key
+`sha256(missionId, taskId, attemptId, action, expectedTargetVersion, toolCallId)` stays as the row's
+identity, and two partial unique indexes over the live statuses (`idempotency_key`, and
+`(attempt_id, tool_call_id)`) are the database backstop: one tool call can never become two live
+actions. A proposal the policy refuses is stored as a blocked intent with
 an Authorization; a malformed one (unknown `ActionKind`, any extra field such as a forged
 `causedByActionId`) throws `InvalidProposalError` and writes nothing.
 
@@ -121,24 +128,51 @@ version, every observed receipt not superseded, and the policy's `maxAgeMs` agai
 
 `flush_cache_namespace` is committed in PostgreSQL first, then dispatched:
 
-1. `claimDispatch` (above), granting a new fence and lease and recording `Authorization(stage 'dispatch')`.
-2. One Lua script in Redis: `SET <prefix>:effect:<actionId> NX` **first** (present → `already_applied`,
-   nothing else touched); strictly newer fence → `fence_newer`; else `SCAN`/`UNLINK` the namespace and
-   set the fence. The marker's final value says what happened (`applied:<fence>:<n>` or
-   `fence_newer:<fence>`), so a refused flush is never mistaken for an applied one.
-3. `committed → dispatched → verified` after a separate `GET` of the marker (the delete count is never
-   proof), or `failed(dispatch_fence_invalid)` for `fence_newer`, or `outcome_unknown` if the call threw
-   or timed out.
+0. The dispatcher reads (creating it with `SET NX` if needed) the **Redis epoch**, `<prefix>:epoch`: an
+   id for the state of the Redis instance. Redis unreachable here means nothing was attempted: the
+   intent stays `committed`.
+1. `claimDispatch` (above) in one statement: a new fence and lease **and the attempt itself**
+   (`effect_attempted_at`, `redis_epoch`, write-once), recording `Authorization(stage 'dispatch')`. The
+   claim is refused while another dispatcher's lease is live (it is the lease holder's work) and is
+   never granted twice: a committed flush that already has an attempt is not claimed again.
+2. One Lua script in Redis: epoch differs from the claim's -> `epoch_changed` (tombstone, nothing
+   deleted); `SET <prefix>:effect:<actionId> NX` **first** (present -> `already_applied`, nothing else
+   touched); strictly newer fence -> `fence_newer`; else `SCAN`/`UNLINK` the namespace and set the fence.
+   The marker's final value says what happened (`applied:<fence>:<n>` or `fence_newer:<fence>`), so a
+   refused flush is never mistaken for an applied one.
+3. `committed -> dispatched -> verified` after a separate `GET` of the marker (the delete count is never
+   proof), or `failed(dispatch_fence_invalid)` for `fence_newer`, `failed(effect_not_applied)` for
+   `epoch_changed`, or `outcome_unknown` if the call threw or timed out. Every record statement carries the
+   dispatch fence **and an unexpired dispatcher lease**: a dispatcher whose lease lapsed during the script
+   records nothing, and the intent is settled by reconcile.
 
-`reconcile` reads the marker and never re-runs the effect: `applied` → verified; `fence_newer` →
-failed; no marker on a `committed` intent → still awaiting dispatch; no marker on `dispatched |
-outcome_unknown` → it first writes a **tombstone** with `SET NX` (so a late-arriving script call can do
-nothing) and only then fails the intent `failed(effect_not_applied)`. Re-dispatch needs a new
-authorization (a new intent). Past the marker horizon (7 days) reconcile does not conclude.
+### No second effect without a new authorization: the durability assumption
 
-A dispatcher that crashes after the effect leaves a `committed` intent and an `applied` marker; the next
-dispatcher's script call returns `already_applied` with zero deletions and the intent settles
-`verified`.
+The guarantee does **not** rest on Redis remembering anything. The local stack runs Redis without
+persistence (`--save '' --appendonly no`), so a restart loses every marker and fence. The attempt is
+therefore recorded in PostgreSQL before the script runs, and:
+
+- A dispatcher that died after the script leaves a `committed` intent with an attempt. The next
+  dispatcher (after the lease lapsed) does **not** call the script: `claimDispatch` moves the intent to
+  `outcome_unknown` and `process()` reconciles it. If the marker survived: `applied` -> `verified` (deleted
+  count from the marker). If Redis restarted: the marker is gone and nothing is re-run.
+- `reconcile` reads the marker and never re-runs the effect. With no marker and an attempt recorded it
+  decides in this order: (1) a stored result receipt says the script answered `applied` -> `verified`
+  (durable evidence is never overridden by a missing volatile marker; the receipt says
+  `markerPresent: false`); (2) the Redis epoch equals the one recorded with the claim, so the instance did
+  not restart and an atomic script that left no marker never ran -> a tombstone is written with `SET NX`
+  in the same Lua call that checks the epoch (a late script call is inert), then `failed(effect_not_applied)`;
+  (3) the epoch changed (restart, flush of Redis) -> absence proves nothing: the intent stays
+  `outcome_unknown` (finding `epoch_changed`) for an operator and a new intent. Re-dispatch always needs a
+  new authorization. Past the marker horizon (7 days) reconcile does not conclude.
+- Limit: the epoch detects a lost Redis, not a single deleted or evicted key. Run Redis with
+  `maxmemory-policy noeviction` and do not delete `<prefix>:effect:*` or `<prefix>:epoch` by hand. If only
+  the marker of a script that did run is deleted and no receipt recorded the script's answer, reconcile
+  would report `effect_not_applied` although it ran. Making the stack's Redis durable (AOF with
+  `appendfsync always`) removes this residual case; it is a stack setting outside this package.
+- `outcome_unknown` flushes that reconcile cannot conclude are re-examined by every `sweep` (oldest
+  first, `limit` 50 per call); more than 50 stuck intents would starve newer unsettled work until an
+  operator closes them.
 
 ## set_config verification and compensation
 
@@ -170,14 +204,14 @@ coordinator's maintenance step.
 
 ## Cancellation and pause
 
-| What                                         | Behaviour                                                                                                                                                                                                                                                                              |
-| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| queued intents (`proposed`, `admitted`)      | cancel bumps the mission generation (the coordinator waits for in-flight commits through the mission `FOR SHARE` lock), then `cancelQueued(missionId, generation)` marks them `cancelled`. A late commit finds `cancelled` and writes nothing.                                         |
-| committed effects                            | stay in history and in the `config_versions` log; `IntentReader.committedEffects` lists them (a `set_config` once its commit receipt exists, a flush while its effect is committed, in flight or applied) and the coordinator records them in `Mission.cancellation.committedEffects`. |
-| an in-flight external request (`dispatched`) | is not aborted: the intent keeps its true status (`dispatched`, `outcome_unknown`, then `verified` or `failed`); nothing is shown as undone.                                                                                                                                           |
-| a `committed` flush not yet dispatched       | after a cancel (generation moved) `claimDispatch` fails it (`failed(dispatch_fence_invalid)`, `Authorization(dispatch, blocked, generation_mismatch)`); while the mission is paused it stays `committed` and is dispatched after resume.                                               |
-| dispatcher leases                            | short (`NEMODOTS_DISPATCH_LEASE_MS`), never held across waits; an expired lease makes the old dispatcher's commit fail and lets any dispatcher re-admit.                                                                                                                               |
-| a paused mission                             | admission and commit are `blocked(mission_not_running)`: queued work stops. The blocked intent is terminal; the team proposes again after resume with fresh evidence.                                                                                                                  |
+| What                                         | Behaviour                                                                                                                                                                                                                                                                                    |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| queued intents (`proposed`, `admitted`)      | cancel bumps the mission generation (the coordinator waits for in-flight commits through the mission `FOR SHARE` lock), then `cancelQueued(missionId, generation)` marks them `cancelled`. A late commit finds `cancelled` and writes nothing.                                               |
+| committed effects                            | stay in history and in the `config_versions` log; `IntentReader.committedEffects` lists them (a `set_config` once its commit receipt exists, a flush while its effect is committed, in flight or applied) and the coordinator records them in `Mission.cancellation.committedEffects`.       |
+| an in-flight external request (`dispatched`) | is not aborted: the intent keeps its true status (`dispatched`, `outcome_unknown`, then `verified` or `failed`); nothing is shown as undone.                                                                                                                                                 |
+| a `committed` flush not yet dispatched       | after a cancel (generation moved) `claimDispatch` fails it (`failed(dispatch_fence_invalid)`, `Authorization(dispatch, blocked, generation_mismatch)`); while the mission is paused it stays `committed` and is dispatched after resume.                                                     |
+| dispatcher leases                            | short (`NEMODOTS_DISPATCH_LEASE_MS`), never held across waits; an expired lease makes the old dispatcher's commit fail and lets any dispatcher re-admit. While a lease is live no other dispatcher can claim the flush, and after it lapses the flush is settled by reconcile, never re-run. |
+| a paused mission                             | admission and commit are `blocked(mission_not_running)`: queued work stops. The blocked intent is terminal; the team proposes again after resume with fresh evidence.                                                                                                                        |
 
 Statuses other than `running` (including `awaiting_acceptance`) block admission and commit. The coordinator must therefore not
 move a mission to `awaiting_acceptance` while an intent it cares about is still `proposed`, `admitted` or `committed`.
