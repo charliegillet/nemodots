@@ -400,7 +400,11 @@ describe('worker loop: explicit failure states', () => {
       makeHelpers(),
       deps,
     );
-    expect(outcome).toEqual({ type: 'abort', reason: 'budget_exhausted' });
+    // no tools in the final turn: a tool call there settles as a truncated partial report
+    expect(outcome).toMatchObject({
+      type: 'output',
+      output: { content: { truncated: true, iterations: 12 } },
+    });
     expect(scripted.requests).toHaveLength(12);
   });
 });
@@ -416,8 +420,12 @@ describe('worker loop: observation reserve', () => {
       makeHelpers(),
       deps,
     );
-    // a model that keeps calling observe_source never reports: budget exhausted
-    expect(outcome).toEqual({ type: 'abort', reason: 'budget_exhausted' });
+    // a model that keeps calling observe_source never reports: the final turn
+    // settles as a truncated partial report, not a permanent budget failure
+    expect(outcome).toMatchObject({
+      type: 'output',
+      output: { content: { truncated: true, iterations: 8 } },
+    });
     const names = (i: number) => scripted.requests[i].tools.map((t) => t.name);
     // limit 8 -> reserve 2: turns 1..6 open, turn 6 is the last read, turn 7 closed, turn 8 final
     expect(names(5)).toHaveLength(9);

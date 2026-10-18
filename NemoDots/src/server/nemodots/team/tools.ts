@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { z } from 'zod';
 import type pg from 'pg';
 import {
   ADAPTER_POLICY,
@@ -18,6 +19,7 @@ import {
   type TaskId,
   type TeamToolName,
   type ToolSchema,
+  CONFIG_VALUE_DOMAINS,
 } from '../contracts/index.js';
 import { stripActors } from '../context/untrusted.js';
 import { UnknownRunbookError } from '../context/runbooks.js';
@@ -139,6 +141,22 @@ function clip(value: unknown): unknown {
     : { truncated: true, text: text.slice(0, OUTPUT_CLIP) };
 }
 
+/**
+ * The server-owned value domain of a configuration key (CONFIG_VALUE_DOMAINS),
+ * as JSON Schema. The model learns what a valid proposal looks like from the
+ * policy itself, not from prose in a runbook (finding D7).
+ */
+export function valueDomainOf(sourceKey: string): Record<string, unknown> | null {
+  const key = sourceKey.slice('checkout.config/'.length);
+  if (!sourceKey.startsWith('checkout.config/')) return null;
+  if (!Object.hasOwn(CONFIG_VALUE_DOMAINS, key)) return null;
+  const schema = z.toJSONSchema(
+    CONFIG_VALUE_DOMAINS[key as keyof typeof CONFIG_VALUE_DOMAINS],
+  ) as Record<string, unknown>;
+  delete schema.$schema;
+  return schema;
+}
+
 export function observeResult(receipt: ObservedReceipt) {
   const value = stripActors(receipt.normalizedValue).value;
   const record =
@@ -158,6 +176,9 @@ export function observeResult(receipt: ObservedReceipt) {
     newRevision: receipt.newRevision,
     value,
     ...(isMember ? { valueDigest: digest(record!.value) } : {}),
+    ...(isMember && valueDomainOf(receipt.sourceKey)
+      ? { valueDomain: valueDomainOf(receipt.sourceKey) }
+      : {}),
     ...(receipt.negative ? { negative: receipt.negative } : {}),
   };
 }

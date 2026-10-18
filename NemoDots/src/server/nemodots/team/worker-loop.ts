@@ -365,6 +365,33 @@ export async function runWorker(
       };
     }
 
+    if (phase === 'final') {
+      // The final turn offers no tools. A model that still emits tool calls
+      // has run out of turns: settle what it did as a partial report (marked
+      // truncated, with the tally) instead of failing the task permanently.
+      return {
+        type: 'output',
+        output: {
+          kind:
+            context.role === 'verifier' || context.role === 'postcondition'
+              ? 'verification'
+              : 'handoff',
+          content: {
+            role: context.role,
+            summary:
+              text.slice(0, OUTPUT_SUMMARY_MAX) ||
+              'Turn budget reached without a final report; this is the tally of what was done.',
+            truncated: true,
+            findings: tally.findings,
+            delegated: tally.delegated,
+            proposed: tally.proposed,
+            iterations: budget.iterations,
+          },
+          dependencyVector: lastVector,
+        },
+      };
+    }
+
     history.push({
       role: 'assistant',
       content: call.result.content ?? '',
@@ -389,13 +416,6 @@ export async function runWorker(
         push({
           error: 'too_many_tool_calls',
           message: `at most ${MAX_TOOL_CALLS_PER_TURN} tool calls per turn; this one did not run`,
-        });
-        continue;
-      }
-      if (phase === 'final') {
-        push({
-          error: 'no_tools',
-          message: 'no tools are available in the final turn; nothing ran',
         });
         continue;
       }
