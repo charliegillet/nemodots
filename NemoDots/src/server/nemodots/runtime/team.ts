@@ -477,6 +477,29 @@ export function createTeamHandler(deps: TeamDeps): AttemptHandler {
         return { output: { id: args.id, text: runbookText(args.id) }, entries: [] };
       }
       case 'delegate_task': {
+        // Demo: one live remediation owner per specialist role per mission, so
+        // two branches never fight over the same config key.
+        if (String(args.role).endsWith('_specialist')) {
+          const existing = await deps.pool.query<{ id: string; status: string }>(
+            `SELECT id, status FROM coordinator.tasks
+              WHERE mission_id = $1 AND role = $2
+                AND status NOT IN ('failed', 'cancelled')
+              ORDER BY created_at LIMIT 1`,
+            [context.missionId, args.role],
+          );
+          if (existing.rows[0]) {
+            ctx.children.push(existing.rows[0].id as TaskId);
+            return {
+              output: {
+                taskId: existing.rows[0].id,
+                role: args.role,
+                status: existing.rows[0].status,
+                note: `a ${args.role} already owns this mission's remediation; waiting on it instead of creating another`,
+              },
+              entries: [],
+            };
+          }
+        }
         const created = await coordinator.delegate(context, {
           title: args.title,
           role: args.role,

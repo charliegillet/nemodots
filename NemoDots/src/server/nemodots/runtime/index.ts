@@ -275,7 +275,7 @@ export async function createNemoDotsRuntime(env = process.env) {
         },
         leaseMs: 60_000,
         taskDefaults: { maxAttempts: 3, maxIterations: 14, maxTokens: 200_000 },
-        replanCap: 3,
+        replanCap: 1,
       },
       supportValidator: createSupportValidator(),
       ledger: ledgerPort,
