@@ -6,6 +6,7 @@ import { serveStatic } from '@hono/node-server/serve-static';
 import { Store } from './store.js';
 import { Runner } from './runner.js';
 import { createApp } from './app.js';
+import { createNemoDotsRuntime } from './nemodots/runtime/index.js';
 import { resolveAppOrigins } from './app-origin.js';
 import { WorkspaceStore } from './workspace.js';
 import { Platform } from './platform.js';
@@ -109,12 +110,21 @@ app.use('*', async (c, next) => {
   );
   await next();
 });
+const nemodots =
+  process.env.NEMODOTS_INSTANCE
+    ? await createNemoDotsRuntime(process.env).catch((error) => {
+        console.error(`NemoDots runtime disabled: ${(error as Error).message}`);
+        return null;
+      })
+    : null;
+if (nemodots) app.route('/api/nemodots', nemodots.routes);
 app.get('/api/*', (c) => c.json({ error: 'Not found.' }, 404));
 app.use('/*', serveStatic({ root: './dist/client' }));
 app.get('*', serveStatic({ path: './dist/client/index.html' }));
 const server = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
   console.log(`NemoDots listening on http://${host}:${info.port}`);
   runner.start();
+  void nemodots?.start();
   void platform
     .start()
     .catch((error) =>
@@ -125,7 +135,10 @@ const server = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
     );
 });
 const shutdown = createShutdown({
-  stopRunner: () => runner.stop(),
+  stopRunner: async () => {
+    await nemodots?.stop();
+    await runner.stop();
+  },
   stopPlatform: () => platform.stop(),
   closeServer: () =>
     new Promise<void>((resolve, reject) =>
