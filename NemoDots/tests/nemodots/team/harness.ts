@@ -44,6 +44,7 @@ import type {
   ObservationPort,
   ObservedReceipt,
   PlanOverviewTask,
+  TaskOutputView,
   TeamCoordinator,
   TeamInference,
   TeamReader,
@@ -247,10 +248,10 @@ export class StubReader implements TeamReader {
   async readSetOf() {
     return null;
   }
-  async taskOutputs() {
+  async taskOutputs(): Promise<TaskOutputView[]> {
     return [];
   }
-  async prerequisiteOutputs() {
+  async prerequisiteOutputs(): Promise<TaskOutputView[]> {
     return [];
   }
   async delegationFacts(context: AttemptContext): Promise<DelegationFacts> {
@@ -360,9 +361,7 @@ export const call = (id: string, name: string, args: unknown | string) => ({
 });
 
 export function failed(
-  errorClass: InferenceAttempt['error'] extends infer E
-    ? NonNullable<E>['class']
-    : never,
+  errorClass: NonNullable<InferenceAttempt['error']>['class'],
 ): ChatResult {
   const base = result();
   return {

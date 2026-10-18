@@ -96,7 +96,7 @@ describe('planner', () => {
     const system = (request.messages[0] as { content: string }).content;
     expect(system).toContain('Restore checkout.');
     expect(system).toContain('cache.namespace'); // membership: the key list
-    expect(system).not.toMatch(/"value"/); // no member values
+    expect(system).not.toContain('"key":'); // no member entries or values
     expect(coordinator.records[0].record.role).toBe('planner');
     expect(coordinator.readSets[0]).toHaveLength(2);
   });
@@ -149,7 +149,7 @@ describe('planner', () => {
     expect((outcome as { reason: string }).reason).toMatch(/^invalid_plan/);
     expect(inference.requests).toHaveLength(2);
     expect(JSON.stringify(inference.requests[1].messages)).toContain(
-      'escalates beyond role',
+      'exceed ROLE_CAPABILITIES',
     );
   });
 

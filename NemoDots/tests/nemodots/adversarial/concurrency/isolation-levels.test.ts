@@ -114,20 +114,42 @@ describe.each(LEVELS)('invalidation vs commit under %s', (isolation) => {
         const intent = await proposePool(world, s, 11 + (i % 8));
         rounds.push({ id: intent.id, expected: intent.expectedTargetVersion });
       }
+      const tagged = <T>(label: string, work: Promise<T>) =>
+        work.catch((error: { code?: string; message?: string; stack?: string }) => {
+          throw Object.assign(new Error(`${label}: ${error.code} ${error.message}`), {
+            code: error.code,
+            origin: (error.stack ?? '').split('\n').slice(1, 6).join(' | '),
+          });
+        });
       const outcomes = await Promise.allSettled([
-        ...rounds.map(async (round, i) => {
-          await sleep((i * 5) % 17);
-          const admitted = await world.service.admit(round.id as never, `d${i}`);
-          if (admitted.status !== 'admitted') return admitted;
-          return world.service.commit(round.id as never, admitted.dispatch!.fence);
-        }),
-        ...Array.from({ length: 4 }, async (_, i) => {
-          await sleep(i * 9);
-          return externalChange(world, 'db.pool_max', 15 + i);
-        }),
+        ...rounds.map((round, i) =>
+          tagged(
+            `intent ${i}`,
+            (async () => {
+              await sleep((i * 5) % 17);
+              const admitted = await world.service.admit(round.id as never, `d${i}`);
+              if (admitted.status !== 'admitted') return admitted;
+              return world.service.commit(round.id as never, admitted.dispatch!.fence);
+            })(),
+          ),
+        ),
+        ...Array.from({ length: 4 }, (_, i) =>
+          tagged(
+            `writer ${i}`,
+            (async () => {
+              await sleep(i * 9);
+              return externalChange(world, 'db.pool_max', 15 + i);
+            })(),
+          ),
+        ),
       ]);
       const escaped = outcomes.filter((o) => o.status === 'rejected');
-      expect(escaped.map((o) => (o as PromiseRejectedResult).reason?.code)).toEqual([]);
+      expect(
+        escaped.map((o) => {
+          const reason = (o as PromiseRejectedResult).reason as { message: string; origin: string };
+          return `${reason.message} @ ${reason.origin}`;
+        }),
+      ).toEqual([]);
       const history = await historyRows(world, 'db.pool_max');
       history.forEach((row, i) => expect(row.version).toBe(i + 1)); // gapless
       for (const round of rounds) {

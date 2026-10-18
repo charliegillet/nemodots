@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { digest } from '../../../src/server/nemodots/contracts/index.js';
-import type { TaskId } from '../../../src/server/nemodots/contracts/index.js';
+import type {
+  DependencyVector,
+  TaskId,
+} from '../../../src/server/nemodots/contracts/index.js';
 import {
   CitationOutOfScopeError,
   DelegationRejectedError,
@@ -375,7 +378,7 @@ describe('get_task_status and wait_for_children', () => {
     const { coordinator } = setup();
     const vector = [
       { sourceKey: 'checkout.health', sourceRevision: 4, receiptId: uuid(55) },
-    ] as never;
+    ] as unknown as DependencyVector;
     coordinator.childrenStatus = {
       allTerminal: true,
       children: [
@@ -393,8 +396,8 @@ describe('get_task_status and wait_for_children', () => {
         id: uuid(61),
         taskId: uuid(60) as TaskId,
         taskTitle: 'verify',
-        role: 'verifier',
-        kind: 'verification',
+        role: 'verifier' as const,
+        kind: 'verification' as const,
         content: { summary: 'ok' },
         digest: digest('x'),
         usable: true,
@@ -454,7 +457,11 @@ describe('delegation bounds (D5)', () => {
     ['depth 4 (parent at maximum depth)', { parent: 3 }, 'depth'],
     ['breadth 5', { children: 4 }, 'breadth'],
     ['total task cap', { total: 24 }, 'tasks'],
-  ])('rejects %s and creates no task', async (_label, shape, word) => {
+  ] as [
+    string,
+    { parent?: number; children?: number; total?: number },
+    string,
+  ][])('rejects %s and creates no task', async (_label, shape, word) => {
     const facts = {
       totalTasks: shape.total ?? 3,
       parentChildren: shape.children ?? 0,

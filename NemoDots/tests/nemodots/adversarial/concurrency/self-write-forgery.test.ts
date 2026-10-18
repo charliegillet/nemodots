@@ -288,32 +288,44 @@ describe('self-write marker forgery: tool and API inputs', () => {
     });
   });
 
-  it('an action id of an intent that never wrote this key cannot settle it even if a row names it (only a row carrying the matching digest and key counts)', async () => {
+  // FINDING CW-1 (low). The marker is only writable by the trusted application role,
+  // so no input surface reaches this; it is recorded because the CONSEQUENCE is wrong
+  // if the trust boundary ever slips: a marker row naming an action on ANOTHER key makes
+  // the watcher classify it `failed`, and settleFromHistory(…, 'failed') accepts the
+  // verdict without checking the intent's OWN history row, which carries the expected
+  // digest. A correctly committed action is turned into failed(postcondition_mismatch).
+  // `it.fails` = the defence below does NOT hold today; the test passes while it fails.
+  const wrongKeyMarker = async (world: World, actionId: string) => {
+    await memberReceipt(world, 'ui.banner_text');
+    await world.app.query(
+      `UPDATE checkout.config_entries
+          SET value = '"x"'::jsonb, version = version + 1, caused_by_action_id = $1, caused_by_actor = 'action'
+        WHERE key = 'ui.banner_text'`,
+      [actionId],
+    );
+    await world.app.query(
+      `INSERT INTO checkout.config_versions (key, version, value, after_digest, caused_by_action_id, caused_by_actor)
+       VALUES ('ui.banner_text', 2, '"x"'::jsonb, $1, $2, 'action')`,
+      ['f'.repeat(64), actionId],
+    );
+    const rig = watcherRig(world);
+    return { rig, out: await rig.watcher.observe(['checkout.config/ui.banner_text']) };
+  };
+
+  it('a marker row on another key never VERIFIES the intent for the first key', async () => {
     await withWorld(async (world) => {
-      // Intent B is committed on db.pool_max; its history row names db.pool_max. Classification of a
-      // different key must never settle B.
       const { intent } = await committedAction(world);
-      await memberReceipt(world, 'ui.banner_text');
-      await world.app.query(
-        `UPDATE checkout.config_entries
-            SET value = '"x"'::jsonb, version = version + 1, caused_by_action_id = $1, caused_by_actor = 'action'
-          WHERE key = 'ui.banner_text'`,
-        [intent.id],
-      );
-      await world.app.query(
-        `INSERT INTO checkout.config_versions (key, version, value, after_digest, caused_by_action_id, caused_by_actor)
-         VALUES ('ui.banner_text', 2, '"x"'::jsonb, $1, $2, 'action')`,
-        ['f'.repeat(64), intent.id],
-      );
-      const rig = watcherRig(world);
-      const out = await rig.watcher.observe(['checkout.config/ui.banner_text']);
-      // The trusted app role really did write the marker, but the intent targets another key
-      // and another digest: it is not a recognised self-write for this source.
+      const { rig, out } = await wrongKeyMarker(world, intent.id);
       expect(out[0].selfWrite).toBe('mismatch');
-      // ...and the key mismatch cannot "verify" the intent for db.pool_max through this row.
-      const settledViaWrongKey = rig.settled.find((x) => x.actionId === intent.id && x.outcome === 'verified');
-      expect(settledViaWrongKey).toBeUndefined();
-      void intentStatus;
+      expect(rig.settled.find((x) => x.outcome === 'verified')).toBeUndefined();
+    });
+  });
+
+  it.fails('FINDING CW-1: a marker row on another key must not fail an intent whose own history row is correct', async () => {
+    await withWorld(async (world) => {
+      const { intent } = await committedAction(world);
+      await wrongKeyMarker(world, intent.id);
+      expect((await intentStatus(world, intent.id)).status).not.toBe('failed');
     });
   });
 });
