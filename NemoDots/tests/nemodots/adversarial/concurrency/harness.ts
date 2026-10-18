@@ -22,6 +22,7 @@ import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { afterEach } from 'vitest';
 import {
+  EFFECT_SCRIPT,
   createActionService,
   clearBarriers,
   setBarrier,
@@ -65,7 +66,9 @@ import {
   configValueDigest,
   type ConfigScalar,
 } from '../../../../src/server/nemodots/sandbox/version-authority.js';
-import { barrier as latchBarrier, latch, type Latch } from '../../helpers/barrier.js';
+
+export type { ConfigScalar };
+import { latch, type Latch } from '../../helpers/barrier.js';
 import { withTestDatabase, type TestDatabase } from '../../helpers/test-db.js';
 import { withTestRedis, type TestRedis } from '../../helpers/test-redis.js';
 
@@ -232,6 +235,8 @@ export async function withWorld<T>(
         await createMission(world, missionId, options.minAgeMs ?? 0);
         return await fn(world);
       } finally {
+        releaseAllParked();
+        clearBarriers();
         await Promise.all([app.end(), admin.end(), injector.end()]);
       }
     });
@@ -889,10 +894,11 @@ export async function countRows(
 
 /** Backends of this database currently waiting for a lock (excluding the oracle pool). */
 export async function lockWaiters(world: World): Promise<number> {
+  // pg_stat_activity hides wait events of other roles; pg_locks does not.
   const { rows } = await world.admin.query<{ n: string }>(
-    `SELECT count(*) AS n FROM pg_stat_activity
-      WHERE datname = current_database() AND wait_event_type = 'Lock'
-        AND pid <> pg_backend_pid()`,
+    `SELECT count(DISTINCT l.pid) AS n FROM pg_locks l
+       JOIN pg_stat_activity a ON a.pid = l.pid
+      WHERE NOT l.granted AND a.datname = current_database()`,
   );
   return Number(rows[0].n);
 }
@@ -933,12 +939,20 @@ export interface Parked {
  * Parks the FIRST caller that reaches `name` (and passes `only`) until
  * `release()`; later callers run through.
  */
+const gates: Latch[] = [];
+
+/** Opens every gate still closed (a failing test must not leave a transaction parked). */
+export function releaseAllParked() {
+  for (const gate of gates.splice(0)) gate.open(undefined);
+}
+
 export function park(
   name: BarrierName,
   only?: (context: BarrierContext) => boolean,
 ): Parked {
   const reached: Latch<BarrierContext> = latch<BarrierContext>();
   const gate = latch();
+  gates.push(gate);
   const remove = setBarrier(name, async (context) => {
     if (reached.isOpen) return;
     if (only && !only(context)) return;
@@ -952,7 +966,7 @@ export function park(
   };
 }
 
-export { latchBarrier, latch, randomUUID };
+export { latch, randomUUID };
 
 // --- flush_cache_namespace --------------------------------------------------------------------------------------
 
@@ -1035,11 +1049,15 @@ export async function redisValue(world: World, suffix: string) {
   return world.redis!.client.get(`${world.redis!.prefix}:${suffix}`);
 }
 
-/** A Redis wrapper that counts how often the effect script ran. */
-export function countingRedis(counter: { scripts: number }) {
+/**
+ * A Redis wrapper that counts how often the FLUSH effect script ran
+ * (`scripts`); other scripts (reconcile's tombstone fence) are counted apart.
+ */
+export function countingRedis(counter: { scripts: number; other?: number }) {
   return (client: RedisEffectClient): RedisEffectClient => ({
     eval(script, options) {
-      counter.scripts += 1;
+      if (script === EFFECT_SCRIPT) counter.scripts += 1;
+      else counter.other = (counter.other ?? 0) + 1;
       return client.eval(script, options);
     },
     get: (key) => client.get(key),
