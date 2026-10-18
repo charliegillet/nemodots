@@ -12,13 +12,14 @@ import {
   PLANNER_INSTRUCTIONS,
   roleInstructions,
 } from '../../../src/server/nemodots/team/prompts.js';
+import { EMBEDDED_RUNBOOKS } from '../../../src/server/nemodots/team/embedded-runbooks.js';
 import { ROLE_CAPABILITIES } from '../../../src/server/nemodots/contracts/index.js';
 
 // D7: runbooks and prompts describe semantics and value DOMAINS only. No
 // healthy-baseline value and no scenario value may appear, in any phrasing
-// that assigns it to a key. The single allowance is the member names of the
-// routing enum, listed on the routing runbook's "Value domain" line: without
-// them a model cannot form a valid proposal for that key.
+// that assigns it to a key. There is no allowance: value domains reach the
+// model through the server-owned CONFIG_VALUE_DOMAINS (observe_source returns
+// them as valueDomain), not through prose.
 
 const SCENARIOS = join(
   import.meta.dirname,
@@ -66,8 +67,6 @@ function scenarioValues(): [string, unknown][] {
 }
 
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const ENUM_ALLOWED = (name: string, line: string) =>
-  name === 'runbooks/inventory-routing.md' && /Value domain/.test(line);
 
 describe('catalogue', () => {
   it('lists exactly the declared runbooks and every file loads', () => {
@@ -127,11 +126,8 @@ describe('no baseline or scenario values (D7/D10)', () => {
         ).toBe(false);
       // boolean and enum baselines never appear as a backticked value
       expect(text, name).not.toMatch(/`(?:true|false)`/);
-      for (const line of text.split('\n'))
-        if (/\bprimary\b/.test(line))
-          expect(ENUM_ALLOWED(name, line), `${name}: "${line.trim()}"`).toBe(
-            true,
-          );
+      // no allowance for enum members either: domains come from the server
+      expect(text, name).not.toMatch(/\bprimary\b/);
     }
   });
 
@@ -148,19 +144,8 @@ describe('no baseline or scenario values (D7/D10)', () => {
         expect(assigned.test(text), `${name}: ${key} ${String(value)}`).toBe(
           false,
         );
-        if (
-          typeof value === 'string' &&
-          value.length > 6 &&
-          value !== 'replica_stale'
-        )
+        if (typeof value === 'string' && value.length > 6)
           expect(text, name).not.toContain(value);
-        if (value === 'replica_stale')
-          for (const line of text.split('\n'))
-            if (line.includes(value))
-              expect(
-                ENUM_ALLOWED(name, line),
-                `${name}: "${line.trim()}"`,
-              ).toBe(true);
       }
     }
   });
@@ -174,5 +159,45 @@ describe('no baseline or scenario values (D7/D10)', () => {
       'propose_cache_flush',
     );
     expect(roleInstructions('verifier')).not.toContain('delegate_task');
+  });
+});
+
+describe('runbooks are semantics only (reviewer finding: no diagnoses or procedures)', () => {
+  it('no remedy, symptom-to-fix mapping or key-specific do-not-touch instruction', () => {
+    for (const { name, text } of sources()) {
+      if (name === 'prompts.ts') continue;
+      expect(text, name).not.toMatch(/^#+\s*(Remed|Reasoning)/im);
+      expect(text, name).not.toMatch(
+        /banner_text[^\n]*(unrelated|do not touch)/i,
+      );
+      expect(text, name).not.toMatch(/\b503\b[^\n]*(raise|increase)/i);
+      expect(text, name).not.toMatch(
+        /\b(raise|route|point)\b[^\n]*\b(pool|reads|namespace)\b/i,
+      );
+    }
+  });
+});
+
+describe('embedded runbooks', () => {
+  it('are identical to the .md files (the tsc build does not copy .md files)', () => {
+    for (const [id, entry] of Object.entries(RUNBOOK_ENTRIES)) {
+      expect(
+        EMBEDDED_RUNBOOKS[entry.path],
+        `${id}: regenerate with node tests/nemodots/team/gen-embedded-runbooks.mjs`,
+      ).toBe(readFileSync(join(DEFAULT_RUNBOOK_DIR, entry.path), 'utf8'));
+    }
+    expect(Object.keys(EMBEDDED_RUNBOOKS).sort()).toEqual(
+      Object.values(RUNBOOK_ENTRIES)
+        .map((e) => e.path)
+        .sort(),
+    );
+  });
+
+  it('the default library needs no file on disk', () => {
+    const library = createRunbookLibrary();
+    for (const entry of library.all())
+      expect(entry.text).toBe(
+        EMBEDDED_RUNBOOKS[RUNBOOK_ENTRIES[entry.id].path],
+      );
   });
 });

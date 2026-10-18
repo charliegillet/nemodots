@@ -323,6 +323,22 @@ describe('observe_source', () => {
       ).rejects.toMatchObject({ code: 'invalid_arguments' });
   });
 
+  it('returns the server-owned value domain of a config key (D7: domains come from policy, not prose)', async () => {
+    const { tools } = setup();
+    const out = (await exec(tools, 'observe_source', {
+      sourceKey: 'checkout.config/db.pool_max',
+    })) as { valueDomain: unknown };
+    expect(out.valueDomain).toEqual({
+      type: 'integer',
+      minimum: 1,
+      maximum: 20,
+    });
+    const health = (await exec(tools, 'observe_source', {
+      sourceKey: 'checkout.health',
+    })) as Record<string, unknown>;
+    expect(health).not.toHaveProperty('valueDomain');
+  });
+
   it('does not leak actor columns, and keeps instruction text as plain data', async () => {
     const coordinator = new StubCoordinator();
     const observer = new StubObserver({
@@ -588,5 +604,48 @@ describe('delegation bounds (D5)', () => {
     );
     // verifier ∩ {delegate} is empty: a child that could not even observe is refused
     expect(decision).toMatchObject({ ok: false });
+  });
+});
+
+describe('known limit: what an investigator-delegated specialist holds', () => {
+  // CONTRACTS.md: child capabilities = ROLE_CAPABILITIES[role] ∩ parent. An
+  // investigator holds no propose_* capability, so a specialist it delegates
+  // holds none either. A repair therefore needs a specialist that the planner
+  // created as a root task (it has no parent to intersect with). This test
+  // pins the current rule so a change to it is deliberate; the contracts owner
+  // decides whether delegated specialists should be able to propose.
+  const parent = {
+    id: uuid(90) as TaskId,
+    role: 'investigator' as const,
+    depth: 1,
+    capabilities: [
+      'observe',
+      'delegate',
+      'publish_finding',
+      'request_replan',
+    ] as const,
+    maxChildren: 4,
+  };
+  it.each([
+    'cache_specialist',
+    'database_specialist',
+    'routing_specialist',
+  ] as const)('a %s delegated by an investigator cannot propose', (role) => {
+    const decision = checkDelegation(
+      { role, title: 't', question: 'q', justification: 'j', dependsOn: [] },
+      {
+        parent: { ...parent, capabilities: [...parent.capabilities] },
+        limits: { maxDepth: 3, maxBreadth: 4, maxTasks: 24 },
+        totalTasks: 2,
+        parentChildren: 0,
+        tasks: [],
+      },
+      uuid(91) as TaskId,
+    );
+    expect(decision.ok).toBe(true);
+    if (decision.ok)
+      expect(decision.capabilities.some((c) => c.startsWith('propose'))).toBe(
+        false,
+      );
   });
 });

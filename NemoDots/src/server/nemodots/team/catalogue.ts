@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { EMBEDDED_RUNBOOKS } from './embedded-runbooks.js';
 import {
   createRunbookCatalogue,
   type RunbookEntry,
@@ -41,7 +42,10 @@ export const DEFAULT_RUNBOOK_DIR = fileURLToPath(
 );
 
 export interface RunbookLibraryOptions {
-  /** Directory holding the catalogue's files (default: ./runbooks next to this module). */
+  /**
+   * Directory holding the catalogue's files. Default: the texts embedded at
+   * build time (embedded-runbooks.ts), so `npm run build` needs no file copy.
+   */
   dir?: string;
   entries?: Readonly<Record<string, RunbookEntry>>;
 }
@@ -50,11 +54,17 @@ export interface RunbookLibraryOptions {
 export function createRunbookLibrary(
   options: RunbookLibraryOptions = {},
 ): RunbookLibrary {
-  const dir = options.dir ?? DEFAULT_RUNBOOK_DIR;
   const catalogue = createRunbookCatalogue(options.entries ?? RUNBOOK_ENTRIES);
   const texts = new Map<string, string>();
-  for (const { id } of catalogue.list())
-    texts.set(id, readFileSync(join(dir, catalogue.resolve(id)), 'utf8'));
+  for (const { id } of catalogue.list()) {
+    const file = catalogue.resolve(id);
+    const text = options.dir
+      ? readFileSync(join(options.dir, file), 'utf8')
+      : EMBEDDED_RUNBOOKS[file];
+    if (text === undefined)
+      throw new Error(`runbook ${id}: no embedded text for ${file}`);
+    texts.set(id, text);
+  }
   const titles = new Map(catalogue.list().map((item) => [item.id, item.title]));
   return {
     list: () => catalogue.list(),

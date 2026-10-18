@@ -53,7 +53,7 @@ const ROLE_FOCUS: Readonly<Record<TaskRole, string>> = Object.freeze({
   planner:
     'You are the planner. You turn the mission goal into a small set of root tasks for the other roles. You do not investigate or act yourself.',
   investigator:
-    'You are an investigator. You establish facts about the checkout service from observations, record what you established as cited findings, and hand work you cannot do yourself to roles that can. Your findings are claims for others to build on, not changes to the system.',
+    'You are an investigator. You establish facts about the checkout service from observations, record what you established as cited findings, and delegate follow-up work to other roles. What a child can do is limited by what your own task holds. Your findings are claims for others to build on, not changes to the system.',
   cache_specialist:
     'You are the cache specialist. Your focus is the Redis cache layer: namespace, schema layout and flushes. You can propose changes within the capabilities of your task, and you can delegate an independent verification.',
   database_specialist:
@@ -76,7 +76,7 @@ export function roleInstructions(role: TaskRole): string {
     parts.push(PROPOSAL_TEXT);
   if ((ROLE_CAPABILITIES[role] as readonly string[]).includes('delegate'))
     parts.push(
-      'Delegation: delegate_task creates a child task for another role. Give it a self-contained question, say in the justification why it is needed, and use wait_for_children to receive the outputs. The child gets the capabilities of its role, never more than yours, and the number of children, the depth and the total number of tasks are limited.',
+      'Delegation: delegate_task creates a child task for another role. Give it a self-contained question, say in the justification why it is needed, and use wait_for_children to receive the outputs. The child gets the capabilities of its role that you also hold, never more than yours (so a child never holds a capability you lack), and the number of children, the depth and the total number of tasks are limited.',
     );
   return parts.join('\n\n');
 }

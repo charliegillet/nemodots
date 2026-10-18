@@ -69,3 +69,31 @@ export function createAttemptBudget(
     },
   };
 }
+
+/**
+ * Token budgets a 12-turn tool loop needs. Every turn resends the history, so
+ * prompt tokens dominate: the coordinator's generic defaults (20 000 per task,
+ * 200 000 per mission) are exhausted within a few turns and settle the task as
+ * a permanent budget failure. Measured live: 400 000 / 3 000 000 completes.
+ */
+export const RECOMMENDED_TEAM_BUDGETS = Object.freeze({
+  taskMaxTokens: 400_000,
+  missionMaxTokens: 3_000_000,
+});
+
+/** Problems with configured budgets for running the team; empty when adequate. */
+export function teamBudgetIssues(configured: {
+  taskMaxTokens: number;
+  missionMaxTokens: number;
+}): string[] {
+  const issues: string[] = [];
+  if (configured.taskMaxTokens < RECOMMENDED_TEAM_BUDGETS.taskMaxTokens)
+    issues.push(
+      `task token budget ${configured.taskMaxTokens} is below the ${RECOMMENDED_TEAM_BUDGETS.taskMaxTokens} a 12-turn worker loop needs`,
+    );
+  if (configured.missionMaxTokens < RECOMMENDED_TEAM_BUDGETS.missionMaxTokens)
+    issues.push(
+      `mission token budget ${configured.missionMaxTokens} is below the ${RECOMMENDED_TEAM_BUDGETS.missionMaxTokens} a team of workers needs`,
+    );
+  return issues;
+}

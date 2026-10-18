@@ -7,5 +7,3 @@ The incident is resolved when an independent check confirms all of the following
 3. Checkout health stays `ok` for a sustained observation window, not only for a single sample.
 
 Your own observations are evidence for a repair, not the verdict. A mission is only complete when that independent check passes and no part of the work still rests on evidence that has since changed.
-
-Only change configuration that your evidence implicates. Cosmetic keys such as `ui.banner_text` are unrelated to reliability; do not touch them to resolve an incident.

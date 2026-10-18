@@ -1,6 +1,7 @@
 import type { ActionAdmissionPort } from '../contracts/index.js';
 import type { Coordinator } from '../coordinator/index.js';
 import type { AttemptHandler, WorkerHost } from '../coordinator/worker-host.js';
+import { teamBudgetIssues } from './budget.js';
 import { createRunbookLibrary } from './catalogue.js';
 import { runPlanner } from './planner.js';
 import { createTeamTools, type TeamTools } from './tools.js';
@@ -71,8 +72,20 @@ export function createTeamWorkerHost(
     actions?: Pick<ActionAdmissionPort, 'propose'>;
     workerId: string;
     concurrency?: number;
+    /**
+     * The token budgets the coordinator is configured with (taskDefaults.maxTokens
+     * and the mission budget). When given, a configuration too small for the
+     * team's tool loop is refused at construction, not discovered as a
+     * permanent budget failure mid-incident.
+     */
+    configuredBudgets?: { taskMaxTokens: number; missionMaxTokens: number };
   },
 ): WorkerHost {
+  if (deps.configuredBudgets) {
+    const issues = teamBudgetIssues(deps.configuredBudgets);
+    if (issues.length > 0)
+      throw new Error(`team budgets are too small: ${issues.join('; ')}`);
+  }
   const tools =
     deps.tools ??
     createTeamTools({

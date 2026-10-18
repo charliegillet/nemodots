@@ -131,6 +131,8 @@ describe('team on Crusoe', () => {
       const missionId = await world.newMission(
         'Customers report problems at checkout. Restore the checkout service so that a fresh order succeeds, the inventory invariant holds and health stays ok.',
       );
+      // HAND-PICKED: this investigator task and its question are written by the
+      // test, not produced by the planner. The result file labels it so.
       const investigatorId = await world.seedInvestigator(
         missionId,
         'Customers see intermittent 503 errors at checkout. Find the cause and get it repaired.',
@@ -232,7 +234,18 @@ describe('team on Crusoe', () => {
 
         const calls = await auditCalls(world, missionId, env);
         expect(world.inFlight.max).toBeLessThanOrEqual(4);
+        const childCaps = (
+          await world.admin.query<{ role: string; capabilities: string[] }>(
+            `SELECT role, capabilities FROM coordinator.tasks WHERE parent_id = $1`,
+            [investigatorId],
+          )
+        ).rows;
         observed.delegation = {
+          investigatorTask:
+            'hand-picked by the test (seeded question), not planner-produced',
+          // Known limit: capabilities of a delegated child are role ∩ parent, so
+          // an investigator-delegated specialist holds no propose_* capability.
+          delegatedChildCapabilities: childCaps,
           children: children.map((c) => ({
             role: c.role,
             depth: c.depth,

@@ -30,6 +30,7 @@ import {
   recordModelCall as ledgerRecordModelCall,
   recordOrphanedAttempt,
 } from '../ledger/index.js';
+import { RECOMMENDED_TEAM_BUDGETS } from './budget.js';
 import type { TeamCoordinator } from './types.js';
 
 // Default wiring for callers that hold only a database pool (the gate-3 team
@@ -154,12 +155,16 @@ export function defaultCoordinatorConfig(
       maxTasks: int('NEMODOTS_MAX_TASKS', 24),
       maxDepth: int('NEMODOTS_MAX_DEPTH', 3),
       maxBreadth: 4,
-      maxTokens: 400_000,
+      maxTokens: RECOMMENDED_TEAM_BUDGETS.missionMaxTokens,
       maxInferenceCalls: 200,
       maxWallClockMs: 600_000,
     },
     leaseMs: int('NEMODOTS_LEASE_MS', 30_000),
-    taskDefaults: { maxAttempts: 3, maxIterations: 12, maxTokens: 120_000 },
+    taskDefaults: {
+      maxAttempts: 3,
+      maxIterations: 12,
+      maxTokens: RECOMMENDED_TEAM_BUDGETS.taskMaxTokens,
+    },
     replanCap: 3,
   };
 }

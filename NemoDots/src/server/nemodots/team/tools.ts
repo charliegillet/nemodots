@@ -146,7 +146,9 @@ function clip(value: unknown): unknown {
  * as JSON Schema. The model learns what a valid proposal looks like from the
  * policy itself, not from prose in a runbook (finding D7).
  */
-export function valueDomainOf(sourceKey: string): Record<string, unknown> | null {
+export function valueDomainOf(
+  sourceKey: string,
+): Record<string, unknown> | null {
   const key = sourceKey.slice('checkout.config/'.length);
   if (!sourceKey.startsWith('checkout.config/')) return null;
   if (!Object.hasOwn(CONFIG_VALUE_DOMAINS, key)) return null;

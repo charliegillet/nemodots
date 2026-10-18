@@ -3,15 +3,10 @@
 ## `routing.inventory_source`
 
 - Selects which data source answers inventory reads inside the order path.
-- Value domain: one of two enum members, `primary` or `replica_stale`. One reads the authoritative database, the other a replica that lags behind and has stopped catching up.
-- Reading a lagging replica makes the quantity the API sees differ from the database quantity. Orders can then still succeed, `/health` can stay `ok`, and stock can be oversold.
+- Value domain: an enumeration. The members are returned as `valueDomain` when you observe `checkout.config/routing.inventory_source`.
+- When the source the API reads from differs in content from the authoritative database row, the quantity the API sees differs from the database quantity. Orders can still succeed and `/health` can stay `ok` while the two quantities disagree.
 
-## How the symptom shows
+## What the sources show
 
-- `checkout.inventory/<sku>` reports `consistent: false` when the database quantity and the API quantity differ. Check several SKUs; a single SKU may agree by chance.
-- Oversold stock is visible as an inventory quantity that fell below what orders allow.
-
-## Remedy
-
-- Route reads to the authoritative database source. Changing the key does not repair stock that is already wrong; it only stops new reads from using the lagging replica.
-- Confirm afterwards by observing `checkout.inventory/<sku>` for more than one SKU.
+- `checkout.inventory/<sku>` reports the database quantity, the quantity the API reports and a `consistent` flag for one SKU. A single SKU may agree by chance; sample more than one.
+- A change to this key affects which source future reads use. It does not rewrite stock that orders already consumed.

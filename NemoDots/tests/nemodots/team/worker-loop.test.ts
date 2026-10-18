@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { InvalidationEvent } from '../../../src/server/nemodots/contracts/index.js';
+import {
+  RECOMMENDED_TEAM_BUDGETS,
+  teamBudgetIssues,
+} from '../../../src/server/nemodots/team/budget.js';
+import { defaultCoordinatorConfig } from '../../../src/server/nemodots/team/wiring.js';
 import { createTeamTools } from '../../../src/server/nemodots/team/tools.js';
 import {
   runWorker,
@@ -579,5 +584,23 @@ describe('worker loop: repair contexts (no transcript replay)', () => {
     expect(coordinator.records[0].record.role).toBe('repair');
     // fresh reads are in the snapshot vector of the first call
     expect(coordinator.records[0].snapshot.dependencyVector).toHaveLength(2);
+  });
+});
+
+describe('default budget configuration', () => {
+  it('the team wiring default gives a 12-turn loop enough tokens; generic small defaults are refused', () => {
+    const config = defaultCoordinatorConfig({});
+    expect(
+      teamBudgetIssues({
+        taskMaxTokens: config.taskDefaults.maxTokens,
+        missionMaxTokens: config.budgets.maxTokens,
+      }),
+    ).toEqual([]);
+    expect(config.taskDefaults.maxTokens).toBe(
+      RECOMMENDED_TEAM_BUDGETS.taskMaxTokens,
+    );
+    expect(
+      teamBudgetIssues({ taskMaxTokens: 20_000, missionMaxTokens: 200_000 }),
+    ).toHaveLength(2);
   });
 });
