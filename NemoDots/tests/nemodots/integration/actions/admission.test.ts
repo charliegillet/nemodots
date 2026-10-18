@@ -152,6 +152,37 @@ describe('stale between the preliminary read and the locks (gate 2 item 2)', () 
   });
 });
 
+describe('a forged self-write marker (gate 2 item 16)', () => {
+  it('a causedByActionId in the payload is rejected by the strict schema and nothing is written', async () => {
+    await withWorld(async (world) => {
+      const s = await scenario(world);
+      const input = setConfigInput(world, { value: 10 }, { value: 20 });
+      const forged = {
+        ...input,
+        payload: { ...input.payload, causedByActionId: randomUUID() },
+      };
+      await expect(
+        world.service.propose(forged as never, proposeCtx(s)),
+      ).rejects.toMatchObject({ name: 'InvalidProposalError' });
+      await expect(
+        world.service.propose(
+          { ...input, causedByActionId: randomUUID() } as never,
+          proposeCtx(s),
+        ),
+      ).rejects.toMatchObject({ name: 'InvalidProposalError' });
+      await expect(
+        world.service.propose(
+          { ...input, action: 'delete_everything' } as never,
+          proposeCtx(s),
+        ),
+      ).rejects.toMatchObject({ name: 'InvalidProposalError' });
+      expect(await countRows(world, 'coordinator.action_intents')).toBe(0);
+      expect(await countRows(world, 'coordinator.authorizations')).toBe(0);
+      await unchanged(world);
+    });
+  });
+});
+
 describe('policy refusals at proposal (gate 2 items 5 and 6)', () => {
   it('a proposal without health evidence is blocked(missing_required_source)', async () => {
     await withWorld(async (world) => {

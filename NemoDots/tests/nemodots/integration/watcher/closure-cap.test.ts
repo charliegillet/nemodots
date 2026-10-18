@@ -1,7 +1,10 @@
 // The closure-cap path (ARCHITECTURE 5.2, finding C14): the capped closure does
 // not make the source unobservable. The affected missions are paused, a coarse
 // InvalidationEvent is recorded and the receipt is registered without a closure.
+import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { digest } from '../../../../src/server/nemodots/contracts/index.js';
+import { linkPublication } from '../../../../src/server/nemodots/ledger/index.js';
 import {
   attemptStatus,
   headOf,
@@ -13,7 +16,10 @@ import {
   missionStatus,
   receiptsOf,
   recoveryKinds,
+  taskStatus,
   withWatcherEnv,
+  type FixtureMission,
+  type WatcherEnv,
 } from './harness.js';
 
 const K = 'cache.namespace';
@@ -116,6 +122,96 @@ describe('closure cap exceeded', () => {
       await injectorWrite(env, K, 'catalog-c');
       await watcher.runCycle();
       expect((await headOf(env, member(K))).revision).toBe(3);
+    });
+  });
+});
+
+/** Attempt `index` of the mission has published an output that cites what it read. */
+async function publishOutput(
+  env: WatcherEnv,
+  mission: FixtureMission,
+  index: number,
+): Promise<string> {
+  const { taskId, attemptId } = mission.attempts[index];
+  const outputId = randomUUID();
+  await env.admin.query(
+    `INSERT INTO coordinator.task_outputs
+       (id, task_id, attempt_id, mission_id, kind, content, digest)
+     VALUES ($1, $2, $3, $4, 'finding', '{"claim":"cache namespace is catalog-a"}'::jsonb, $5)`,
+    [outputId, taskId, attemptId, mission.missionId, digest(outputId)],
+  );
+  await env.admin.query(
+    `UPDATE coordinator.task_attempts SET status = 'published' WHERE id = $1`,
+    [attemptId],
+  );
+  await env.admin.query(
+    `UPDATE coordinator.tasks SET status = 'succeeded', output_id = $2 WHERE id = $1`,
+    [taskId, outputId],
+  );
+  const client = await env.app.connect();
+  try {
+    await client.query('BEGIN');
+    await linkPublication(client, {
+      missionId: mission.missionId,
+      taskId,
+      attemptId,
+      modelCallIds: [],
+      outputId,
+    });
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+  return outputId;
+}
+
+describe('closure cap exceeded: work that already published', () => {
+  it('names the published reader, its output and its task in the coarse set instead of calling them preserved', async () => {
+    await withWatcherEnv(async (env) => {
+      const watcher = env.watcher({
+        config: { closureLimits: { maxDepth: 64, maxNodes: 1 } },
+      });
+      await watcher.runCycle();
+      await watcher.runCycle();
+      // task A published a finding that rests on the receipt, task B still runs
+      const mission = await missionReading(env, [[member(K)], [member(K)]]);
+      const outputId = await publishOutput(env, mission, 0);
+      expect(await taskStatus(env, mission.attempts[0].taskId)).toBe('succeeded');
+
+      await injectorWrite(env, K, 'catalog-b');
+      const cycle = await watcher.runCycle();
+      expect(
+        cycle.outcomes.find((o) => o.sourceKey === member(K)),
+      ).toMatchObject({ outcome: 'registered', closureCapped: true });
+
+      const [event] = await ledgerEvents(env, member(K));
+      expect(event.closure.capped).toBe(true);
+      const entry = event.perMission.find(
+        (p) => p.missionId === mission.missionId,
+      );
+      expect(entry?.affected.attemptIds).toEqual(
+        mission.attempts.map((a) => a.attemptId).sort(),
+      );
+      expect(entry?.affected.outputIds).toEqual([outputId]);
+      expect(entry?.affected.taskIds).toEqual(
+        mission.attempts.map((a) => a.taskId).sort(),
+      );
+      // the published task is NOT claimed to be preserved
+      expect(entry?.preserved.taskIds).toEqual(
+        [mission.plannerTaskId, ...mission.fillerTaskIds].sort(),
+      );
+      expect(entry?.preserved.taskIds).not.toContain(
+        mission.attempts[0].taskId,
+      );
+      // and the marks ran: the output cannot be consumed once the mission resumes
+      const output = await env.admin.query(
+        'SELECT usable FROM coordinator.task_outputs WHERE id = $1',
+        [outputId],
+      );
+      expect(output.rows[0].usable).toBe(false);
     });
   });
 });

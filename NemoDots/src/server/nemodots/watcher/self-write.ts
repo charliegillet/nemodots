@@ -183,16 +183,39 @@ export async function walkHistory(
 type Emit = (event: WatcherEvent) => void;
 
 /**
+ * Proof that a settle call took effect. RecoveryPort.onSelfWriteSettled must
+ * settle the intent (bootstrap wires it to actions.settleFromHistory, which
+ * then notifies the coordinator). Wiring it to the coordinator alone leaves the
+ * intent `committed` forever, and every poll would call the port again without
+ * any signal. After each call the watcher therefore re-reads the intent through
+ * the IntentSettlementPort; an intent that is still `committed` is reported as
+ * an error (once per action and process) and is not counted as settled.
+ */
+export interface SettlementCheck {
+  intents: Pick<IntentSettlementPort, 'expectedWrites'>;
+  /** Action ids already reported as not applied (keeps the poll loop quiet). */
+  reported: Set<string>;
+}
+
+export const createSettlementCheck = (
+  intents: Pick<IntentSettlementPort, 'expectedWrites'>,
+): SettlementCheck => ({ intents, reported: new Set() });
+
+const MAX_REPORTED_UNSETTLED = 1_000;
+
+/**
  * Calls RecoveryPort.onSelfWriteSettled for every settlement that is not
  * recorded yet. The port is idempotent per action (a second call for a settled
  * intent is a no-op), so a retry after a crash is safe. A failing call is
  * reported and left for sweepSettlements(), which finds every committed intent
- * that is still unsettled.
+ * that is still unsettled. With a `check`, a call that returned without
+ * settling the intent is an error, not a success.
  */
 export async function applySettlements(
   recovery: Pick<WatcherRecovery, 'onSelfWriteSettled'>,
   settlements: readonly Settlement[],
   emit: Emit,
+  check?: SettlementCheck,
 ): Promise<{ actionId: string; outcome: 'verified' | 'failed' }[]> {
   const done: { actionId: string; outcome: 'verified' | 'failed' }[] = [];
   for (const settlement of settlements) {
@@ -202,19 +225,39 @@ export async function applySettlements(
         settlement.actionId,
         settlement.outcome,
       );
-      done.push({ actionId: settlement.actionId, outcome: settlement.outcome });
-      emit({
-        type: 'self_write_settled',
-        actionId: settlement.actionId,
-        outcome: settlement.outcome,
-      });
     } catch (error) {
       emit({
         type: 'error',
         where: 'onSelfWriteSettled',
         message: error instanceof Error ? error.message : String(error),
       });
+      continue;
     }
+    if (check) {
+      const after = (
+        await check.intents.expectedWrites([settlement.actionId])
+      ).get(settlement.actionId);
+      if (after && !after.settled) {
+        if (check.reported.size >= MAX_REPORTED_UNSETTLED)
+          check.reported.clear();
+        if (!check.reported.has(settlement.actionId)) {
+          check.reported.add(settlement.actionId);
+          emit({
+            type: 'error',
+            where: 'onSelfWriteSettled',
+            message: `intent ${settlement.actionId} is still committed after onSelfWriteSettled(${settlement.outcome}); the port must settle the intent (wire it to actions.settleFromHistory, not to the coordinator alone)`,
+          });
+        }
+        continue;
+      }
+      check.reported.delete(settlement.actionId);
+    }
+    done.push({ actionId: settlement.actionId, outcome: settlement.outcome });
+    emit({
+      type: 'self_write_settled',
+      actionId: settlement.actionId,
+      outcome: settlement.outcome,
+    });
   }
   return done;
 }
@@ -234,6 +277,7 @@ export async function sweepSettlements(
     heads: ReadonlyMap<string, HeadRow>;
     ledger?: LedgerOptions;
     emit: Emit;
+    check?: SettlementCheck;
   },
 ): Promise<{ actionId: string; outcome: 'verified' | 'failed' }[]> {
   const awaiting = await deps.intents.awaitingSettlement();
@@ -266,5 +310,10 @@ export async function sweepSettlements(
       alreadySettled: false,
     });
   }
-  return applySettlements(deps.recovery, settlements, deps.emit);
+  return applySettlements(
+    deps.recovery,
+    settlements,
+    deps.emit,
+    deps.check,
+  );
 }

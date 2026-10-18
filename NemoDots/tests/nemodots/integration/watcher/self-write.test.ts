@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { registerObservation } from '../../../../src/server/nemodots/ledger/index.js';
 import { advanceConfig } from '../../../../src/server/nemodots/sandbox/version-authority.js';
+import { createWatcher } from '../../../../src/server/nemodots/watcher/index.js';
 import {
   actionCommit,
   attemptStatus,
@@ -17,6 +18,7 @@ import {
   missionReading,
   receiptsOf,
   recoveryKinds,
+  taskStatus,
   withWatcherEnv,
   type WatcherEnv,
 } from './harness.js';
@@ -93,24 +95,29 @@ describe('a verified self-write', () => {
         selfWrite: 'verified',
         reason: 'newer_observation',
       });
-      expect([...event.affected.attemptIds].sort()).toEqual(
-        [mission.attempts[0].attemptId, mission.attempts[1].attemptId].sort(),
+      // the other branch that read the old revision is invalidated (its premise
+      // changed); an unrelated branch is untouched. Whether the PROPOSING
+      // attempt is in this set is a ledger decision, see the expected-failure
+      // tests at the end of this file.
+      expect(event.affected.attemptIds).toContain(
+        mission.attempts[1].attemptId,
+      );
+      expect(event.affected.attemptIds).not.toContain(
+        mission.attempts[2].attemptId,
       );
       expect(await attemptStatus(env, mission.attempts[2].attemptId)).toBe(
         'running',
       );
 
-      // recovery: exactly one postcondition task; the repairs of both branches
-      // wait behind it (coalesced) instead of starting a repair storm
+      // recovery: exactly one postcondition task; the repair of the other
+      // branch waits behind it (coalesced) instead of starting a repair storm
       const post = await postconditionTasks(env, mission.missionId);
       expect(post).toHaveLength(1);
       const kinds = await recoveryKinds(env, mission.missionId);
       expect(kinds.filter((k) => k === 'postcondition_scheduled')).toHaveLength(
         1,
       );
-      expect(
-        kinds.filter((k) => k === 'repair_coalesced').length,
-      ).toBeGreaterThanOrEqual(2);
+      expect(kinds).toContain('repair_coalesced');
       expect(kinds).not.toContain('repair_scheduled');
       expect(kinds).toContain('branch_preserved');
 
@@ -304,8 +311,8 @@ describe('the settlement sweep', () => {
   });
 });
 
-describe('ordering of settlement and registration', () => {
-  it('settles the intent BEFORE the receipt exists, so a crash in between is repaired by the next poll', async () => {
+describe('ordering of registration and settlement', () => {
+  it('registers the head first; a crash before the settle call is repaired by the sweep of the next poll', async () => {
     await withWatcherEnv(async (env) => {
       const { actionId } = await setup(env);
       await actionCommit(env, { actionId, key: K, value: 'catalog-b' });
@@ -315,24 +322,132 @@ describe('ordering of settlement and registration', () => {
           ...env.recovery,
           async onSelfWriteSettled(id, outcome) {
             seen.push((await receiptsOf(env, member(K))).length);
-            // the process dies right after the first settle attempt
-            throw new Error(`crash before registering (${id}, ${outcome})`);
+            // the process dies right after registering the head
+            throw new Error(`crash before settling (${id}, ${outcome})`);
           },
         },
       });
       await watcher.observe([member(K)]);
-      // the receipt was not registered yet when the settle ran (1 receipt: rev 1)
-      expect(seen).toEqual([1]);
+      // the head (revision 2) existed when the settle ran: no postcondition
+      // work can ever be scheduled against a head the ledger does not hold
+      expect(seen).toEqual([2]);
+      expect((await headOf(env, member(K))).selfWrite).toBe('verified');
       expect(await intentStatus(env, actionId)).toMatchObject({
         status: 'committed',
       });
+      expect(
+        env.events.filter((e) => e.type === 'error' && e.where === 'onSelfWriteSettled'),
+      ).toHaveLength(1);
 
-      // the walk repeats on the next poll (the ledger still stands at revision 1
-      // or, if it did register, the sweep finds the committed intent)
+      // the walk never sees row 2 again (the ledger moved past it); the sweep
+      // finds the committed intent and settles it from its own row
       const next = env.watcher();
-      await next.runCycle();
+      const cycle = await next.runCycle();
+      expect(cycle.settled).toEqual([{ actionId, outcome: 'verified' }]);
       expect(env.settled).toEqual([{ actionId, outcome: 'verified' }]);
       expect((await intentStatus(env, actionId)).status).toBe('verified');
+      expect(await receiptsOf(env, member(K))).toHaveLength(2);
+    });
+  });
+
+  it('a foreign write that lands after the walk read its rows is classified from the rows read in the retry', async () => {
+    await withWatcherEnv(async (env) => {
+      const { actionId } = await setup(env);
+      await actionCommit(env, { actionId, key: K, value: 'catalog-b' });
+      let hit = false;
+      const intents = {
+        ...env.intents,
+        async expectedWrites(ids: readonly string[]) {
+          const found = await env.intents.expectedWrites(ids as never);
+          if (!hit) {
+            hit = true;
+            // after the history rows were read, before the registration
+            await injectorWrite(env, K, 'catalog-injected');
+          }
+          return found;
+        },
+      };
+      const watcher = createWatcher({
+        pool: env.app,
+        listenUrl: env.s.db.urls.app,
+        readers: env.readers,
+        recovery: env.recovery,
+        intents,
+        config: env.watcherConfig(),
+        onEvent: (event) => env.events.push(event),
+      });
+      try {
+        const [observed] = await watcher.observe([member(K)]);
+        // the head the ledger holds is revision 3, written by the injector
+        expect(observed).toMatchObject({
+          outcome: 'registered',
+          revision: 3,
+          selfWrite: 'none',
+        });
+      } finally {
+        await watcher.stop();
+      }
+      expect(await headOf(env, member(K))).toMatchObject({
+        revision: 3,
+        selfWrite: 'none',
+        causedByActionId: null,
+      });
+      expect(env.settled).toEqual([{ actionId, outcome: 'verified' }]);
+    });
+  });
+});
+
+// ARCHITECTURE 5.4 prescribes two things the watcher cannot deliver alone,
+// because the rows involved belong to the ledger closure and the coordinator:
+//
+//   verified  "the acting lineage (proposing attempt, its task, ancestors
+//             awaiting the result) is not invalidated"
+//   none      "full invalidation", and no postcondition gate: the head is not a
+//             verified self-write
+//
+// Today the closure marks the proposer like any other reader, the coordinator
+// replans its root task, and RecoveryPort.onSelfWriteSettled('verified') always
+// schedules a postcondition task, also when a foreign write landed last. These
+// are written as the behaviour 5.4 requires and marked with it.fails so that
+// the suite states the deviation instead of asserting it. When the ledger /
+// coordinator dependency lands, vitest reports each of them as unexpectedly
+// passing: remove `.fails` then.
+describe('ARCHITECTURE 5.4 expectations owned by the ledger and the coordinator', () => {
+  it.fails('verified self-write: the proposing attempt and its task are not invalidated', async () => {
+    await withWatcherEnv(async (env) => {
+      const { watcher, mission, actionId } = await setup(env);
+      await actionCommit(env, { actionId, key: K, value: 'catalog-b' });
+      await watcher.observe([member(K)]);
+      expect(await attemptStatus(env, mission.attempts[0].attemptId)).not.toBe(
+        'invalidated',
+      );
+      expect(await taskStatus(env, mission.attempts[0].taskId)).not.toBe(
+        'invalidated',
+      );
+    });
+  });
+
+  it.fails('verified self-write: no replan is scheduled for the proposing root task', async () => {
+    await withWatcherEnv(async (env) => {
+      const { watcher, mission, actionId } = await setup(env);
+      await actionCommit(env, { actionId, key: K, value: 'catalog-b' });
+      await watcher.observe([member(K)]);
+      expect(await recoveryKinds(env, mission.missionId)).not.toContain(
+        'replan_scheduled',
+      );
+    });
+  });
+
+  it.fails('C7 (a foreign write landed last): no postcondition task is scheduled', async () => {
+    await withWatcherEnv(async (env) => {
+      const { mission, actionId } = await setup(env);
+      await actionCommit(env, { actionId, key: K, value: 'catalog-b' });
+      await injectorWrite(env, K, 'catalog-injected');
+      await env.watcher().observe([member(K)]);
+      expect(await postconditionTasks(env, mission.missionId)).toEqual([]);
+      expect(await recoveryKinds(env, mission.missionId)).not.toContain(
+        'postcondition_scheduled',
+      );
     });
   });
 });

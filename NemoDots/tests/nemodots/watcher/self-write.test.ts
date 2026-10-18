@@ -6,6 +6,7 @@ import { configValueDigest } from '../../../src/server/nemodots/sandbox/version-
 import {
   applySettlements,
   classifyHistory,
+  createSettlementCheck,
   type HistoryRow,
 } from '../../../src/server/nemodots/watcher/self-write.js';
 import type {
@@ -243,5 +244,73 @@ describe('applySettlements', () => {
     expect(calls).toEqual([X, Y]);
     expect(done.map((d) => d.actionId)).toEqual([Y]);
     expect(events.map((e) => e.type)).toEqual(['error', 'self_write_settled']);
+  });
+
+  describe('with a settlement check', () => {
+    const intentsWhere = (settled: boolean) => ({
+      async expectedWrites(ids: readonly ActionId[]) {
+        return new Map(
+          ids.map((id) => [id, expectation(id, 'catalog-b', { settled })[1]]),
+        );
+      },
+    });
+
+    it('counts a call that settled the intent', async () => {
+      const events: WatcherEvent[] = [];
+      const done = await applySettlements(
+        { onSelfWriteSettled: async () => {} },
+        [settlement(X)],
+        (event) => events.push(event),
+        createSettlementCheck(intentsWhere(true)),
+      );
+      expect(done).toEqual([{ actionId: X, outcome: 'verified' }]);
+      expect(events.map((e) => e.type)).toEqual(['self_write_settled']);
+    });
+
+    it('reports a call that returned but left the intent committed, once per action', async () => {
+      const events: WatcherEvent[] = [];
+      const check = createSettlementCheck(intentsWhere(false));
+      const run = () =>
+        applySettlements(
+          { onSelfWriteSettled: async () => {} },
+          [settlement(X)],
+          (event) => events.push(event),
+          check,
+        );
+      expect(await run()).toEqual([]);
+      expect(await run()).toEqual([]);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        type: 'error',
+        where: 'onSelfWriteSettled',
+      });
+      expect((events[0] as { message: string }).message).toContain(
+        'actions.settleFromHistory',
+      );
+    });
+
+    it('reports again after the intent was settled and later is seen committed', async () => {
+      const events: WatcherEvent[] = [];
+      let settled = false;
+      const check = createSettlementCheck({
+        async expectedWrites(ids) {
+          return new Map(
+            ids.map((id) => [id, expectation(id, 'x', { settled })[1]]),
+          );
+        },
+      });
+      const port = { onSelfWriteSettled: async () => {} };
+      const emit = (event: WatcherEvent) => events.push(event);
+      await applySettlements(port, [settlement(X)], emit, check);
+      settled = true;
+      await applySettlements(port, [settlement(X)], emit, check);
+      settled = false;
+      await applySettlements(port, [settlement(X)], emit, check);
+      expect(events.map((e) => e.type)).toEqual([
+        'error',
+        'self_write_settled',
+        'error',
+      ]);
+    });
   });
 });

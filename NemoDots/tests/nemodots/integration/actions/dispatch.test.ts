@@ -111,6 +111,26 @@ describe('flush_cache_namespace', () => {
     );
   });
 
+  it('flushes a large namespace completely (SCAN loop and UNLINK chunking) and leaves other namespaces alone', async () => {
+    await withWorld(
+      async (world) => {
+        const names = Array.from({ length: 1300 }, (_, i) => `entry-${i}`);
+        await seedCache(world, 'catalog-a', names);
+        await seedCache(world, 'catalog-ab', ['must-survive']);
+        await seedCache(world, 'catalog-b', ['q1', 'q2']);
+        const { intent } = await committedFlush(world);
+        const done = await dispatchIntentDetailed(world.deps, intent.id, 'd');
+        expect(done.disposition).toBe('verified');
+        expect(done.deletedCount).toBe(1300);
+        expect(await cacheKeys(world, 'catalog-a')).toEqual([]);
+        // A namespace that merely starts with the same letters is a different namespace.
+        expect(await cacheKeys(world, 'catalog-ab')).toHaveLength(1);
+        expect(await cacheKeys(world, 'catalog-b')).toHaveLength(2);
+      },
+      { redis: true },
+    );
+  });
+
   it('dispatching again never repeats the effect', async () => {
     await withWorld(
       async (world) => {

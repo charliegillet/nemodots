@@ -136,6 +136,17 @@ export type WatcherEvent =
       headVersion: number;
     }
   | { type: 'redelivered'; invalidationId: string }
+  | {
+      /**
+       * An observed sample was older than what the ledger already held for the
+       * source (a tool or probe registered or confirmed a later reading while
+       * the watcher was reading). The registration was rolled back and the
+       * source is read again.
+       */
+      type: 'stale_sample_discarded';
+      sourceKey: string;
+      attempt: number;
+    }
   | { type: 'error'; where: string; message: string };
 
 export interface WatcherDeps {

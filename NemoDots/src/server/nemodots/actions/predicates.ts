@@ -109,8 +109,12 @@ export async function evaluatePredicates(
   });
   if (binding) return early(binding.reason, binding.detail);
 
-  // `leaseValid` is only meaningful for dispatch; expiry is by database clock.
-  if (intent.expiresAt.getTime() <= (intent.dbNow?.getTime() ?? Date.now()))
+  // Expiry is judged by the database clock now, after any lock wait.
+  const expired = await client.query<{ expired: boolean }>(
+    'SELECT $1::timestamptz <= clock_timestamp() AS expired',
+    [intent.expiresAt],
+  );
+  if (expired.rows[0]?.expired)
     return early('expired', 'the intent passed its expiry');
 
   if (mission.status !== 'running')

@@ -2,6 +2,7 @@ import {
   InvalidationEventSchema,
   type InvalidationEvent,
   type MissionId,
+  type PgClient,
   type SelfWrite,
   type SourceKey,
   type SourceType,
@@ -22,6 +23,7 @@ import {
 import { registerAfterClosureCap } from './closure-cap.js';
 import {
   applySettlements,
+  createSettlementCheck,
   sweepSettlements,
   walkHistory,
   type Classification,
@@ -122,6 +124,44 @@ const NONE: Classification = {
   gap: false,
 };
 
+/**
+ * An observed sample older than what the ledger holds for the source. Thrown
+ * inside the registration transaction, so everything the registration wrote
+ * (receipt, marks, event) is rolled back.
+ */
+class StaleSampleError extends Error {
+  constructor(readonly sourceKey: string) {
+    super(`the sample of ${sourceKey} is older than the ledger head`);
+    this.name = 'StaleSampleError';
+  }
+}
+
+/**
+ * Runs inside the registration transaction, after registerObservation. The
+ * transaction holds the sources row lock until COMMIT, so the check cannot race
+ * another registration: when the receipt this registration superseded (or one
+ * of its confirmations) was observed AFTER the watcher's sample was taken, the
+ * sample is stale and must not become the current receipt.
+ */
+async function assertSampleNotStale(
+  client: PgClient,
+  sourceKey: string,
+  result: RegisterResult,
+  sampledAt: Date,
+) {
+  if (!result.newRevision || !result.supersededReceiptId) return;
+  const { rows } = await client.query<{ newest: Date }>(
+    `SELECT GREATEST(r.observed_at, COALESCE(max(c.confirmed_at), r.observed_at)) AS newest
+       FROM ledger.observation_receipts r
+       LEFT JOIN ledger.receipt_confirmations c ON c.receipt_id = r.id
+      WHERE r.id = $1 GROUP BY r.id`,
+    [result.supersededReceiptId],
+  );
+  const newest = rows[0]?.newest;
+  if (newest && newest.getTime() > sampledAt.getTime())
+    throw new StaleSampleError(sourceKey);
+}
+
 const messageOf = (error: unknown) =>
   (error instanceof Error
     ? `${error.name}: ${error.message}`
@@ -148,6 +188,7 @@ export function createWatcher(deps: WatcherDeps): Watcher {
     errors: 0,
   };
   const reportedStale = new Set<string>();
+  const settlementCheck = createSettlementCheck(deps.intents);
 
   function emit(event: WatcherEvent) {
     if (event.type === 'registered') counters.registered += 1;
@@ -207,11 +248,23 @@ export function createWatcher(deps: WatcherDeps): Watcher {
     return event.id;
   }
 
-  async function register(input: RegisterObservationInput) {
+  /**
+   * `afterRegister` runs in the registration transaction; throwing from it
+   * rolls the registration back (used for the stale-sample check).
+   */
+  async function register(
+    input: RegisterObservationInput,
+    afterRegister?: (client: PgClient, result: RegisterResult) => Promise<void>,
+  ) {
     try {
-      const result = await withTransaction(deps.pool, (client) =>
-        registerObservation(client, input, { ledger, limits }),
-      );
+      const result = await withTransaction(deps.pool, async (client) => {
+        const registered = await registerObservation(client, input, {
+          ledger,
+          limits,
+        });
+        await afterRegister?.(client, registered);
+        return registered;
+      });
       return { result, capped: false };
     } catch (error) {
       if (!(error instanceof ClosureCapExceeded)) throw error;
@@ -219,6 +272,7 @@ export function createWatcher(deps: WatcherDeps): Watcher {
         { pool: deps.pool, recovery: deps.recovery, ledger, emit },
         error,
         input,
+        afterRegister,
       );
       return { result: capped.result, capped: true };
     }
@@ -351,11 +405,6 @@ export function createWatcher(deps: WatcherDeps): Watcher {
             ledgerRevision: head?.revision ?? 0,
             headVersion: revision,
           });
-        // Intents are settled BEFORE the receipt exists: a crash in between is
-        // repaired by the next poll (the walk repeats, the port is idempotent),
-        // whereas settling after registration would lose rows the ledger has
-        // already moved past.
-        await applySettlements(deps.recovery, classification.settlements, emit);
       }
       try {
         const { result, capped } = await register({
@@ -369,12 +418,25 @@ export function createWatcher(deps: WatcherDeps): Watcher {
           observedAt: sampledAt,
           claimed: { sourceRevision: revision },
         });
-        return await finishRegistration(
+        const registered = await finishRegistration(
           sourceKey,
           result,
           capped,
           classification.selfWrite,
         );
+        // The head receipt exists (and its event reached the coordinator)
+        // before the intents are settled: a settlement can then never schedule
+        // work against a head the ledger does not hold yet. A crash between
+        // the COMMIT above and these calls is repaired by sweepSettlements()
+        // on the next poll, which settles every committed intent whose row the
+        // ledger has moved past.
+        await applySettlements(
+          deps.recovery,
+          classification.settlements,
+          emit,
+          settlementCheck,
+        );
+        return registered;
       } catch (error) {
         if (error instanceof StaleObservationRejectedError) {
           reportStale(sourceKey, error.observed, error.current);
@@ -458,68 +520,92 @@ export function createWatcher(deps: WatcherDeps): Watcher {
       .map(([key, type]) => ({ key, type }));
   }
 
-  async function observeObserved(
-    sources: readonly { key: string; type?: SourceType }[],
-  ): Promise<ObserveOutcome[]> {
-    const sampled: {
-      key: string;
-      type?: SourceType;
-      at: Date;
-      read?: Awaited<ReturnType<WatcherDeps['readers']['read']>>;
-      error?: unknown;
-    }[] = [];
-    for (let i = 0; i < sources.length; i += READ_CONCURRENCY) {
-      const batch = sources.slice(i, i + READ_CONCURRENCY);
-      sampled.push(
-        ...(await Promise.all(
-          batch.map(async (source) => {
-            const at = clock();
-            try {
-              return {
-                ...source,
-                at,
-                read: await deps.readers.read(
-                  source.key as SourceKey,
-                  toScope(scope),
-                ),
-              };
-            } catch (error) {
-              return { ...source, at, error };
-            }
-          }),
-        )),
-      );
+  type Sample = {
+    key: string;
+    type?: SourceType;
+    at: Date;
+    read?: Awaited<ReturnType<WatcherDeps['readers']['read']>>;
+    error?: unknown;
+  };
+
+  async function sampleObserved(source: {
+    key: string;
+    type?: SourceType;
+  }): Promise<Sample> {
+    const at = clock();
+    try {
+      return {
+        ...source,
+        at,
+        read: await deps.readers.read(source.key as SourceKey, toScope(scope)),
+      };
+    } catch (error) {
+      return { ...source, at, error };
     }
-    const outcomes: ObserveOutcome[] = [];
-    for (const item of sampled) {
+  }
+
+  /**
+   * Registers one sample. The ledger orders observed revisions by arrival, so a
+   * sample that a tool or probe overtook (it registered or confirmed a later
+   * reading while this one was being read) is rolled back and read again; the
+   * stale value never becomes the current receipt.
+   */
+  async function registerSample(first: Sample): Promise<ObserveOutcome> {
+    let item = first;
+    for (let attempt = 1; ; attempt += 1) {
       if (!item.read) {
         emit({
           type: 'error',
           where: `read ${item.key}`,
           message: messageOf(item.error),
         });
-        outcomes.push(outcome(item.key, 'failed'));
-        continue;
+        return outcome(item.key, 'failed');
       }
       try {
-        const { result, capped } = await register({
-          source: observedRef(scope, item.key, item.type),
-          normalizedValue: item.read.normalizedValue,
-          provenance: { kind: 'watcher' },
-          observedAt: item.at,
-        });
-        outcomes.push(
-          await finishRegistration(item.key, result, capped, 'none'),
+        const { result, capped } = await register(
+          {
+            source: observedRef(scope, item.key, item.type),
+            normalizedValue: item.read.normalizedValue,
+            provenance: { kind: 'watcher' },
+            observedAt: item.at,
+          },
+          (client, registered) =>
+            assertSampleNotStale(client, item.key, registered, item.at),
         );
+        return await finishRegistration(item.key, result, capped, 'none');
       } catch (error) {
+        if (error instanceof StaleSampleError) {
+          emit({
+            type: 'stale_sample_discarded',
+            sourceKey: item.key,
+            attempt,
+          });
+          if (attempt >= MAX_RACE_ATTEMPTS) return outcome(item.key, 'rejected');
+          item = await sampleObserved({ key: item.key, type: item.type });
+          continue;
+        }
         emit({
           type: 'error',
           where: `observe ${item.key}`,
           message: messageOf(error),
         });
-        outcomes.push(outcome(item.key, 'failed'));
+        return outcome(item.key, 'failed');
       }
     }
+  }
+
+  async function observeObserved(
+    sources: readonly { key: string; type?: SourceType }[],
+  ): Promise<ObserveOutcome[]> {
+    const sampled: Sample[] = [];
+    for (let i = 0; i < sources.length; i += READ_CONCURRENCY)
+      sampled.push(
+        ...(await Promise.all(
+          sources.slice(i, i + READ_CONCURRENCY).map(sampleObserved),
+        )),
+      );
+    const outcomes: ObserveOutcome[] = [];
+    for (const item of sampled) outcomes.push(await registerSample(item));
     return outcomes;
   }
 
@@ -616,6 +702,7 @@ export function createWatcher(deps: WatcherDeps): Watcher {
         heads,
         ledger,
         emit,
+        check: settlementCheck,
       });
     } catch (error) {
       emit({ type: 'error', where: 'sweep', message: messageOf(error) });

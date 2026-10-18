@@ -289,7 +289,11 @@ export async function claimDispatch(
         live,
       );
     if (mission.status === 'paused') return unchanged('the mission is paused');
-    if (row.expiresAt.getTime() <= (row.dbNow?.getTime() ?? Date.now()))
+    const expired = await client.query<{ expired: boolean }>(
+      'SELECT $1::timestamptz <= clock_timestamp() AS expired',
+      [row.expiresAt],
+    );
+    if (expired.rows[0]?.expired)
       return refuse('expired', 'the intent passed its expiry', 'expired', live);
 
     const claimed = await client.query<IntentDbRow>(

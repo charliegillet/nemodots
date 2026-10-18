@@ -168,6 +168,20 @@ createCoordinator({ ..., intents: createIntentReader(), actions: actions.coordin
 left behind (expired admission leases, undispatched flushes, unsettled effects); it must be called from the
 coordinator's maintenance step.
 
+## Cancellation and pause
+
+| What                                         | Behaviour                                                                                                                                                                                                                                                                              |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| queued intents (`proposed`, `admitted`)      | cancel bumps the mission generation (the coordinator waits for in-flight commits through the mission `FOR SHARE` lock), then `cancelQueued(missionId, generation)` marks them `cancelled`. A late commit finds `cancelled` and writes nothing.                                         |
+| committed effects                            | stay in history and in the `config_versions` log; `IntentReader.committedEffects` lists them (a `set_config` once its commit receipt exists, a flush while its effect is committed, in flight or applied) and the coordinator records them in `Mission.cancellation.committedEffects`. |
+| an in-flight external request (`dispatched`) | is not aborted: the intent keeps its true status (`dispatched`, `outcome_unknown`, then `verified` or `failed`); nothing is shown as undone.                                                                                                                                           |
+| a `committed` flush not yet dispatched       | after a cancel (generation moved) `claimDispatch` fails it (`failed(dispatch_fence_invalid)`, `Authorization(dispatch, blocked, generation_mismatch)`); while the mission is paused it stays `committed` and is dispatched after resume.                                               |
+| dispatcher leases                            | short (`NEMODOTS_DISPATCH_LEASE_MS`), never held across waits; an expired lease makes the old dispatcher's commit fail and lets any dispatcher re-admit.                                                                                                                               |
+| a paused mission                             | admission and commit are `blocked(mission_not_running)`: queued work stops. The blocked intent is terminal; the team proposes again after resume with fresh evidence.                                                                                                                  |
+
+Statuses other than `running` (including `awaiting_acceptance`) block admission and commit. The coordinator must therefore not
+move a mission to `awaiting_acceptance` while an intent it cares about is still `proposed`, `admitted` or `committed`.
+
 ## Test hooks (for the concurrency adversary)
 
 `import { setBarrier, SimulatedCrash } from '.../actions/index.js'` with `NEMODOTS_TEST_HOOKS=1`:

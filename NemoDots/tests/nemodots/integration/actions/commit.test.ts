@@ -212,6 +212,41 @@ describe('dispatcher lease and fence (gate 2 item 15, finding C4)', () => {
   });
 });
 
+describe('the target moved after admission (gate 2 item 4, finding C4)', () => {
+  it('commit is blocked(stale_version) and the configuration keeps the other writer’s value', async () => {
+    await withWorld(async (world) => {
+      const s = await scenario(world);
+      const proposed = await proposePool(world, s, 20);
+      const admitted = await world.service.admit(proposed.id, 'dispatcher-a');
+      expect(admitted.status).toBe('admitted');
+      await externalChange(world, 'db.pool_max', 3);
+      const committed = await world.service.commit(
+        proposed.id,
+        admitted.dispatch!.fence,
+      );
+      expect(committed.status).toBe('blocked');
+      expect(committed.blockReason).toBe('stale_version');
+      expect(await configState(world, 'db.pool_max')).toMatchObject({
+        value: 3,
+        version: 2,
+        causedBy: null,
+      });
+      const auth = await authorizations(world, proposed.id);
+      expect(auth.map((a) => `${a.stage}:${a.decision}`)).toEqual([
+        'admission:admitted',
+        'commit:blocked',
+      ]);
+      expect(auth[1]).toMatchObject({
+        block_reason: 'stale_version',
+        target_expected: '1',
+        target_live: '2',
+      });
+      expect(await results(world, proposed.id)).toEqual([]);
+      expect(await historyRows(world, 'db.pool_max')).toHaveLength(2);
+    });
+  });
+});
+
 describe('serialisation against another writer (gate 2 item 3)', () => {
   it('the injector waits for a parked commit: commit first, injector second, nothing under the old version', async () => {
     await withWorld(async (world) => {
@@ -515,6 +550,26 @@ describe('NOTIFY on proposal (finding C15)', () => {
 });
 
 describe('crash at each barrier: reconcile tells the states apart (gate 2 item 11)', () => {
+  it('a crash at after_preliminary_read changes nothing at all', async () => {
+    await withWorld(async (world) => {
+      const s = await scenario(world);
+      const proposed = await proposePool(world, s, 20);
+      const admitted = await world.service.admit(proposed.id, 'dispatcher-a');
+      const before = await snapshot(world, proposed.id);
+      setBarrier('after_preliminary_read', () => {
+        throw new SimulatedCrash('after_preliminary_read');
+      });
+      await expect(
+        world.service.commit(proposed.id, admitted.dispatch!.fence),
+      ).rejects.toBeInstanceOf(SimulatedCrash);
+      expect(await snapshot(world, proposed.id)).toEqual(before);
+      setBarrier('after_preliminary_read', null);
+      expect((await world.service.reconcile(proposed.id)).status).toBe(
+        'admitted',
+      );
+    });
+  });
+
   it('a crash at before_lock leaves the intent admitted and the configuration untouched', async () => {
     await withWorld(async (world) => {
       const s = await scenario(world);
