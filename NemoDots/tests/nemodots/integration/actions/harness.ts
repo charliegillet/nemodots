@@ -702,3 +702,89 @@ export async function tampering<T>(world: World, fn: () => Promise<T>) {
     );
   }
 }
+
+// --- flush_cache_namespace ---------------------------------------------------------------
+
+export interface FlushScenario {
+  attempt: Attempt;
+  member: ObservationReceipt;
+  stats: ObservationReceipt;
+  modelCallId: string;
+  toolCallId: string;
+}
+
+export async function flushScenario(
+  world: World,
+  options: { attempt?: Attempt; toolCallId?: string } = {},
+): Promise<FlushScenario> {
+  const attempt =
+    options.attempt ??
+    (await createAttempt(world, { role: 'cache_specialist' }));
+  const member = await memberReceipt(world, 'cache.namespace');
+  const stats = await observed(world, 'redis.stats', {
+    activeNamespace: 'catalog-a',
+    keys: { 'catalog-a:v2': 3 },
+  });
+  const { modelCallId, toolCallId } = await emitModelCall(
+    world,
+    attempt,
+    [member, stats],
+    options.toolCallId,
+  );
+  return { attempt, member, stats, modelCallId, toolCallId };
+}
+
+export function flushInput(
+  namespace = 'catalog-a',
+  reason = 'blobs carry the wrong schema',
+): ProposeInput {
+  return {
+    action: 'flush_cache_namespace',
+    payload: { namespace, reason },
+    supportingReceiptIds: [],
+    rationale: 'flush the namespace',
+  } as ProposeInput;
+}
+
+export async function proposeFlush(
+  world: World,
+  s: FlushScenario,
+  namespace = 'catalog-a',
+): Promise<ActionIntent> {
+  return world.service.propose(flushInput(namespace), {
+    ...s.attempt.context,
+    modelCallId: s.modelCallId,
+    toolCallId: s.toolCallId,
+  } as never);
+}
+
+/** Cache entries under the world's prefix; `catalog-b` must always survive a catalog-a flush. */
+export async function seedCache(
+  world: World,
+  namespace: string,
+  names: string[],
+  schema = 2,
+) {
+  const redis = world.redis!;
+  for (const name of names)
+    await redis.client.set(
+      `${redis.prefix}:cache:${namespace}:v${schema}:${name}`,
+      JSON.stringify({ name }),
+    );
+}
+
+export async function cacheKeys(world: World, namespace: string) {
+  const redis = world.redis!;
+  const keys: string[] = [];
+  for await (const batch of redis.client.scanIterator({
+    MATCH: `${redis.prefix}:cache:${namespace}:*`,
+    COUNT: 100,
+  }))
+    keys.push(...batch);
+  return keys.sort();
+}
+
+export async function redisValue(world: World, suffix: string) {
+  const redis = world.redis!;
+  return redis.client.get(`${redis.prefix}:${suffix}`);
+}
