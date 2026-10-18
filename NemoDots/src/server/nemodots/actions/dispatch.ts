@@ -172,7 +172,7 @@ export async function claimDispatch(
     const claimed = await client.query<IntentRow>(
       `UPDATE coordinator.action_intents
           SET dispatch_fence = $2, dispatch_owner = $3,
-              dispatcher_lease_expires_at = now() + ($4::int * interval '1 millisecond'),
+              dispatcher_lease_expires_at = clock_timestamp() + ($4::int * interval '1 millisecond'),
               status_version = status_version + 1
         WHERE id = $1 AND status = 'committed' RETURNING *`,
       [intent.id, fence, dispatcher, deps.dispatchLeaseMs],

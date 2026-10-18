@@ -176,3 +176,55 @@ describe('lock order: commit vs pause vs closure registration', () => {
       }
     }));
 });
+
+// FINDING C-06 (medium, liveness). Event writers that lock the INTENT first
+// and never the mission (actions/settle.ts settleFromHistory / settleMismatch /
+// settleSuperseded, reconcile.ts, dispatch.ts recordOutcome) take the C6
+// events advisory lock (coordinator/events.ts append) and THEN the INSERT's
+// foreign-key check takes FOR KEY SHARE on coordinator.missions. A pause or
+// cancel holds that row FOR UPDATE (conflicts with KEY SHARE) and takes the
+// same advisory lock last, in its own events flush. Pause waits for the
+// advisory lock, the settle waits for the mission row: 40P01. The window is
+// widened by holding the attempt row that pause locks after the mission.
+describe('lock order: intent-first event writers vs pause', () => {
+  it('FINDING C-06: settleFromHistory concurrent with a pause does not deadlock', () =>
+    withEnv(async (env) => {
+      const sc = await proposeSetConfig(env);
+      const fence = await fenceOf(env, sc.intent.id);
+      const committed = await env.actions.commitDetailed(sc.intent.id, fence);
+      expect(committed.intent.status).toBe('committed');
+      const after = committed.receipt!.controlPlane!;
+      const gate = new pg.Client({ connectionString: env.db.urls.admin });
+      await gate.connect();
+      try {
+        await gate.query('BEGIN');
+        await gate.query(
+          'SELECT id FROM coordinator.task_attempts WHERE id = $1 FOR UPDATE',
+          [sc.world.attemptId],
+        );
+        // 1. pause holds the mission FOR UPDATE, then waits on the attempt
+        const pause = settle(
+          pauseMission(missionDeps(env), sc.world.missionId as never),
+        );
+        await waitForLockWaiters(env, 1);
+        // 2. the watcher's settlement takes the events lock, then waits on
+        //    the mission row (FK key share)
+        const settled = settle(
+          env.actions.settleFromHistory(sc.intent.id as never, {
+            afterDigest: after.afterDigest,
+            configVersion: after.targetVersionAfter,
+          }),
+        );
+        await waitForLockWaiters(env, 2);
+        // 3. pause proceeds to its own events flush
+        await gate.query('COMMIT');
+        const results = await Promise.all([pause, settled]);
+        for (const result of results) expect(result.ok).toBe(true);
+        expect((await intentRow(env, sc.intent.id)).status).toBe('verified');
+        expect(env.conflicts.deadlocks).toBe(0);
+      } finally {
+        await gate.query('ROLLBACK').catch(() => undefined);
+        await gate.end();
+      }
+    }));
+});

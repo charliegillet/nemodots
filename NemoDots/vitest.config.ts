@@ -12,6 +12,7 @@ export default mergeConfig(
         ...configDefaults.exclude,
         '.local/**',
         'tests/nemodots/integration/**',
+        'tests/nemodots/adversarial/**',
         'tests/nemodots/live/**',
         'tests/nemodots/e2e/**',
         'tests/nemodots/acceptance/**',

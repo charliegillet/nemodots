@@ -216,6 +216,23 @@ async function completeTask(
   await enqueueMissionEvaluate(tx.client, task.mission_id);
 }
 
+/**
+ * What an output / handoff / finding rests on: the caller's vector UNITED with
+ * everything the attempt read and inherited. Dependencies are only ever added;
+ * a caller cannot publish on a narrower vector than its own read set
+ * (adversarial finding C-03).
+ */
+function outputVector(
+  requested: DependencyVector,
+  fenced: FencedAttempt,
+): DependencyVector {
+  return union(
+    requested,
+    fenced.attempt.inherited_dependency_vector,
+    fenced.attempt.read_set_vector,
+  );
+}
+
 export async function publishOutput(
   deps: PublishDeps,
   context: AttemptContext,
@@ -231,13 +248,9 @@ export async function publishOutput(
   const requested = DependencyVectorSchema.parse(input.dependencyVector);
   return runPublication(deps, {
     context,
-    vector: (fenced) =>
-      union(requested, fenced.attempt.inherited_dependency_vector),
+    vector: (fenced) => outputVector(requested, fenced),
     async write(fenced, tx) {
-      const vector = union(
-        requested,
-        fenced.attempt.inherited_dependency_vector,
-      );
+      const vector = outputVector(requested, fenced);
       const outputId = randomUUID();
       const outputDigest = digest(input.content);
       await tx.client.query(
@@ -565,7 +578,7 @@ export async function publishFinding(
       .filter(
         (entry): entry is DependencyVector[number] => entry !== undefined,
       );
-    return union(requested, fenced.attempt.inherited_dependency_vector, cited);
+    return union(outputVector(requested, fenced), cited);
   };
 
   return runPublication(deps, {

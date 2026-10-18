@@ -49,6 +49,7 @@ export function buildContext(input: BuildInput): CompiledContext {
   const role = [
     roleInstructions(claimed.context.role),
     repair ? REPAIR_NOTICE : '',
+    `Capabilities granted to this task: ${claimed.context.capabilities.join(', ') || '(none)'}. A tool that needs a capability you lack is refused with capability_denied.`,
     input.extraRoleText ?? '',
   ]
     .filter((part) => part !== '')

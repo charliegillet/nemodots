@@ -111,7 +111,7 @@ export async function admit(
             await client.query(
               `UPDATE coordinator.action_intents
                   SET dispatch_fence = $2, dispatch_owner = $3,
-                      dispatcher_lease_expires_at = now() + ($4 || ' milliseconds')::interval,
+                      dispatcher_lease_expires_at = clock_timestamp() + ($4 || ' milliseconds')::interval,
                       status_version = status_version + 1
                 WHERE id = $1 AND status = 'admitted'
                 RETURNING *`,

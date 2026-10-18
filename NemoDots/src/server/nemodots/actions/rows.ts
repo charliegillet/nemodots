@@ -158,7 +158,7 @@ export interface TransitionExtra {
   failureReason?: FailureReason;
   /** assignments appended to the SET list, as [column, value] pairs */
   set?: [string, unknown][];
-  /** `column = now() + ms` (database clock), e.g. a dispatcher lease */
+  /** `column = clock_timestamp() + ms` (database wall clock, not the transaction start), e.g. a dispatcher lease */
   setIntervalMs?: [string, number][];
   /** requires this dispatch fence AND an unexpired dispatcher lease */
   dispatchFence?: number;
@@ -195,7 +195,7 @@ export async function transition(
   for (const [column, ms] of extra.setIntervalMs ?? []) {
     params.push(ms);
     sets.push(
-      `${column} = now() + ($${params.length}::int * interval '1 millisecond')`,
+      `${column} = clock_timestamp() + ($${params.length}::int * interval '1 millisecond')`,
     );
   }
   let guard = '';

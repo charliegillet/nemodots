@@ -159,6 +159,13 @@ describe('Nemotron team on Crusoe', () => {
           };
           break;
         }
+        // nothing left to run and the criteria were not met: stop waiting
+        const open = await q(
+          `SELECT count(*)::int AS n FROM coordinator.tasks
+            WHERE mission_id = $1 AND status NOT IN ('succeeded','failed','cancelled')`,
+          [mission.id],
+        );
+        if (open[0].n === 0 && roots.length > 0) break;
         await sleep(2_000);
       }
       // let in-flight attempts settle briefly, then stop (aborts the rest)
@@ -174,6 +181,20 @@ describe('Nemotron team on Crusoe', () => {
            FROM coordinator.task_attempts a JOIN coordinator.tasks t ON t.id = a.task_id
           WHERE a.mission_id = $1 AND (a.failure_reason IS NOT NULL OR a.abort_reason IS NOT NULL)`,
         [mission.id],
+      );
+      // Diagnostic trace (final summaries and tool outcomes), written next to
+      // the results file; contains model text about the checkout, no prompts.
+      const outputs = await q(
+        `SELECT t.role, t.depth, o.kind, left(o.content->>'summary', 1500) AS summary
+           FROM coordinator.task_outputs o JOIN coordinator.tasks t ON t.id = o.task_id
+          WHERE o.mission_id = $1 ORDER BY o.published_at`,
+        [mission.id],
+      ).catch(() => []);
+      mkdirSync(resultsDir(), { recursive: true });
+      writeFileSync(
+        join(resultsDir(), 'team-trace.json'),
+        `${JSON.stringify({ outputs, tools }, null, 2)}\n`,
+        { mode: 0o600 },
       );
       const maxDepth = Math.max(...taskRows.map((t) => Number(t.depth)));
       const delegated = taskRows.filter(

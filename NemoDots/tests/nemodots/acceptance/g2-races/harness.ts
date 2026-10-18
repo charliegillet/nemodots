@@ -1417,10 +1417,9 @@ async function build(c: {
       );
     },
     async watcher() {
-      // watcher/types.ts WatcherDeps. `intents` (SelfWriteIntentPort) is left
-      // out on purpose: no production adapter exists yet and the verifier does
-      // not supply its own, so self-writes classify as `none` until one lands.
-      // The reader refuses: this suite runs no checkout, and watcherPoll only
+      // watcher/types.ts WatcherDeps. `intents` is the production
+      // SelfWriteIntentPort adapter, actions.selfWriteIntents (absent when the
+      // scenario does not load the actions package). The reader refuses: this suite runs no checkout, and watcherPoll only
       // passes controlled sources, which the watcher reads from the authority.
       const factory = await loadWatcher();
       const recovery = createRecovery(deps);
@@ -1433,6 +1432,9 @@ async function build(c: {
           },
         },
         recovery,
+        ...(primaryApi
+          ? { intents: (primaryApi as Rec).selfWriteIntents }
+          : {}),
         missions: { pause: (id: string) => control.pause(id) },
         intervalMs: 60_000,
         ledger: LEDGER_EVENTS.ledger,

@@ -4,6 +4,7 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { digest } from '../../../../src/server/nemodots/contracts/index.js';
+import { delegate } from '../../../../src/server/nemodots/coordinator/publish.js';
 import { advanceConfig } from '../../../../src/server/nemodots/sandbox/version-authority.js';
 import { ADMISSION_CASES, type AdmissionOutcome } from '../oracle/admission.js';
 import { SELF_WRITE_CASES } from '../oracle/closures.js';
@@ -108,6 +109,89 @@ const postconditionCount = async (w: World) =>
       [w.mission],
     )
   ).rows[0].n as number;
+
+const taskStatus = async (w: World, taskId: string) =>
+  (
+    await w.admin.query('SELECT status FROM coordinator.tasks WHERE id=$1', [
+      taskId,
+    ])
+  ).rows[0].status as string;
+
+/**
+ * The SW oracle's lineage: T_parent (an investigator that read r1) delegates
+ * T_act (a database_specialist, which keeps propose_config_change under rev3
+ * D5, contracts/task.ts#allowedCapabilities) through the real coordinator
+ * delegate(). T_act proposes and admits X. T_other is an unrelated reader of r1.
+ */
+async function swLineage(w: World) {
+  const parent = await w.newAttempt('investigator', {
+    reads: ['member:db.pool_max', 'health'],
+  });
+  await w.modelCallFor(parent, 'tc-del');
+  const { taskId: actTask } = await delegate(w.deps, parent.ctx, {
+    title: 'g2 acting child',
+    role: 'database_specialist',
+    question: 'g2 acting question',
+    dependsOn: [],
+    justification: 'the investigator cannot propose',
+    dependencyVector: w.vector(['member:db.pool_max', 'health']),
+    toolCallId: 'tc-del',
+  });
+  const act = await w.claim('database_specialist');
+  if (!act || act.ctx.taskId !== actTask)
+    throw new Error('the delegated acting task could not be claimed');
+  const other = await w.newAttempt('investigator', {
+    reads: ['member:db.pool_max'],
+  });
+  const x = await w.proposeAdmit({ ...w.poolSpec('tc-1'), att: act });
+  expect(
+    x.status,
+    `the acting proposal must be admitted (${x.blockReason ?? ''})`,
+  ).toBe('admitted');
+  return { lineage: [parent.ctx.taskId, act.ctx.taskId], other, x };
+}
+
+/** Every SW-* expectation against the authoritative rows. */
+async function expectSw(
+  w: World,
+  id: 'SW-1' | 'SW-2' | 'SW-3',
+  run: { lineage: string[]; other: Att; x: { id: string } },
+) {
+  const exp = swExpected(id);
+  const head = await w.headReceipt(`checkout.config/${POOL}`);
+  expect(head!.provenance.selfWrite, `${id} head selfWrite`).toBe(
+    exp.headSelfWrite,
+  );
+  const row = await w.intent(run.x.id);
+  expect(row.status, `${id} X status`).toBe(exp.intentOutcome.X.status);
+  if (exp.intentOutcome.X.failureReason)
+    expect(row.failure_reason, `${id} X failure reason`).toBe(
+      exp.intentOutcome.X.failureReason,
+    );
+  const lineage = await Promise.all(
+    run.lineage.map(async (t, n) => [
+      n === 0 ? 'T_parent' : 'T_act',
+      await taskStatus(w, t),
+    ]),
+  );
+  expect(
+    lineage.map(([name, status]) => [name, status === 'invalidated']),
+    `${id} acting lineage (task statuses ${JSON.stringify(lineage)})`,
+  ).toEqual(lineage.map(([name]) => [name, exp.actingLineageInvalidated]));
+  expect(
+    (await taskStatus(w, run.other.ctx.taskId)) === 'invalidated',
+    `${id} other reader invalidated`,
+  ).toBe(exp.otherReadersInvalidated);
+  expect(await postconditionCount(w), `${id} postconditions`).toBe(
+    exp.postconditionAttempts,
+  );
+  expect(await routingKinds(w), `${id} routing kinds`).toEqual(
+    [...exp.recoveryKinds].sort(),
+  );
+  expect(await maxRepairAttemptsPerTask(w)).toBeLessThanOrEqual(
+    exp.maxRepairAttemptsPerTask,
+  );
+}
 
 describe('G2 compensation, cancellation, self-writes: cases 13, 14, 16', () => {
   describe('G2-13 compensation', () => {
@@ -390,13 +474,6 @@ describe('G2 compensation, cancellation, self-writes: cases 13, 14, 16', () => {
             ),
             'the acting branch is not repaired',
           ).toBe(false);
-          // SW-1 fields (the T_parent lineage is not realizable, see README)
-          const sw1 = swExpected('SW-1');
-          expect(await postconditionCount(w)).toBe(sw1.postconditionAttempts);
-          expect(await routingKinds(w)).toEqual([...sw1.recoveryKinds].sort());
-          expect(await maxRepairAttemptsPerTask(w)).toBeLessThanOrEqual(
-            sw1.maxRepairAttemptsPerTask,
-          );
         },
         { need: ['actions', 'hooks', 'cacheKey', 'watcher'] },
       );
@@ -442,13 +519,58 @@ describe('G2 compensation, cancellation, self-writes: cases 13, 14, 16', () => {
           );
           // its own history row is still verified
           expect((await w.intent(i.id)).status).toBe('verified');
-          // SW-3 fields (the T_parent lineage is not realizable, see README)
-          const sw3 = swExpected('SW-3');
-          expect(await postconditionCount(w)).toBe(sw3.postconditionAttempts);
-          expect(await routingKinds(w)).toEqual([...sw3.recoveryKinds].sort());
-          expect(await maxRepairAttemptsPerTask(w)).toBeLessThanOrEqual(
-            sw3.maxRepairAttemptsPerTask,
+        },
+        { need: ['actions', 'hooks', 'cacheKey', 'watcher'] },
+      );
+    });
+
+    it('G2-16e SW-1 verified self-write through the acting lineage (investigator delegates the specialist): lineage kept, other reader invalidated, one postcondition, routing postcondition_scheduled + repair_coalesced', async () => {
+      await withWorld(
+        async (w) => {
+          const run = await swLineage(w);
+          await w.actions.commit(run.x.id, fence(run.x));
+          await w.watcherPoll();
+          await expectSw(w, 'SW-1', run);
+        },
+        { need: ['actions', 'hooks', 'cacheKey', 'watcher'] },
+      );
+    });
+
+    it('G2-16f SW-2 self-write whose history after-digest mismatches: X failed(postcondition_mismatch), everything invalidated, routing repair_scheduled only', async () => {
+      await withWorld(
+        async (w) => {
+          const run = await swLineage(w);
+          await w.actions.commit(run.x.id, fence(run.x));
+          // the action's history row disagrees with what its commit recorded
+          // (verifier fixture on the per-test database, admin role)
+          await w.admin.query(
+            'ALTER TABLE checkout.config_versions DISABLE TRIGGER USER',
           );
+          try {
+            await w.admin.query(
+              "UPDATE checkout.config_versions SET after_digest = repeat('f', 64) WHERE key = $1 AND caused_by_action_id = $2",
+              [POOL, run.x.id],
+            );
+          } finally {
+            await w.admin.query(
+              'ALTER TABLE checkout.config_versions ENABLE TRIGGER USER',
+            );
+          }
+          await w.watcherPoll();
+          await expectSw(w, 'SW-2', run);
+        },
+        { need: ['actions', 'hooks', 'cacheKey', 'watcher'] },
+      );
+    });
+
+    it('G2-16g SW-3 self-write then an injector write before the watcher runs: head selfWrite none, X verified from its own row, the whole lineage and the other reader invalidated, routing repair_scheduled only', async () => {
+      await withWorld(
+        async (w) => {
+          const run = await swLineage(w);
+          await w.actions.commit(run.x.id, fence(run.x));
+          await w.advance(POOL, 4); // the injector writes before the watcher looks
+          await w.watcherPoll();
+          await expectSw(w, 'SW-3', run);
         },
         { need: ['actions', 'hooks', 'cacheKey', 'watcher'] },
       );
