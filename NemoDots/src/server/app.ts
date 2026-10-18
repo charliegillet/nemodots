@@ -18,6 +18,8 @@ export interface AppOptions {
   ownerToken?: string;
   origin?: string | string[];
   platform?: Platform;
+  /** NemoDots (src/server/nemodots/bootstrap.ts); mounted at /api/nemodots behind the same /api/* guard. */
+  nemodots?: { router: Hono };
 }
 export function createApp({
   store,
@@ -26,6 +28,7 @@ export function createApp({
   ownerToken,
   origin,
   platform,
+  nemodots,
 }: AppOptions) {
   const app = new Hono();
   app.use(
@@ -90,6 +93,7 @@ export function createApp({
       return c.json({ error: 'Use application/json.' }, 415);
     await next();
   });
+  if (nemodots) app.route('/api/nemodots', nemodots.router);
   if (platform) app.route('/api', computerRoutes(platform.computers));
   if (platform)
     app.route(

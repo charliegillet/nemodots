@@ -8,6 +8,7 @@ import { Runner } from './runner.js';
 import { createApp } from './app.js';
 import { resolveAppOrigins } from './app-origin.js';
 import { WorkspaceStore } from './workspace.js';
+import { createNemoDots } from './nemodots/bootstrap.js';
 import { Platform } from './platform.js';
 import {
   agentRunTimeoutMsFromEnv,
@@ -62,6 +63,9 @@ const config: PlatformConfig = {
   ownerToken,
 };
 const platform = new Platform(store, workspace, config);
+// NemoDots is composed here and nowhere else. Without NEMODOTS_PG_URL_APP it
+// is inert: only GET /api/nemodots/health answers (postgres: down).
+const nemodots = createNemoDots(process.env, { workspace });
 const researchConfig = {
   mode: 'live' as const,
   apiKey: config.apiKey,
@@ -99,6 +103,7 @@ const app = createApp({
   ownerToken,
   origin: resolveAppOrigins(process.env.APP_ORIGIN, process.env.NODE_ENV),
   platform,
+  nemodots,
 });
 app.use('*', async (c, next) => {
   c.header('X-Content-Type-Options', 'nosniff');
@@ -115,6 +120,11 @@ app.get('*', serveStatic({ path: './dist/client/index.html' }));
 const server = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
   console.log(`NemoDots listening on http://${host}:${info.port}`);
   runner.start();
+  nemodots
+    .start()
+    .catch((error: unknown) =>
+      reportChannelFailure('NemoDots did not start', [safeFailure(error)]),
+    );
   void platform
     .start()
     .catch((error) =>
@@ -127,6 +137,7 @@ const server = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
 const shutdown = createShutdown({
   stopRunner: () => runner.stop(),
   stopPlatform: () => platform.stop(),
+  stopNemoDots: () => nemodots.stop(),
   closeServer: () =>
     new Promise<void>((resolve, reject) =>
       server.close((error) => (error ? reject(error) : resolve())),

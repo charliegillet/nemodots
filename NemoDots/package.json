@@ -22,6 +22,8 @@
     "nemodots:migrate": "node scripts/nemodots/stack.mjs run src/server/nemodots/db/migrate.ts",
     "nemodots:seed": "node scripts/nemodots/stack.mjs run src/server/nemodots/sandbox/seed.ts",
     "nemodots:checkout": "node scripts/nemodots/stack.mjs checkout",
+    "nemodots:worker": "node scripts/nemodots/stack.mjs run src/server/nemodots/worker-main.ts",
+    "nemodots:dev": "node scripts/nemodots/dev.mjs",
     "test:nemodots:db": "node scripts/nemodots/stack.mjs exec -- cross-env DO_NOT_TRACK=1 vitest run --config vitest.integration.config.ts",
     "test:nemodots:live": "node scripts/nemodots/stack.mjs exec -- cross-env DO_NOT_TRACK=1 vitest run --config vitest.live.config.ts",
     "test:nemodots:e2e": "node scripts/nemodots/stack.mjs exec -- cross-env DO_NOT_TRACK=1 vitest run --config vitest.e2e.config.ts",
