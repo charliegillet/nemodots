@@ -15,6 +15,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   digest,
+  DependencyVectorSchema,
   type AttemptContext,
   type ChatRequest,
   type ChatResult,
@@ -164,7 +165,8 @@ export class StubCoordinator implements TeamCoordinator {
 
   async addReadSet(_context: AttemptContext, entries: DependencyVector) {
     if (this.failAddReadSetWith) throw this.failAddReadSetWith;
-    this.readSets.push(entries);
+    // the real coordinator parses with this schema: unsorted vectors are refused
+    this.readSets.push(DependencyVectorSchema.parse(entries));
   }
   async delegate(
     _context: AttemptContext,

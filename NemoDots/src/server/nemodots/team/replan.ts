@@ -1,5 +1,6 @@
-import type {
-  DependencyEntry,
+import {
+  unionDependencyVectors,
+  type DependencyEntry,
   InvalidationEvent,
   MissionId,
   SourceKey,
@@ -97,7 +98,7 @@ export async function prepareRepairContext(
       sourceRevision: receipt.sourceRevision,
       receiptId: receipt.receiptId,
     }));
-    await deps.coordinator.addReadSet(context, entries);
+    await deps.coordinator.addReadSet(context, unionDependencyVectors(entries));
   }
   return {
     invalidations: event

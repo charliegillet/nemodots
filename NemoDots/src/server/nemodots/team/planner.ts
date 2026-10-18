@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
   PlanShapeSchema,
   digest,
+  unionDependencyVectors,
   type ContextSnapshotId,
   type DependencyVector,
   type ModelCallId,
@@ -120,11 +121,14 @@ export async function runPlanner(
     }
   }
   if (observed.length > 0)
-    await deps.coordinator.addReadSet(context, observed.map(toEntry));
+    await deps.coordinator.addReadSet(
+      context,
+      unionDependencyVectors(observed.map(toEntry)),
+    );
   const receipts: ContextReceipt[] = observed.map(toContextReceipt);
-  const readSetVector: DependencyVector = observed
-    .map(toEntry)
-    .sort((a, b) => (a.sourceKey < b.sourceKey ? -1 : 1));
+  const readSetVector: DependencyVector = unionDependencyVectors(
+    observed.map(toEntry),
+  );
 
   const overview = await deps.reader.planOverview(context.missionId);
   const replan = claimed.attempt.kind === 'replan';

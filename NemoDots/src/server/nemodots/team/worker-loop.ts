@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
+  unionDependencyVectors,
   type ContextSnapshotId,
   type DependencyEntry,
   type DependencyVector,
@@ -189,9 +190,7 @@ export async function runWorker(
       invalidations: repair.invalidations,
       history,
       itemCapBytes: 8192,
-      readSetVector: [...readSet.values()].sort((a, b) =>
-        a.receiptId < b.receiptId ? -1 : 1,
-      ),
+      readSetVector: unionDependencyVectors([...readSet.values()]),
       inheritedVector: inherited,
     });
     const call = await runModelCall(
