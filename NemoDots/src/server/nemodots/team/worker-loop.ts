@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import {
+  TEAM_TOOL_ORDER,
   unionDependencyVectors,
+  type TeamToolName,
   type ContextSnapshotId,
   type DependencyEntry,
   type DependencyVector,
@@ -65,6 +67,55 @@ export interface WorkerDeps {
   workerModel: string;
   newId?: () => string;
   onError?: (error: unknown) => void;
+}
+
+const OBSERVATION_TOOLS: readonly TeamToolName[] = [
+  'observe_source',
+  'list_runbooks',
+  'read_runbook',
+];
+
+/**
+ * Turns at the end of the budget reserved for acting and reporting (a third of
+ * it, none for very small budgets). In them evidence gathering is closed; the
+ * very last turn offers no tools at all so a report is always possible.
+ */
+export function observationReserve(limit: number): number {
+  return limit >= 6 ? Math.floor(limit / 3) : 0;
+}
+
+export type TurnPhase = 'open' | 'last_read' | 'closed' | 'final';
+
+export function turnPhase(turn: number, limit: number): TurnPhase {
+  const reserve = observationReserve(limit);
+  if (reserve === 0) return 'open';
+  if (turn >= limit) return 'final';
+  if (turn > limit - reserve) return 'closed';
+  if (turn === limit - reserve) return 'last_read';
+  return 'open';
+}
+
+/** Budget disclosure in the task text: which turn this is. */
+export function turnNote(turn: number, limit: number): string {
+  return `Turn ${turn} of at most ${limit}.`;
+}
+
+/** A transient user message for the current call only (not kept in the history). */
+export function phaseNotice(
+  phase: TurnPhase,
+  turn: number,
+  limit: number,
+): string | null {
+  switch (phase) {
+    case 'last_read':
+      return `Turn ${turn} of ${limit}: this is your last turn for gathering evidence. After it, observation closes and the remaining turns are for acting on what you established and for your report.`;
+    case 'closed':
+      return `Turn ${turn} of ${limit}: observation is closed. Use this turn to record what you established and to complete or hand off what is still open with the tools you hold.`;
+    case 'final':
+      return `Turn ${turn} of ${limit}: this is your final turn and no tools are available. Give your final report now.`;
+    default:
+      return null;
+  }
 }
 
 interface Tally {
@@ -174,16 +225,32 @@ export async function runWorker(
         return { type: 'abort', reason: 'budget_exhausted' };
       throw error;
     }
+    const limit = Math.min(claimed.task.maxIterations, MAX_LOOP_ITERATIONS);
+    const phase = turnPhase(budget.iterations, limit);
+    const closed = phase === 'closed' || phase === 'final';
+    const notice = phaseNotice(phase, budget.iterations, limit);
     const compiled = compileContext({
       snapshotId: (deps.newId ?? randomUUID)() as ContextSnapshotId,
       layout: 'cache_aware',
       nowIso,
+      // Evidence gathering closes for the last turns so the budget is never
+      // spent entirely on reads; the tool list shrinks, nothing else changes.
+      ...(closed
+        ? {
+            toolNames:
+              phase === 'final'
+                ? []
+                : TEAM_TOOL_ORDER.filter(
+                    (name) => !OBSERVATION_TOOLS.includes(name),
+                  ),
+          }
+        : {}),
       commonInstructions: COMMON_INSTRUCTIONS,
       roleInstructions: roleText,
       mission: { goal: mission.goal, constraints: mission.constraints },
       task: {
         title: claimed.task.title,
-        question: `${claimed.task.question}\n\nTurn ${budget.iterations} of at most ${Math.min(claimed.task.maxIterations, MAX_LOOP_ITERATIONS)}.`,
+        question: `${claimed.task.question}\n\n${turnNote(budget.iterations, limit)}`,
       },
       runbooks: deps.runbooks.all(),
       receipts: evidence,
@@ -191,7 +258,12 @@ export async function runWorker(
       pageSnapshots: [],
       memories: [],
       invalidations: repair.invalidations,
-      history,
+      history: notice
+        ? [
+            ...history,
+            { role: 'user' as const, content: notice, dependencyVector: [] },
+          ]
+        : history,
       itemCapBytes: 8192,
       readSetVector: unionDependencyVectors([...readSet.values()]),
       inheritedVector: inherited,
@@ -317,6 +389,21 @@ export async function runWorker(
         push({
           error: 'too_many_tool_calls',
           message: `at most ${MAX_TOOL_CALLS_PER_TURN} tool calls per turn; this one did not run`,
+        });
+        continue;
+      }
+      if (phase === 'final') {
+        push({
+          error: 'no_tools',
+          message: 'no tools are available in the final turn; nothing ran',
+        });
+        continue;
+      }
+      if (closed && OBSERVATION_TOOLS.includes(toolCall.name as TeamToolName)) {
+        push({
+          error: 'observation_closed',
+          message:
+            'evidence gathering is closed for the last turns of this task; nothing was read',
         });
         continue;
       }

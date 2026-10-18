@@ -405,6 +405,59 @@ describe('worker loop: explicit failure states', () => {
   });
 });
 
+describe('worker loop: observation reserve', () => {
+  it('closes evidence gathering near the end of the budget and leaves a toolless final turn', async () => {
+    const script = Array.from({ length: 8 }, (_, i) =>
+      observe(`o${i}`, 'checkout.health'),
+    );
+    const { deps, scripted, coordinator } = build(script);
+    const outcome = await runWorker(
+      makeClaimed('investigator', { maxIterations: 8 }),
+      makeHelpers(),
+      deps,
+    );
+    // a model that keeps calling observe_source never reports: budget exhausted
+    expect(outcome).toEqual({ type: 'abort', reason: 'budget_exhausted' });
+    const names = (i: number) => scripted.requests[i].tools.map((t) => t.name);
+    // limit 8 -> reserve 2: turns 1..6 open, turn 6 is the last read, turn 7 closed, turn 8 final
+    expect(names(5)).toHaveLength(9);
+    expect(names(6)).not.toContain('observe_source');
+    expect(names(6)).toContain('delegate_task');
+    expect(names(7)).toEqual([]);
+    expect(JSON.stringify(scripted.requests[7].messages)).toContain(
+      'observation_closed',
+    );
+    expect(coordinator.readSets).toHaveLength(6);
+    const lastMessage = (i: number) =>
+      JSON.stringify(scripted.requests[i].messages.at(-1));
+    expect(lastMessage(5)).toContain('last turn for gathering evidence');
+    expect(lastMessage(6)).toContain('observation is closed');
+    expect(lastMessage(7)).toContain('final turn and no tools');
+    expect(lastMessage(2)).not.toContain('Turn 3 of 8:');
+  });
+
+  it('the notices are transient: they are not replayed in later calls', async () => {
+    const { deps, scripted } = build([
+      observe('o1', 'checkout.health'),
+      observe('o2', 'checkout.health'),
+      observe('o3', 'checkout.health'),
+      observe('o4', 'checkout.health'),
+      observe('o5', 'checkout.health'),
+      observe('o6', 'checkout.health'),
+      result({ content: 'Done.' }),
+    ]);
+    const outcome = await runWorker(
+      makeClaimed('investigator', { maxIterations: 8 }),
+      makeHelpers(),
+      deps,
+    );
+    expect(outcome.type).toBe('output');
+    const last = JSON.stringify(scripted.requests[6].messages);
+    expect(last).toContain('observation is closed');
+    expect(last).not.toContain('last turn for gathering evidence');
+  });
+});
+
 describe('worker loop: untrusted data', () => {
   it('instruction text in a tool result changes neither the system section nor any permission', async () => {
     const injection =
