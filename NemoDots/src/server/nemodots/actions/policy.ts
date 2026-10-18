@@ -102,7 +102,10 @@ export function expectedTargetVersionFrom(
   let best: number | null = null;
   for (const entry of vector)
     if (entry.sourceKey === target)
-      best = best === null ? entry.sourceRevision : Math.max(best, entry.sourceRevision);
+      best =
+        best === null
+          ? entry.sourceRevision
+          : Math.max(best, entry.sourceRevision);
   return best;
 }
 
@@ -267,7 +270,11 @@ export function checkBinding(binding: StoredBinding): PolicyVerdict | null {
       reason: 'payload_invalid',
       detail: 'requiredSources differ from the server-derived set',
     };
-  const missing = missingRequiredSources(action, payload, binding.dependencyVector);
+  const missing = missingRequiredSources(
+    action,
+    payload,
+    binding.dependencyVector,
+  );
   if (missing.length > 0)
     return {
       reason: 'missing_required_source',

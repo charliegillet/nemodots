@@ -40,10 +40,7 @@ import { withTransaction } from '../db/tx.js';
 import { lockConfigRows } from '../sandbox/version-authority.js';
 import { cacheKeyPrefix } from '../sandbox/checkout-cache.js';
 import { decidedEvent, failIntent, lockMissionShared } from './decision.js';
-import {
-  ActionNotFoundError,
-  EffectUnavailableError,
-} from './errors.js';
+import { ActionNotFoundError, EffectUnavailableError } from './errors.js';
 import { parsePayload } from './policy.js';
 import {
   claimAuthorizationWriter,
@@ -157,7 +154,9 @@ export function parseScriptReply(reply: unknown): ScriptOutcome {
     result !== 'already_applied' &&
     result !== 'fence_newer'
   )
-    throw new EffectUnavailableError('the effect script returned an unknown result');
+    throw new EffectUnavailableError(
+      'the effect script returned an unknown result',
+    );
   return {
     result,
     deleted: Number(deleted),
@@ -179,7 +178,10 @@ export async function withinBudget<T>(
       promise,
       new Promise<never>((_, reject) => {
         timer = setTimeout(
-          () => reject(new EffectUnavailableError(`${label} timed out after ${ms} ms`)),
+          () =>
+            reject(
+              new EffectUnavailableError(`${label} timed out after ${ms} ms`),
+            ),
           ms,
         );
       }),
@@ -223,7 +225,8 @@ export async function claimDispatch(
       intent: toIntent(row),
       why,
     });
-    if (row.adapter !== 'redis_cache') return unchanged('not an external effect');
+    if (row.adapter !== 'redis_cache')
+      return unchanged('not an external effect');
     if (row.status !== 'committed') return unchanged(`status is ${row.status}`);
 
     const mission = await lockMissionShared(client, row.missionId);
@@ -342,7 +345,9 @@ interface EffectFacts {
   fenceAfter: number | null;
 }
 
-const effectDto = (facts: EffectFacts): NonNullable<ResultReceipt['externalEffect']> => ({
+const effectDto = (
+  facts: EffectFacts,
+): NonNullable<ResultReceipt['externalEffect']> => ({
   attemptedAt: facts.attemptedAt.toISOString(),
   acknowledgedAt: facts.acknowledgedAt?.toISOString() ?? null,
   scriptResult: facts.scriptResult,
@@ -443,29 +448,314 @@ export async function recordVerified(
   });
 }
 
+export type SettleFailure = 'dispatch_fence_invalid' | 'effect_not_applied';
+
 /** {committed | dispatched | outcome_unknown} -> failed(reason) with a `failed` receipt. */
 export async function recordFailed(
   deps: ActionDeps,
   row: IntentRow,
   from: SettleFrom,
-  reason: 'dispatch_fence_invalid' | 'effect_not_applied',
+  reason: SettleFailure,
   facts: EffectFacts | null,
   detail: string,
+  fence: number | null = null,
 ): Promise<IntentRow | null> {
   const events = deps.events ?? createEventSink();
   return withTransaction(deps.pool, async (client) => {
     const buffer = new EventBuffer(events);
     await claimAuthorizationWriter(client);
-    const failed = await failIntent(
-      client,
-      { id: row.id, status: from, statusVersion: -1 },
-      reason,
-      { sql: '', params: [] },
-    ).catch(() => null);
-    void failed;
-    return null;
-  }).then(async () => {
-    // (replaced below)
-    return null;
+    const updated = await client.query<IntentDbRow>(
+      `UPDATE coordinator.action_intents
+          SET status = 'failed', status_version = status_version + 1,
+              failure_reason = $3, failed_at = clock_timestamp()
+        WHERE id = $1 AND status = $2 AND ($4::bigint IS NULL OR dispatch_fence = $4)
+        RETURNING *`,
+      [row.id, from, reason, fence],
+    );
+    if (updated.rows.length !== 1) return null;
+    await insertResultReceipt(client, {
+      intent: row,
+      outcome: 'failed',
+      externalEffect: facts ? effectDto(facts) : null,
+    });
+    await enqueueOutbox(client, {
+      missionId: row.missionId,
+      topic: 'mission.evaluate',
+      payload: { missionId: row.missionId },
+      dedupeKey: `action:${row.id}:failed`,
+    });
+    buffer.add(row.missionId, {
+      kind: 'action.failed',
+      actionId: row.id,
+      failureReason: reason,
+      detail,
+    });
+    await buffer.flush(client);
+    return mapIntentRow(updated.rows[0]);
   });
 }
+
+/** {committed | dispatched} -> outcome_unknown: the effect may or may not have happened. */
+export async function recordUnknown(
+  deps: ActionDeps,
+  row: IntentRow,
+  from: 'committed' | 'dispatched',
+  facts: EffectFacts,
+  detail: string,
+  fence: number | null = null,
+): Promise<IntentRow | null> {
+  const events = deps.events ?? createEventSink();
+  return withTransaction(deps.pool, async (client) => {
+    const buffer = new EventBuffer(events);
+    await claimAuthorizationWriter(client);
+    const updated = await client.query<IntentDbRow>(
+      `UPDATE coordinator.action_intents
+          SET status = 'outcome_unknown', status_version = status_version + 1
+        WHERE id = $1 AND status = $2 AND ($3::bigint IS NULL OR dispatch_fence = $3)
+        RETURNING *`,
+      [row.id, from, fence],
+    );
+    if (updated.rows.length !== 1) return null;
+    await insertResultReceipt(client, {
+      intent: row,
+      outcome: 'outcome_unknown',
+      externalEffect: effectDto(facts),
+    });
+    buffer.add(row.missionId, {
+      kind: 'action.outcome_unknown',
+      actionId: row.id,
+      detail,
+    });
+    await buffer.flush(client);
+    return mapIntentRow(updated.rows[0]);
+  });
+}
+
+// --- the dispatch ----------------------------------------------------------------------------
+
+export type DispatchDisposition =
+  /** the effect is applied and read back */
+  | 'verified'
+  /** fence_newer or a refused claim: the intent failed */
+  | 'failed'
+  | 'outcome_unknown'
+  /** nothing to dispatch (not a committed flush) */
+  | 'unchanged';
+
+export interface DispatchResult {
+  intent: ActionIntent;
+  scriptResult: ScriptResult | null;
+  deletedCount: number | null;
+  disposition: DispatchDisposition;
+}
+
+const errorText = (error: unknown) =>
+  (error instanceof Error ? error.message : String(error)).slice(0, 300);
+
+async function reload(
+  deps: ActionDeps,
+  actionId: string,
+): Promise<ActionIntent> {
+  const row = await loadIntent(deps.pool, actionId);
+  if (!row) throw new ActionNotFoundError(actionId);
+  return toIntent(row);
+}
+
+export async function dispatchIntentDetailed(
+  deps: ActionDeps,
+  actionId: string,
+  dispatcher: string,
+): Promise<DispatchResult> {
+  const prelim = await loadIntent(deps.pool, actionId);
+  if (!prelim) throw new ActionNotFoundError(actionId);
+  if (prelim.adapter !== 'redis_cache' || prelim.status !== 'committed')
+    return {
+      intent: toIntent(prelim),
+      scriptResult: null,
+      deletedCount: null,
+      disposition: 'unchanged',
+    };
+  const redis = requireRedis(deps);
+  await barrier('after_preliminary_read', { actionId, stage: 'dispatch' });
+
+  const claim = await claimDispatch(deps, actionId, dispatcher);
+  if (!claim.claimed)
+    return {
+      intent: claim.intent,
+      scriptResult: null,
+      deletedCount: null,
+      disposition: claim.intent.status === 'failed' ? 'failed' : 'unchanged',
+    };
+  const { row, fence } = claim;
+  const payload = parsePayload(row.action, row.payload)!
+    .payload as FlushCachePayload;
+  const prefix = prefixOf(deps);
+  const committedVersion =
+    row.committedTargetVersion ?? row.expectedTargetVersion;
+
+  // The effect: Redis only, no PostgreSQL transaction is open.
+  const attemptedAt = new Date();
+  let outcome: ScriptOutcome;
+  try {
+    outcome = parseScriptReply(
+      await withinBudget(
+        redis.eval(EFFECT_SCRIPT, {
+          keys: [effectKey(prefix, row.id), fenceKey(prefix)],
+          arguments: [
+            String(fence),
+            String(committedVersion),
+            `${escapeGlob(cacheKeyPrefix(prefix, payload.namespace))}*`,
+            String(deps.markerHorizonSeconds ?? DEFAULT_MARKER_HORIZON_SECONDS),
+          ],
+        }),
+        redisBudget(deps),
+        'the effect script',
+      ),
+    );
+  } catch (error) {
+    if (isSimulatedCrash(error)) throw error;
+    // The call threw or timed out: the script is atomic, so it either ran
+    // completely or not at all, and the answer was lost. Never guess.
+    const updated = await recordUnknown(
+      deps,
+      row,
+      'committed',
+      {
+        attemptedAt,
+        acknowledgedAt: null,
+        scriptResult: null,
+        deletedCount: null,
+        markerPresent: null,
+        fenceBefore: null,
+        fenceAfter: null,
+      },
+      `the effect call failed: ${errorText(error)}`,
+      fence,
+    );
+    return {
+      intent: updated ? toIntent(updated) : await reload(deps, actionId),
+      scriptResult: null,
+      deletedCount: null,
+      disposition: 'outcome_unknown',
+    };
+  }
+  const acknowledgedAt = new Date();
+  await barrier('after_effect_before_record', { actionId, stage: 'dispatch' });
+
+  const prior =
+    outcome.result === 'already_applied' ? parseMarker(outcome.marker) : null;
+  const effective: 'applied' | 'fence_newer' | 'not_applied' | 'unknown' =
+    outcome.result === 'applied'
+      ? 'applied'
+      : outcome.result === 'fence_newer'
+        ? 'fence_newer'
+        : prior?.kind === 'applied'
+          ? 'applied'
+          : prior?.kind === 'fence_newer'
+            ? 'fence_newer'
+            : prior?.kind === 'tombstone'
+              ? 'not_applied'
+              : 'unknown';
+  const facts: EffectFacts = {
+    attemptedAt,
+    acknowledgedAt,
+    scriptResult: effective === 'fence_newer' ? 'fence_newer' : outcome.result,
+    deletedCount: outcome.result === 'already_applied' ? 0 : outcome.deleted,
+    markerPresent: true,
+    fenceBefore: outcome.fenceBefore,
+    fenceAfter: outcome.fenceAfter,
+  };
+  const done = async (
+    updated: IntentRow | null,
+    disposition: DispatchDisposition,
+  ): Promise<DispatchResult> => ({
+    intent: updated ? toIntent(updated) : await reload(deps, actionId),
+    scriptResult: facts.scriptResult,
+    deletedCount: facts.deletedCount,
+    disposition: updated ? disposition : 'unchanged',
+  });
+
+  if (effective === 'fence_newer')
+    return done(
+      await recordFailed(
+        deps,
+        row,
+        'committed',
+        'dispatch_fence_invalid',
+        facts,
+        'a newer flush of the cache namespace was already applied; nothing was deleted',
+        fence,
+      ),
+      'failed',
+    );
+  if (effective === 'not_applied')
+    return done(
+      await recordFailed(
+        deps,
+        row,
+        'committed',
+        'effect_not_applied',
+        facts,
+        'reconcile fenced this action as not applied; nothing was deleted',
+        fence,
+      ),
+      'failed',
+    );
+  if (effective === 'unknown')
+    return done(
+      await recordUnknown(
+        deps,
+        row,
+        'committed',
+        facts,
+        'the effect marker holds an unreadable value',
+        fence,
+      ),
+      'outcome_unknown',
+    );
+
+  // applied (this call, or an earlier one whose record was lost).
+  if (!(await recordDispatched(deps, row, fence, facts)))
+    return done(null, 'unchanged');
+  let readback: MarkerState | null = null;
+  try {
+    readback = parseMarker(
+      await withinBudget(
+        redis.get(effectKey(prefix, row.id)),
+        redisBudget(deps),
+        'the marker read-back',
+      ),
+    );
+  } catch (error) {
+    if (isSimulatedCrash(error)) throw error;
+  }
+  const dispatchedRow = {
+    ...row,
+    committedTargetVersion: row.committedTargetVersion,
+  };
+  if (readback?.kind === 'applied')
+    return done(
+      await recordVerified(deps, dispatchedRow, 'dispatched', facts),
+      'verified',
+    );
+  return done(
+    await recordUnknown(
+      deps,
+      row,
+      'dispatched',
+      { ...facts, markerPresent: readback !== null },
+      'the effect marker could not be read back',
+    ),
+    'outcome_unknown',
+  );
+}
+
+export async function dispatchIntent(
+  deps: ActionDeps,
+  actionId: string,
+  dispatcher: string,
+): Promise<ActionIntent> {
+  return (await dispatchIntentDetailed(deps, actionId, dispatcher)).intent;
+}
+
+export type { EffectFacts };

@@ -18,7 +18,6 @@ import {
   type ActionId,
   type MissionId,
   type PgClient,
-  type SourceKey,
   type SourceReaderPort,
 } from '../../../../src/server/nemodots/contracts/index.js';
 import {
@@ -31,7 +30,6 @@ import { recordReadSet } from '../../../../src/server/nemodots/ledger/index.js';
 import { createSourceReaders } from '../../../../src/server/nemodots/sandbox/readers.js';
 import {
   advanceConfig,
-  configValueDigest,
   type ConfigScalar,
 } from '../../../../src/server/nemodots/sandbox/version-authority.js';
 import {
@@ -67,13 +65,14 @@ export async function until<T>(
   for (;;) {
     const value = await probe();
     if (value) return value;
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
+    if (Date.now() > deadline)
+      throw new Error(`timed out waiting for ${label}`);
     await sleep(stepMs);
   }
 }
 
 /** IntentReader (the coordinator's read side) over the real action_intents table. */
-function sqlIntentReader(pool: pg.Pool): IntentReader {
+function sqlIntentReader(): IntentReader {
   return {
     async find(client: PgClient, actionId: ActionId) {
       const { rows } = await client.query<{
@@ -104,7 +103,6 @@ function sqlIntentReader(pool: pg.Pool): IntentReader {
       return rows as never;
     },
     async committedEffects(client: PgClient, missionId: MissionId) {
-      void pool;
       const { rows } = await client.query<{ id: ActionId }>(
         `SELECT id FROM coordinator.action_intents
           WHERE mission_id = $1 AND status IN ('committed', 'dispatched', 'verified')`,
@@ -157,7 +155,7 @@ export async function withWatcherEnv<T>(
       supportValidator: new StubValidator(),
       ledger: noopLedgerWriter,
       async recordOrphanedAttempt() {},
-      intents: sqlIntentReader(app),
+      intents: sqlIntentReader(),
       actions: {
         async admit() {
           return {} as never;
@@ -475,7 +473,14 @@ export interface MissionAttempt {
 
 export interface FixtureMission {
   missionId: MissionId;
+  /** The planner task (a scheduling artifact: never evidence-affected). */
+  plannerTaskId: string;
+  /** One entry per `reads` element: a running attempt of its own task. */
   attempts: MissionAttempt[];
+  /** Unclaimed tasks added so the plan has the two tasks a plan needs. */
+  fillerTaskIds: string[];
+  /** Every task of the mission, sorted (what \`preserved\` is computed from). */
+  allTaskIds: string[];
 }
 
 /**
@@ -490,12 +495,14 @@ export async function missionReading(
   role: 'investigator' | 'cache_specialist' = 'investigator',
 ): Promise<FixtureMission> {
   const harness = { coordinator: env.coordinator } as unknown as Harness;
-  const planned = await plannedMission(
-    harness,
-    reads.map(() => ({ role })),
-  );
+  const planned = await plannedMission(harness, [
+    ...reads.map(() => ({ role })),
+    ...Array.from({ length: Math.max(0, 2 - reads.length) }, () => ({
+      role: 'verifier' as const,
+    })),
+  ]);
   const attempts: MissionAttempt[] = [];
-  for (const [i, taskId] of planned.taskIds.entries()) {
+  for (const [i, taskId] of planned.taskIds.slice(0, reads.length).entries()) {
     const claimed = await claimStart(harness, {
       taskId,
       missionId: planned.missionId,
@@ -536,7 +543,14 @@ export async function missionReading(
       context: claimed.context,
     });
   }
-  return { missionId: planned.missionId, attempts };
+  const fillerTaskIds = planned.taskIds.slice(reads.length);
+  return {
+    missionId: planned.missionId,
+    plannerTaskId: planned.plannerContext.taskId,
+    attempts,
+    fillerTaskIds,
+    allTaskIds: [planned.plannerContext.taskId, ...planned.taskIds].sort(),
+  };
 }
 
 export async function attemptStatus(
@@ -655,5 +669,3 @@ export async function intentStatus(
   );
   return { status: rows[0].status, failureReason: rows[0].failure_reason };
 }
-
-export { configValueDigest, type SourceKey };

@@ -18,8 +18,11 @@ export interface RedisEffectClient {
   set(
     key: string,
     value: string,
-    options?: { NX?: boolean; EX?: number },
-  ): Promise<string | null>;
+    options?: {
+      condition?: 'NX';
+      expiration?: { type: 'EX'; value: number };
+    },
+  ): Promise<unknown>;
 }
 
 export interface ActionDeps {

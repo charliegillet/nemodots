@@ -144,7 +144,7 @@ export async function evaluatePredicates(
 
   // The supporting vector, examined in full (also when the target already
   // failed, so the Authorization shows every receipt).
-  let checkedVector: CheckedVector = [];
+  let checkedVector: CheckedVector;
   let support: SupportError | null = null;
   try {
     checkedVector = await assertCurrent(
@@ -193,7 +193,6 @@ export async function evaluatePredicates(
         rest,
       );
   }
-  if (support)
-    return fail(support.reason, support.detail, rest);
+  if (support) return fail(support.reason, support.detail, rest);
   return { ok: true, reason: null, detail: null, ...rest };
 }

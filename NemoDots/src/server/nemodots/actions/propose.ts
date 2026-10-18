@@ -24,12 +24,10 @@
 // InvalidProposalError, nothing written. A well-typed proposal the policy
 // refuses is stored as a blocked intent with an Authorization, so the model
 // sees the reason and the decision is auditable.
-import { randomUUID } from 'node:crypto';
 import {
   actionTargetSourceKey,
   AttemptContextSchema,
   DependencyVectorSchema,
-  INTENT_TTL_MS,
   ModelCallIdSchema,
   ProposeInputSchema,
   type ActionIntent,
@@ -45,13 +43,7 @@ import {
 } from '../contracts/index.js';
 import { EventBuffer, createEventSink } from '../coordinator/events.js';
 import { lockFencedAttempt } from '../coordinator/fence.js';
-import { enqueueOutbox } from '../coordinator/outbox.js';
-import {
-  addEdges,
-  getReceiptRows,
-  linkPublication,
-  lockReceiptsShared,
-} from '../ledger/index.js';
+import { getReceiptRows } from '../ledger/index.js';
 import { withTransaction } from '../db/tx.js';
 import { InvalidProposalError } from './errors.js';
 import {
@@ -66,16 +58,13 @@ import {
   payloadHashOf,
   POLICY_VERSION,
   requiredSourcesFor,
-  type ActionPayload,
 } from './policy.js';
 import {
   claimAuthorizationWriter,
-  insertAuthorization,
   loadIntentsByKey,
-  mapIntentRow,
   toIntent,
-  type IntentDbRow,
 } from './rows.js';
+import { storeIntent } from './store.js';
 import type { ActionDeps } from './types.js';
 
 export type ProposeContext = AttemptContext & {
@@ -120,7 +109,9 @@ function parseProposal(input: unknown): ProposeInput {
   if (!parsed.success)
     throw new InvalidProposalError(
       'the proposal is not a valid propose_action input',
-      parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`),
+      parsed.error.issues.map(
+        (issue) => `${issue.path.join('.')}: ${issue.message}`,
+      ),
     );
   return parsed.data;
 }
@@ -241,7 +232,7 @@ export async function proposeIntent(
     if (same) return { stored: same, created: false as const };
 
     // Static policy: the server decides, the model's claims do not count.
-    let block: { reason: BlockReason; detail: string } | null = null;
+    let block: { reason: BlockReason; detail: string } | null;
     let binding = 'new' as 'new' | 'conflict';
     if (known.length > 0) {
       block = {
@@ -275,142 +266,26 @@ export async function proposeIntent(
       });
     }
 
-    // 5. the intent row.
-    const id = randomUUID();
-    const status = block ? 'blocked' : 'proposed';
-    const inserted = await client.query<IntentDbRow>(
-      `INSERT INTO coordinator.action_intents
-         (id, mission_id, task_id, attempt_id, model_call_id, tool_call_id,
-          author_fencing_token, generation, action, adapter, payload, payload_hash,
-          target_resource, target_source_key, target_environment, actor_capability,
-          dependency_vector, required_sources, expected_target_version, policy_version,
-          idempotency_key, expires_at, rationale, status, block_reason, block_detail)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12,
-               'checkout', $13, $14, $15, $16::jsonb, $17, $18, $19, $20,
-               clock_timestamp() + $21 * interval '1 millisecond', $22, $23, $24, $25)
-       RETURNING *`,
-      [
-        id,
-        context.missionId,
-        context.taskId,
-        context.attemptId,
-        ctx.modelCallId,
-        ctx.toolCallId,
-        context.fencingToken,
-        mission.generation,
-        action,
-        adapterFor(action),
-        JSON.stringify(payload),
-        payloadHash,
-        targetSourceKey,
+    // 5. the intent row, its authorization or its edges, events and outbox.
+    const stored = await storeIntent(client, buffer, {
+      context,
+      toolCallId: ctx.toolCallId,
+      modelCallId: ctx.modelCallId,
+      mission: {
+        generation: mission.generation,
         environment,
-        capability,
-        JSON.stringify(vector),
-        requiredSourcesFor(action, payload),
-        expectedTargetVersion,
-        POLICY_VERSION,
-        key,
-        INTENT_TTL_MS,
-        proposal.rationale,
-        status,
-        block?.reason ?? null,
-        block?.detail ?? null,
-      ],
-    );
-    const stored = mapIntentRow(inserted.rows[0]);
-    const proposedEvent = {
-      kind: 'action.proposed' as const,
-      actionId: stored.id,
-      taskId: stored.taskId,
-      attemptId: stored.attemptId,
-      action,
-      target: {
-        resource: 'checkout' as const,
-        sourceKey: toIntent(stored).target.sourceKey,
-        environment,
+        admissionMinAgeMs: mission.admission_min_age_ms,
       },
-      payloadHash,
+      action,
+      payload,
+      vector,
       expectedTargetVersion,
-      dependencyVector: vector,
-      requiredSources: toIntent(stored).requiredSources,
-      admissionNotBefore: new Date(
-        stored.proposedAt.getTime() + mission.admission_min_age_ms,
-      ).toISOString(),
-    };
-    buffer.add(context.missionId, proposedEvent);
-
-    if (block) {
-      const live = await client.query<{ version: string }>(
-        'SELECT version FROM checkout.config_entries WHERE key = $1',
-        [targetSourceKey.slice('checkout.config/'.length)],
-      );
-      const authorization = await insertAuthorization(client, {
-        actionId: stored.id,
-        stage: 'admission',
-        decision: 'blocked',
-        blockReason: block.reason,
-        blockDetail: block.detail,
-        checkedVector: [],
-        targetVersion: {
-          expected: expectedTargetVersion,
-          live: live.rows[0] ? Number(live.rows[0].version) : 0,
-        },
-        authorFence: { token: context.fencingToken, valid: true },
-        dispatchFence: null,
-        idempotencyBinding: binding,
-      });
-      buffer.add(context.missionId, {
-        kind: 'action.decided',
-        actionId: stored.id,
-        stage: authorization.stage,
-        decision: authorization.decision,
-        blockReason: block.reason,
-        blockDetail: block.detail,
-        checkedVector: authorization.checkedVector,
-        targetVersion: authorization.targetVersion,
-        dispatchFence: null,
-      });
-    } else {
-      // Evidence edges: the closure of a superseded receipt reaches the intent.
-      // The receipt rows are share-locked first (finding C13): a supersession
-      // either waits for this transaction and then sees the edges, or ran
-      // first and admission refuses the superseded receipt.
-      await lockReceiptsShared(
-        client,
-        vector.map((entry) => entry.receiptId),
-      );
-      const node = {
-        kind: 'action_intent' as const,
-        id: stored.id,
-        missionId: context.missionId,
-        taskId: context.taskId,
-      };
-      await linkPublication(client, {
-        missionId: context.missionId,
-        taskId: context.taskId,
-        attemptId: context.attemptId,
-        modelCallIds: [ctx.modelCallId],
-        actionId: stored.id,
-      });
-      await addEdges(
-        client,
-        vector.map((entry) => ({
-          kind: 'evidence' as const,
-          from: { kind: 'receipt' as const, id: entry.receiptId },
-          to: node,
-        })),
-      );
-      await enqueueOutbox(client, {
-        missionId: context.missionId,
-        topic: 'action.proposed',
-        payload: {
-          actionId: stored.id,
-          missionId: context.missionId,
-          proposedAt: stored.proposedAt.toISOString(),
-        },
-        dedupeKey: `action.proposed:${stored.id}`,
-      });
-    }
+      payloadHash,
+      idempotencyKey: key,
+      rationale: proposal.rationale,
+      block,
+      binding,
+    });
     await buffer.flush(client);
     return { stored, created: true as const };
   });

@@ -43,9 +43,7 @@ export class InvalidProposalError extends ActionError {
 }
 
 export type DispatchFenceReason =
-  | 'not_admitted'
-  | 'fence_mismatch'
-  | 'lease_expired';
+  'not_admitted' | 'fence_mismatch' | 'lease_expired';
 
 /**
  * The caller is not the current dispatcher of an admitted intent: its fence is

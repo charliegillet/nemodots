@@ -32,7 +32,10 @@ import type {
 import { EventBuffer, createEventSink } from '../coordinator/events.js';
 import { enqueueOutbox } from '../coordinator/outbox.js';
 import { withTransaction } from '../db/tx.js';
-import { ConfigVersionError, advanceConfig } from '../sandbox/version-authority.js';
+import {
+  ConfigVersionError,
+  advanceConfig,
+} from '../sandbox/version-authority.js';
 import { blockIntent, decidedEvent, lockMissionShared } from './decision.js';
 import { ActionNotFoundError, DispatchFenceError } from './errors.js';
 import { evaluatePredicates } from './predicates.js';
@@ -107,7 +110,11 @@ export async function commitIntentDetailed(
         row.status === 'failed' ||
         row.status === 'cancelled'
       )
-        return { intent: toIntent(row), receipt: null, disposition: 'terminal' };
+        return {
+          intent: toIntent(row),
+          receipt: null,
+          disposition: 'terminal',
+        };
       if (row.status !== 'admitted')
         throw new DispatchFenceError(actionId, 'not_admitted', row.status);
       if (row.dispatchFence !== dispatchFence)
@@ -175,7 +182,10 @@ export async function commitIntentDetailed(
           // refuses, the commit is blocked rather than half done (the JS
           // error precedes every write of advanceConfig).
           if (error instanceof ConfigVersionError)
-            return block('stale_version', `the authority refused: ${error.code}`);
+            return block(
+              'stale_version',
+              `the authority refused: ${error.code}`,
+            );
           throw error;
         }
       }
@@ -240,7 +250,10 @@ export async function commitIntentDetailed(
   );
 
   if (result.disposition === 'committed')
-    await barrier('after_commit_before_dispatch', { actionId, stage: 'commit' });
+    await barrier('after_commit_before_dispatch', {
+      actionId,
+      stage: 'commit',
+    });
   return result;
 }
 
